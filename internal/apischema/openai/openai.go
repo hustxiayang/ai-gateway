@@ -552,6 +552,115 @@ type ChatCompletionRequest struct {
 	User string `json:"user,omitempty"`
 }
 
+// CompletionRequest represents a request structure for completion API.
+type CompletionRequest struct {
+	// Model: ID of the model to use
+	// Docs: https://platform.openai.com/docs/api-reference/completions/create#completions-create-model
+	Model string `json:"model"`
+
+	//The prompt(s) to generate completions for, encoded as a string, array of strings, array of tokens, or array of token arrays.
+	Prompt StringOrArray `json:"prompt"`
+
+	// FrequencyPenalty: Number between -2.0 and 2.0
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-frequency_penalty
+	FrequencyPenalty *float32 `json:"frequency_penalty,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// LogitBias Modify the likelihood of specified tokens appearing in the completion.
+	// It must be a token id string (specified by their token ID in the tokenizer), not a word string.
+	// incorrect: `"logit_bias":{"You": 6}`, correct: `"logit_bias":{"1639": 6}`
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-logit_bias
+	LogitBias map[string]int `json:"logit_bias,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// LogProbs indicates whether to return log probabilities of the output tokens or not.
+	// If true, returns the log probabilities of each output token returned in the content of message.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-logprobs
+	LogProbs *bool `json:"logprobs,omitempty"`
+
+	// TopLogProbs is an integer between 0 and 5 specifying the number of most likely tokens to return at each
+	// token position, each with an associated log probability.
+	// logprobs must be set to true if this parameter is used.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-top_logprobs
+	TopLogProbs *int `json:"top_logprobs,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// MaxTokens The maximum number of tokens that can be generated in the chat completion.
+	// This value can be used to control costs for text generated via API.
+	// This value is now deprecated in favor of max_completion_tokens, and is not compatible with o1 series models.
+	// refs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-max_tokens
+	MaxTokens *int64 `json:"max_tokens,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// MaxCompletionTokens is an Optional integer
+	// An upper bound for the number of tokens that can be generated for a completion, including visible output tokens and reasoning tokens.
+	// refs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-max_completion_tokens
+	MaxCompletionTokens *int64 `json:"max_completion_tokens,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// N: LLM Gateway does not support multiple completions.
+	// The only accepted value is 1.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-n
+	N *int `json:"n,omitempty"`
+
+	// PresencePenalty Positive values penalize new tokens based on whether they appear in the text so far,
+	// increasing the model's likelihood to talk about new topics.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-presence_penalty
+	PresencePenalty *float32 `json:"presence_penalty,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// Reasoning
+	// o-series models only
+	// refs: https://platform.openai.com/docs/api-reference/responses/create#responses-create-reasoning
+	Reasoning *Reasoning `json:"reasoning,omitempty"`
+
+	// ResponseFormat is only for GPT models.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-response_format
+	ResponseFormat *ChatCompletionResponseFormat `json:"response_format,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// Seed: This feature is in Beta. If specified, our system will make a best effort to
+	// sample deterministically, such that repeated requests with the same `seed` and
+	// parameters should return the same result. Determinism is not guaranteed, and you
+	// should refer to the `system_fingerprint` response parameter to monitor changes
+	// in the backend.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-seed
+	Seed *int `json:"seed,omitempty"`
+
+	// Stop string / array / null Defaults to null
+	// Up to 4 sequences where the API will stop generating further tokens.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-stop
+	Stop interface{} `json:"stop,omitempty"`
+
+	// Stream: If set, partial message deltas will be sent, like in ChatGPT.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+	Stream bool `json:"stream,omitempty"`
+
+	// StreamOptions for streaming response. Only set this when you set stream: true.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream_options
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// Temperature What sampling temperature to use, between 0 and 2.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-temperature
+	Temperature *float64 `json:"temperature,omitempty"`
+
+	// TopP An alternative to sampling with temperature, called nucleus sampling,
+	// where the model considers the results of the tokens with top_p probability mass.
+	// So 0.1 means only the tokens comprising the top 10% probability mass are considered.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-top_p
+	TopP *float64 `json:"top_p,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// Tools provide a list of tool definitions to be used by the LLM.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-response_format
+	Tools []Tool `json:"tools,omitempty"`
+
+	// ToolChoice specifies a specific tool to be used by name (given in the tool definition),
+	// or use "auto" to auto select the most appropriate.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-tool_choice
+	ToolChoice any `json:"tool_choice,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// ParallelToolCalls enables multiple tools to be returned by the model.
+	// Docs: https://platform.openai.com/docs/guides/function-calling/parallel-function-calling
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"` //nolint:tagliatelle //follow openai api
+
+	// User: A unique identifier representing your end-user, which can help OpenAI to monitor and detect abuse.
+	// Docs: https://platform.openai.com/docs/api-reference/chat/create#chat-create-user
+	User string `json:"user,omitempty"`
+}
+
 type StreamOptions struct {
 	// If set, an additional chunk will be streamed before the data: [DONE] message.
 	// The usage field on this chunk shows the token usage statistics for the entire request,
