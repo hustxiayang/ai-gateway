@@ -19,6 +19,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
+
+	"github.com/openai/openai-go/v2/packages/param"
 )
 
 // Chat message role defined by the OpenAI API.
@@ -1324,30 +1326,18 @@ type AnthropicVendorFields struct {
 	Thinking *anthropic.ThinkingConfigParamUnion `json:"thinking,omitzero"`
 }
 
+type vLLMEmbeddingVendorFields struct {
+	AddSpecialTokens param.Opt[bool] `json:"add_special_tokens,omitzero"`
+	//If true (the default), special tokens (e.g. BOS) will be added to the prompt
 
-type vLLMEmbeddingVendorFields struct{
-	add_special_tokens: bool = Field(
-        default=True,
-        description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
-    )
-    request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
-    )
-    normalize: Optional[bool] = None
+	Priority param.Opt[int64] `json:"priority,omitzero"`
+	// The priority of the request (lower means earlier handling
+	// default: 0). Any priority other than 0 will raise an error
+	// if the served model does not use priority scheduling
 
+	RequestId param.Opt[string] `json:"request_id,omitzero"`
+	// The request_id related to this request. If the caller does  not set it, a random_uuid will be generated. This id is used "
+	// through out the inference process and return in response
 
-
+	Normalize param.Opt[bool] `json:"normalize,omitzero"`
 }
