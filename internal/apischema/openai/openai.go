@@ -479,7 +479,6 @@ const (
 )
 
 // Only one field can be non-empty.
-// TODO: use omitempty or omitzero?
 type ChatCompletionResponseFormatUnion struct {
 	OfText       *ChatCompletionResponseFormatTextParam       `json:",omitempty,inline"`
 	OfJSONSchema *ChatCompletionResponseFormatJSONSchema      `json:",omitempty,inline"`
