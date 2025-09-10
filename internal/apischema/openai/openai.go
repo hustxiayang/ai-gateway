@@ -143,7 +143,7 @@ type ChatCompletionContentPartUserUnionParam struct {
 }
 
 func (c *ChatCompletionContentPartUserUnionParam) UnmarshalJSON(data []byte) error {
-	typeResult := gjson.Get(string(data), "type")
+	typeResult := gjson.GetBytes(data, "type")
 	if !typeResult.Exists() {
 		return errors.New("chat content does not have type")
 	}
@@ -290,7 +290,7 @@ type ChatCompletionMessageParamUnion struct {
 }
 
 func (c *ChatCompletionMessageParamUnion) UnmarshalJSON(data []byte) error {
-	roleResult := gjson.Get(string(data), "role")
+	roleResult := gjson.GetBytes(data, "role")
 	if !roleResult.Exists() {
 		return errors.New("chat message does not have role")
 	}
@@ -541,7 +541,7 @@ func (c ChatCompletionResponseFormatUnion) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements the json.Unmarshaler interface for ChatCompletionResponseFormatUnion.
 func (c *ChatCompletionResponseFormatUnion) UnmarshalJSON(data []byte) error {
-	typeResult := gjson.Get(string(data), "type")
+	typeResult := gjson.GetBytes(data, "type")
 	if !typeResult.Exists() {
 		return errors.New("response format does not have type")
 	}
