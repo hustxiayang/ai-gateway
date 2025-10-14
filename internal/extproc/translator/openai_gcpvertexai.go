@@ -328,6 +328,20 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) applyVendorSpecificField
 	if gcpVendorFields.SafetySettings != nil {
 		gcr.SafetySettings = gcpVendorFields.SafetySettings
 	}
+	if gcpVendorFields.GuidedChoice != nil {
+		if gcr.GenerationConfig == nil {
+			gcr.GenerationConfig = &genai.GenerationConfig{}
+		}
+		gcr.GenerationConfig.ResponseMIMEType = mimeTypeApplicationJSON
+		gcr.GenerationConfig.ResponseSchema = &genai.Schema{Type: "STRING", Format: "enum", Enum: gcpVendorFields.GuidedChoice}
+	}
+	if gcpVendorFields.GuidedRegex != "" {
+		if gcr.GenerationConfig == nil {
+			gcr.GenerationConfig = &genai.GenerationConfig{}
+		}
+		gcr.GenerationConfig.ResponseMIMEType = mimeTypeApplicationJSON
+		gcr.GenerationConfig.ResponseSchema = &genai.Schema{Type: "STRING", Pattern: gcpVendorFields.GuidedRegex}
+	}
 }
 
 func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiResponseToOpenAIMessage(gcr genai.GenerateContentResponse, responseModel string) (*openai.ChatCompletionResponse, error) {
