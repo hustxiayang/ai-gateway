@@ -1542,6 +1542,12 @@ type GCPVertexAIVendorFields struct {
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
 	SafetySettings []*genai.SafetySetting `json:"safetySettings,omitzero"`
+
+	// GuidedChoice: The output will be exactly one of the choices.
+	GuidedChoice []string `json:"guided_choice,omitzero"`
+
+	// GuidedRegex: the output will follow the regex pattern.
+	GuidedRegex string `json:"guided_regex,omitzero"`
 }
 
 // GCPVertexAIGenerationConfig represents Gemini generation configuration options.
