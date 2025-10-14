@@ -700,9 +700,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 						},
 					},
 				},
-				GCPVertexAIVendorFields: &openai.GCPVertexAIVendorFields{
-					GuidedChoice: []string{"Positive", "Negative"},
-				},
+				GuidedChoice: []string{"Positive", "Negative"},
 			},
 			onRetry:   false,
 			wantError: false,

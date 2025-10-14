@@ -424,6 +424,20 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest) 
 		}
 	}
 
+	if openAIReq.GuidedChoice != nil {
+		gc.ResponseMIMEType = mimeTypeApplicationJSON
+		gc.ResponseSchema = &genai.Schema{Type: "STRING", Format: "enum", Enum: openAIReq.GuidedChoice}
+	}
+	if openAIReq.GuidedRegex != "" {
+		gc.ResponseMIMEType = mimeTypeApplicationJSON
+		gc.ResponseSchema = &genai.Schema{Type: "STRING", Pattern: openAIReq.GuidedRegex}
+	}
+	// TODO: fix it
+	if openAIReq.GuidedJson != "" {
+		gc.ResponseMIMEType = mimeTypeApplicationJSON
+		gc.ResponseSchema = &genai.Schema{Type: "STRING", Pattern: openAIReq.GuidedRegex}
+	}
+
 	if openAIReq.N != nil {
 		gc.CandidateCount = int32(*openAIReq.N) // nolint:gosec
 	}
