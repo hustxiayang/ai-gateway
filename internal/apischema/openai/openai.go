@@ -979,8 +979,8 @@ type ChatCompletionRequest struct {
 	// GuidedRegex: The output will follow the regex pattern.
 	GuidedRegex string `json:"guided_regex,omitzero"`
 
-	// GuidedJson: The output will follow the JSON schema.
-	GuidedJson any `json:"guided_json,omitzero"`
+	// GuidedJSON: The output will follow the JSON schema.
+	GuidedJSON json.RawMessage `json:"guided_json,omitzero"`
 }
 
 type StreamOptions struct {

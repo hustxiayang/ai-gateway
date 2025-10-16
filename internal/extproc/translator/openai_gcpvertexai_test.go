@@ -243,13 +243,12 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
   "generation_config": {
     "maxOutputTokens": 1024,
     "temperature": 0.7,
-    "responseMimeType": "application/json",
+    "responseMimeType": "text/x.enum",
     "responseSchema": {
       "enum": [
         "Positive",
         "Negative"
       ],
-      "format": "enum",
       "type": "STRING"
     }
   }
@@ -715,7 +714,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 					{
 						Header: &corev3.HeaderValue{
 							Key:      "Content-Length",
-							RawValue: []byte("435"),
+							RawValue: []byte("414"),
 						},
 					},
 				},
@@ -757,9 +756,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 						},
 					},
 				},
-				GCPVertexAIVendorFields: &openai.GCPVertexAIVendorFields{
-					GuidedRegex: "\\w+@\\w+\\.com\\n",
-				},
+				GuidedRegex: "\\w+@\\w+\\.com\\n",
 			},
 			onRetry:   false,
 			wantError: false,
