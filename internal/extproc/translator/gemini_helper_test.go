@@ -721,6 +721,7 @@ func TestUserMsgToGeminiParts(t *testing.T) {
 }
 
 func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
+	trueBool := true
 	tests := []struct {
 		name                     string
 		input                    *openai.ChatCompletionRequest
@@ -803,6 +804,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "json schema (map)",
 			input: &openai.ChatCompletionRequest{
+				Model: "gemini-2.5",
 				ResponseFormat: &openai.ChatCompletionResponseFormatUnion{
 					OfJSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
 						Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
@@ -821,6 +823,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "json schema (string)",
 			input: &openai.ChatCompletionRequest{
+				Model: "gemini-2.5",
 				ResponseFormat: &openai.ChatCompletionResponseFormatUnion{
 					OfJSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
 						Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
@@ -839,6 +842,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "json schema (invalid string)",
 			input: &openai.ChatCompletionRequest{
+				Model: "gemini-2.5",
 				ResponseFormat: &openai.ChatCompletionResponseFormatUnion{
 					OfJSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
 						Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
@@ -945,20 +949,21 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
-				ResponseJsonSchema: map[string]any{
-					"properties": map[string]any{
-						"final_answer": map[string]any{"type": string("string")},
-						"steps": map[string]any{
-							"items": map[string]any{
-								"properties": map[string]any{"explanation": map[string]any{"type": string("string")}, "output": map[string]any{"type": string("string")}},
-								"required":   []any{"explanation", "output"},
-								"type":       string("object"),
+				ResponseSchema: &genai.Schema{
+					Properties: map[string]*genai.Schema{
+						"final_answer": {Type: "string"},
+						"steps": {
+							Items: &genai.Schema{
+								Properties: map[string]*genai.Schema{
+									"explanation": {Type: "string"},
+									"output":      {Type: "string"},
+								},
+								Type: "object",
 							},
-							"type": string("array"),
+							Type: "array",
 						},
 					},
-					"required": []any{string("steps"), string("final_answer")},
-					"type":     string("object"),
+					Type: "object",
 				},
 			},
 		},
@@ -1051,49 +1056,36 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
-				ResponseJsonSchema: map[string]any{
-					"properties": map[string]any{
-						"item": map[string]any{
-							"anyOf": []any{
-								map[string]any{
-									"description": string("The user object to insert into the database"),
-									"properties": map[string]any{
-										"age":  map[string]any{"description": string("The age of the user"), "type": string("number")},
-										"name": map[string]any{"description": string("The name of the user"), "type": string("string")},
+				ResponseSchema: &genai.Schema{
+					Properties: map[string]*genai.Schema{
+						"item": {
+							AnyOf: []*genai.Schema{
+								{
+									Properties: map[string]*genai.Schema{
+										"age":  {Type: "number"},
+										"name": {Type: "string"},
 									},
-									"required": []any{string("name"), string("age")},
-									"type":     string("object"),
+									Type: "object",
 								},
-								map[string]any{
-									"description": string("The address object to insert into the database"),
-									"properties": map[string]any{
-										"city": map[string]any{"description": string("The city of the address"), "type": string("string")},
-										"number": map[string]any{
-											"description": string("The number of the address. Eg. for 123 main st, this would be 123"),
-											"type":        string("string"),
-										},
-										"street": map[string]any{
-											"description": string("The street name. Eg. for 123 main st, this would be main st"),
-											"type":        string("string"),
-										},
+								{
+									Properties: map[string]*genai.Schema{
+										"city":   {Type: "string"},
+										"number": {Type: "string"},
+										"street": {Type: "string"},
 									},
-									"required": []any{string("number"), string("street"), string("city")},
-									"type":     string("object"),
+									Type: "object",
 								},
-								map[string]any{
-									"description": string("The email address object to insert into the database"),
-									"properties": map[string]any{
-										"company": map[string]any{"description": string("The company to use."), "type": string("string")},
-										"url":     map[string]any{"description": string("The email address"), "type": string("string")},
+								{
+									Properties: map[string]*genai.Schema{
+										"company": {Type: "string"},
+										"url":     {Type: "string"},
 									},
-									"required": []any{string("company"), string("url")},
-									"type":     string("object"),
+									Type: "object",
 								},
 							},
 						},
 					},
-					"required": []any{string("item")},
-					"type":     string("object"),
+					Type: "object",
 				},
 			},
 		},
@@ -1138,19 +1130,19 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
-				ResponseJsonSchema: map[string]any{
-					"description": string("Data model identifying a single paragraph for paragraph re-ranking."),
-					"properties": map[string]any{
-						"document_id": map[string]any{"title": string("Document Id"), "type": string("string")},
-						"paragraph_id": map[string]any{
-							"anyOf":    []any{map[string]any{"type": string("string")}},
-							"nullable": bool(true),
-							"title":    string("Paragraph Id"),
+				ResponseSchema: &genai.Schema{
+					Properties: map[string]*genai.Schema{
+						"document_id": {Type: "string"},
+						"paragraph_id": {
+							AnyOf: []*genai.Schema{
+								{
+									Type: "string",
+								},
+							},
+							Nullable: &trueBool,
 						},
 					},
-					"required": []any{string("paragraph_id"), string("document_id")},
-					"title":    string("ParagraphIdentifier"),
-					"type":     string("object"),
+					Type: "object",
 				},
 			},
 		},
