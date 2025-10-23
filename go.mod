@@ -13,7 +13,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.2
 	github.com/aws/aws-sdk-go-v2/config v1.31.13
 	github.com/aws/aws-sdk-go-v2/service/sts v1.38.7
-	github.com/barkimedes/go-deepcopy v0.0.0-20220514131651-17c30cfc62df
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443
 	github.com/coreos/go-oidc/v3 v3.16.0

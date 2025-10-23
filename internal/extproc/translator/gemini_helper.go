@@ -420,14 +420,14 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest) 
 				return nil, fmt.Errorf("invalid JSON schema: %w", err)
 			}
 			// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema
-			if strings.HasPrefix(openAIReq.Model, "gemini-2.5") { // TODO: check whether to use Model field
+			if strings.Contains(openAIReq.Model, "gemini") && strings.Contains(openAIReq.Model, "2.5") { // TODO: users might be able to change the mapping?
 				gc.ResponseJsonSchema = schemaMap
 			} else {
-				convertedSchema, err := sanitizeJSONSchema(schemaMap)
+				convertedSchema, err := jsonSchemaToGemini(schemaMap)
 				if err != nil {
 					return nil, fmt.Errorf("invalid JSON schema: %w", err)
 				}
-				gc.ResponseJsonSchema = convertedSchema
+				gc.ResponseSchema = convertedSchema
 
 			}
 		}
