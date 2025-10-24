@@ -819,6 +819,32 @@ type WebSearchLocation struct {
 	Country string `json:"country,omitempty"`
 }
 
+// ThinkingConfig contains thinking config for reasoning models
+type ThinkingUnion struct {
+	OfEnabled  *ThinkingEnabled  `json:",omitzero,inline"`
+	OfDisabled *ThinkingDisabled `json:",omitzero,inline"`
+}
+
+// The properties BudgetTokens, Type are required.
+type ThinkingEnabled struct {
+	// Determines how many tokens Claude can use for its internal reasoning process.
+	// Larger budgets can enable more thorough analysis for complex problems, improving
+	// response quality.
+	//
+	// Must be ≥1024 and less than `max_tokens`.
+	//
+	// See
+	// [extended thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking)
+	// for details.
+	BudgetTokens int64 `json:"budget_tokens,required"`
+	// This field can be elided, and will marshal its zero value as "enabled".
+	Type string `json:"type,required"`
+}
+
+type ThinkingDisabled struct {
+	Type string `json:"type,required"`
+}
+
 type ChatCompletionRequest struct {
 	// Messages: A list of messages comprising the conversation so far.
 	// Depending on the model you use, different message types (modalities) are supported,
@@ -993,6 +1019,10 @@ type ChatCompletionRequest struct {
 
 	// GuidedJSON: The output will follow the JSON schema.
 	GuidedJSON json.RawMessage `json:"guided_json,omitzero"`
+
+	// Thinking: The thinking config for reasoning models
+	//Thinking *anthropic.ThinkingConfigParamUnion `json:"thinking,omitzero"`
+	Thinking Thinking `json:"thinking,omitzero"`
 }
 
 type StreamOptions struct {
