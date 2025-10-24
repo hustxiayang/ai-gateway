@@ -825,63 +825,24 @@ type ThinkingUnion struct {
 	OfDisabled *ThinkingDisabled `json:",omitzero,inline"`
 }
 
+// The properties BudgetTokens, Type are required.
 type ThinkingEnabled struct {
-	// Determines how many tokens the model can use for its internal reasoning process.
+	// Determines how many tokens Claude can use for its internal reasoning process.
 	// Larger budgets can enable more thorough analysis for complex problems, improving
 	// response quality.
-	BudgetTokens int64 `json:"budget_tokens"`
+	//
+	// Must be ≥1024 and less than `max_tokens`.
+	//
+	// See
+	// [extended thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking)
+	// for details.
+	BudgetTokens int64 `json:"budget_tokens,required"`
 	// This field can be elided, and will marshal its zero value as "enabled".
-	Type string `json:"type"`
-
-	// Optional. Indicates the thinking budget in tokens.
-	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	Type string `json:"type,required"`
 }
 
 type ThinkingDisabled struct {
-	Type string `json:"type,"`
-}
-
-// MarshalJSON implements the json.Marshaler interface for ThinkingUnion.
-func (t *ThinkingUnion) MarshalJSON() ([]byte, error) {
-	if t.OfEnabled != nil {
-		return json.Marshal(t.OfEnabled)
-	}
-	if t.OfDisabled != nil {
-		return json.Marshal(t.OfDisabled)
-	}
-	// If both are nil, return an empty object or an error, depending on your desired behavior.
-	return []byte(`{}`), nil
-}
-
-// UnmarshalJSON implements the json.Unmarshaler interface for ThinkingUnion.
-func (t *ThinkingUnion) UnmarshalJSON(data []byte) error {
-	// Use a temporary struct to determine the type
-	typeResult := gjson.GetBytes(data, "type")
-	if !typeResult.Exists() {
-		return errors.New("thinking config does not have a type")
-	}
-
-	// Based on the 'type' field, unmarshal into the correct struct.
-	typeVal := typeResult.String()
-
-	switch typeVal {
-	case "enabled":
-		var enabled ThinkingEnabled
-		if err := json.Unmarshal(data, &enabled); err != nil {
-			return err
-		}
-		t.OfEnabled = &enabled
-	case "disabled":
-		var disabled ThinkingDisabled
-		if err := json.Unmarshal(data, &disabled); err != nil {
-			return err
-		}
-		t.OfDisabled = &disabled
-	default:
-		return fmt.Errorf("invalid thinking union type: %s", typeVal)
-	}
-
-	return nil
+	Type string `json:"type,required"`
 }
 
 type ChatCompletionRequest struct {
@@ -1057,7 +1018,8 @@ type ChatCompletionRequest struct {
 	GuidedJSON json.RawMessage `json:"guided_json,omitzero"`
 
 	// Thinking: The thinking config for reasoning models
-	Thinking *ThinkingUnion `json:"thinking,omitzero"`
+	//Thinking *anthropic.ThinkingConfigParamUnion `json:"thinking,omitzero"`
+	Thinking Thinking `json:"thinking,omitzero"`
 }
 
 type StreamOptions struct {
