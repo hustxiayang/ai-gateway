@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
 const (
@@ -393,7 +394,7 @@ func openAIToolChoiceToGeminiToolConfig(toolChoice *openai.ChatCompletionToolCho
 }
 
 // openAIReqToGeminiGenerationConfig converts OpenAI request to Gemini GenerationConfig.
-func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest) (*genai.GenerationConfig, geminiResponseMode, error) {
+func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest, requestModel internalapi.RequestModel) (*genai.GenerationConfig, geminiResponseMode, error) {
 	responseMode := responseModeNone
 	gc := &genai.GenerationConfig{}
 	if openAIReq.Temperature != nil {
@@ -439,7 +440,7 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest) 
 
 			responseMode = responseModeJSON
 			// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema
-			if strings.Contains(openAIReq.Model, "gemini") && strings.Contains(openAIReq.Model, "2.5") { // TODO: users might be able to change the mapping?
+			if strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "2.5") {
 				gc.ResponseJsonSchema = schemaMap
 			} else {
 				convertedSchema, err := jsonSchemaToGemini(schemaMap)

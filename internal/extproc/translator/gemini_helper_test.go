@@ -19,6 +19,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
 func TestOpenAIMessagesToGeminiContents(t *testing.T) {
@@ -728,6 +729,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		expectedGenerationConfig *genai.GenerationConfig
 		expectedResponseMode     geminiResponseMode
 		expectedErrMsg           string
+		requestModel             internalapi.RequestModel
 	}{
 		{
 			name: "all fields set",
@@ -758,6 +760,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				StopSequences:    []string{"stop1", "stop2"},
 			},
 			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name:                     "minimal fields",
@@ -776,6 +779,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				StopSequences: []string{"stop1"},
 			},
 			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name: "text",
@@ -788,6 +792,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{ResponseMIMEType: "text/plain"},
 			expectedResponseMode:     responseModeText,
+			requestModel:             "gemini-2.5-flash",
 		},
 		{
 			name: "json object",
@@ -800,11 +805,11 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{ResponseMIMEType: "application/json"},
 			expectedResponseMode:     responseModeJSON,
+			requestModel:             "gemini-2.5-flash",
 		},
 		{
 			name: "json schema (map)",
 			input: &openai.ChatCompletionRequest{
-				Model: "gemini-2.5",
 				ResponseFormat: &openai.ChatCompletionResponseFormatUnion{
 					OfJSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
 						Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
@@ -819,6 +824,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				ResponseJsonSchema: map[string]any{"type": "string"},
 			},
 			expectedResponseMode: responseModeJSON,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name: "json schema (string)",
@@ -838,6 +844,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				ResponseJsonSchema: map[string]any{"type": "string"},
 			},
 			expectedResponseMode: responseModeJSON,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name: "json schema (invalid string)",
@@ -853,6 +860,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				},
 			},
 			expectedErrMsg: "invalid JSON schema",
+			requestModel:   "gemini-2.5-flash",
 		},
 		{
 			name: "guided choice",
@@ -864,6 +872,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				ResponseSchema:   &genai.Schema{Type: "STRING", Enum: []string{"Positive", "Negative"}},
 			},
 			expectedResponseMode: responseModeEnum,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name: "guided regex",
@@ -875,6 +884,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				ResponseSchema:   &genai.Schema{Type: "STRING", Pattern: "\\w+@\\w+\\.com\\n"},
 			},
 			expectedResponseMode: responseModeRegex,
+			requestModel:         "gemini-2.5-flash",
 		},
 		{
 			name: "guided json",
@@ -898,6 +908,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				GuidedChoice: []string{"A", "B"},
 			},
 			expectedErrMsg: "multiple format specifiers specified",
+			requestModel:   "gemini-2.5-flash",
 		},
 		{
 			name: "nested schema for ResponseSchema",
@@ -960,12 +971,15 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 								},
 								Type: "object",
 							},
-							Type: "array",
+							Type:     "array",
+							Required: []string{"explanation", "output"},
 						},
 					},
-					Type: "object",
+					Type:     "object",
+					Required: []string{"final_answer", "steps"},
 				},
 			},
+			requestModel: "gemini-2.0-flash",
 		},
 
 		{
@@ -1088,6 +1102,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 					Type: "object",
 				},
 			},
+			requestModel: "gemini-2.0-flash",
 		},
 
 		{
@@ -1145,12 +1160,13 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 					Type: "object",
 				},
 			},
+			requestModel: "gemini-2.0-flash",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, responseMode, err := openAIReqToGeminiGenerationConfig(tc.input)
+			got, responseMode, err := openAIReqToGeminiGenerationConfig(tc.input, tc.requestModel)
 			if tc.expectedErrMsg != "" {
 				require.ErrorContains(t, err, tc.expectedErrMsg)
 			} else {

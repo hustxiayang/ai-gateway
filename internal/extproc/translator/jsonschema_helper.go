@@ -14,19 +14,27 @@ import (
 	"google.golang.org/genai"
 )
 
-// get the supported field names
-func jsonSchemaGetAllowedFields() map[string]struct{} {
-	fieldSet := make(map[string]struct{})
-	var schema *genai.Schema
-	t := reflect.TypeOf(schema).Elem()
-
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		fieldSet[field.Name] = struct{}{}
-	}
-
-	return fieldSet
+allowedSchemaFieldsSet := map[string]struct{}{
+"anyOf":{},
+  "default":{},
+   "description":{},
+    "enum":{},
+	 "example":{},
+	  "format":{},
+	   "items":{},
+	    "maxItems":{},
+		 "maxLength":{},
+		  "maxProperties":{},
+		   "maximum":{},
+		    "minItems":{},
+			 "minLength":{},
+			  "minProperties":{},
+			   "minimum":{},
+			    "nullable":{}, "pattern":{}, "properties":{}, "propertyOrdering":{}, "required":{},
+				 "title":{}, "type":{},
 }
+
+
 
 func jsonSchemaDeepCopyMapStringAny(original map[string]any) map[string]any {
 	if original == nil {
@@ -393,6 +401,8 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 		return nil, fmt.Errorf("dereferenced schema was not a map[string]any")
 	}
 	allowedSchemaFieldsSet := jsonSchemaGetAllowedFields()
+
+	fmt.Println(allowedSchemaFieldsSet)
 
 	schemaMap, err := jsonSchemaToGapic(dereferencedMap, allowedSchemaFieldsSet)
 	if err != nil {
