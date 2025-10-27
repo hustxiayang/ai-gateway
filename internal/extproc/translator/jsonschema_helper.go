@@ -8,33 +8,10 @@ package translator
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"google.golang.org/genai"
 )
-
-allowedSchemaFieldsSet := map[string]struct{}{
-"anyOf":{},
-  "default":{},
-   "description":{},
-    "enum":{},
-	 "example":{},
-	  "format":{},
-	   "items":{},
-	    "maxItems":{},
-		 "maxLength":{},
-		  "maxProperties":{},
-		   "maximum":{},
-		    "minItems":{},
-			 "minLength":{},
-			  "minProperties":{},
-			   "minimum":{},
-			    "nullable":{}, "pattern":{}, "properties":{}, "propertyOrdering":{}, "required":{},
-				 "title":{}, "type":{},
-}
-
-
 
 func jsonSchemaDeepCopyMapStringAny(original map[string]any) map[string]any {
 	if original == nil {
@@ -367,6 +344,7 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		default:
 			// Check if the key is in the allowed set.
 			if _, allowed := allowedSchemaFieldsSet[key]; allowed {
+				fmt.Println(key, "allowed", value)
 				convertedSchema[key] = value
 			}
 		}
@@ -400,7 +378,31 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 	if !ok {
 		return nil, fmt.Errorf("dereferenced schema was not a map[string]any")
 	}
-	allowedSchemaFieldsSet := jsonSchemaGetAllowedFields()
+
+	allowedSchemaFieldsSet := map[string]struct{}{
+		"anyOf":            {},
+		"default":          {},
+		"description":      {},
+		"enum":             {},
+		"example":          {},
+		"format":           {},
+		"items":            {},
+		"maxItems":         {},
+		"maxLength":        {},
+		"maxProperties":    {},
+		"maximum":          {},
+		"minItems":         {},
+		"minLength":        {},
+		"minProperties":    {},
+		"minimum":          {},
+		"nullable":         {},
+		"pattern":          {},
+		"properties":       {},
+		"propertyOrdering": {},
+		"required":         {},
+		"title":            {},
+		"type":             {},
+	}
 
 	fmt.Println(allowedSchemaFieldsSet)
 

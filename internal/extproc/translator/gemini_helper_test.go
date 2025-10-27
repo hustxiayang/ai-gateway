@@ -969,14 +969,14 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 									"explanation": {Type: "string"},
 									"output":      {Type: "string"},
 								},
-								Type: "object",
+								Type:     "object",
+								Required: []string{"explanation", "output"},
 							},
-							Type:     "array",
-							Required: []string{"explanation", "output"},
+							Type: "array",
 						},
 					},
 					Type:     "object",
-					Required: []string{"final_answer", "steps"},
+					Required: []string{"steps", "final_answer"},
 				},
 			},
 			requestModel: "gemini-2.0-flash",
@@ -1075,31 +1075,38 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 						"item": {
 							AnyOf: []*genai.Schema{
 								{
+									Description: "The user object to insert into the database",
 									Properties: map[string]*genai.Schema{
-										"age":  {Type: "number"},
-										"name": {Type: "string"},
+										"age":  {Type: "number", Description: "The age of the user"},
+										"name": {Type: "string", Description: "The name of the user"},
 									},
-									Type: "object",
+									Type:     "object",
+									Required: []string{"name", "age"},
 								},
 								{
+									Description: "The address object to insert into the database",
 									Properties: map[string]*genai.Schema{
-										"city":   {Type: "string"},
-										"number": {Type: "string"},
-										"street": {Type: "string"},
+										"city":   {Type: "string", Description: "The city of the address"},
+										"number": {Type: "string", Description: "The number of the address. Eg. for 123 main st, this would be 123"},
+										"street": {Type: "string", Description: "The street name. Eg. for 123 main st, this would be main st"},
 									},
-									Type: "object",
+									Type:     "object",
+									Required: []string{"number", "street", "city"},
 								},
 								{
+									Description: "The email address object to insert into the database",
 									Properties: map[string]*genai.Schema{
-										"company": {Type: "string"},
-										"url":     {Type: "string"},
+										"company": {Type: "string", Description: "The company to use."},
+										"url":     {Type: "string", Description: "The email address"},
 									},
-									Type: "object",
+									Required: []string{"company", "url"},
+									Type:     "object",
 								},
 							},
 						},
 					},
-					Type: "object",
+					Type:     "object",
+					Required: []string{"item"},
 				},
 			},
 			requestModel: "gemini-2.0-flash",
@@ -1146,8 +1153,9 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
+					Description: "Data model identifying a single paragraph for paragraph re-ranking.",
 					Properties: map[string]*genai.Schema{
-						"document_id": {Type: "string"},
+						"document_id": {Type: "string", Title: "Document Id"},
 						"paragraph_id": {
 							AnyOf: []*genai.Schema{
 								{
@@ -1155,9 +1163,12 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 								},
 							},
 							Nullable: &trueBool,
+							Title:    "Paragraph Id",
 						},
 					},
-					Type: "object",
+					Required: []string{"paragraph_id", "document_id"},
+					Title:    "ParagraphIdentifier",
+					Type:     "object",
 				},
 			},
 			requestModel: "gemini-2.0-flash",
