@@ -404,8 +404,6 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 		"type":             {},
 	}
 
-	fmt.Println(allowedSchemaFieldsSet)
-
 	schemaMap, err := jsonSchemaToGapic(dereferencedMap, allowedSchemaFieldsSet)
 	if err != nil {
 		return nil, err
