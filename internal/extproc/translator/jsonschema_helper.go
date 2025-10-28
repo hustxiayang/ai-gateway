@@ -74,10 +74,10 @@ func jsonSchemaDereferenceHelper(
 	obj any,
 	fullSchema map[string]any,
 	skipKeys []string,
-	processedRefs *map[string]struct{},
+	processedRefs map[string]struct{},
 ) (any, error) {
-	if *processedRefs == nil {
-		*processedRefs = make(map[string]struct{})
+	if processedRefs == nil {
+		processedRefs = make(map[string]struct{})
 	}
 
 	// Handle dictionaries (maps).
@@ -103,10 +103,10 @@ func jsonSchemaDereferenceHelper(
 				if !isString {
 					return nil, fmt.Errorf("'$ref' value must be a string")
 				}
-				if _, ok := (*processedRefs)[refPath]; ok {
-					continue // Already processed, skip to avoid circular references.
+				if _, ok := processedRefs[refPath]; ok {
+					return nil, fmt.Errorf("self recursive schema is currently not supported")
 				}
-				(*processedRefs)[refPath] = struct{}{}
+				processedRefs[refPath] = struct{}{}
 
 				ref, err := jsonSchemaRetrieveRef(refPath, fullSchema)
 				if err != nil {
@@ -116,7 +116,7 @@ func jsonSchemaDereferenceHelper(
 				if err != nil {
 					return nil, err
 				}
-				delete(*processedRefs, refPath) // Remove from set on function exit.
+				delete(processedRefs, refPath) // Remove from set on function exit.
 				return fullRef, nil
 			}
 
@@ -180,7 +180,7 @@ func jsonSchemaSkipKeys(
 				}
 				// Skip if reference has already been processed.
 				if _, ok := processedRefs[refPath]; ok {
-					continue
+					return nil, fmt.Errorf("self recursive schema is currently not supported")
 				}
 				processedRefs[refPath] = struct{}{}
 
@@ -241,7 +241,7 @@ func jsonSchemaDereference(
 
 	// Call the recursive helper function to perform the dereferencing.
 	processedRefs := make(map[string]struct{})
-	return jsonSchemaDereferenceHelper(schemaObj, schemaObj, skipKeys, &processedRefs)
+	return jsonSchemaDereferenceHelper(schemaObj, schemaObj, skipKeys, processedRefs)
 }
 
 // jsonSchemaToGapic formats a JSON schema for a gapic request, which is modified from https://github.com/langchain-ai/langchain-google/blob/06a5857841675461ae282648a155e1cd90d1e5d5/libs/vertexai/langchain_google_vertexai/functions_utils.py#L109
