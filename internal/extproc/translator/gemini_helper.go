@@ -393,7 +393,7 @@ func openAIToolChoiceToGeminiToolConfig(toolChoice *openai.ChatCompletionToolCho
 	}
 }
 
-// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema, separate it as a small function to make it easir to maintain
+// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema, separate it as a small function to make it easier to maintain
 func responseJSONSchemaAvailable(requestModel internalapi.RequestModel) bool {
 	return strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "2.5")
 }
