@@ -70,7 +70,8 @@ func TestJsonSchemaDeepCopyMapStringAny(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := jsonSchemaDeepCopyMapStringAny(tc.input)
+			got, err := jsonSchemaDeepCopyMapStringAny(tc.input)
+			require.NoError(t, err)
 			require.Equal(t, tc.expected, got)
 
 			// Verify it's a deep copy by modifying original
@@ -122,7 +123,8 @@ func TestJsonSchemaDeepCopyAny(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := jsonSchemaDeepCopyAny(tc.input)
+			got, err := jsonSchemaDeepCopyAny(tc.input)
+			require.NoError(t, err)
 			require.Equal(t, tc.expected, got)
 		})
 	}
@@ -170,7 +172,7 @@ func TestJsonSchemaRetrieveRef(t *testing.T) {
 			name:           "invalid path format",
 			path:           "invalid/path",
 			schema:         schema,
-			expectedErrMsg: "ref paths are expected to be URI fragments",
+			expectedErrMsg: "ref paths must start with '#/'",
 		},
 		{
 			name:           "path with empty component",
@@ -185,9 +187,9 @@ func TestJsonSchemaRetrieveRef(t *testing.T) {
 			expectedErrMsg: "component 'NonExistent' does not exist",
 		},
 		{
-			name:   "reference to non-map intermediate",
-			path:   "#/components/schemas/User/type/invalid",
-			schema: schema,
+			name:           "reference to non-map intermediate",
+			path:           "#/components/schemas/User/type/invalid",
+			schema:         schema,
 			expectedErrMsg: "intermediate component 'type' is not a map",
 		},
 	}
@@ -231,17 +233,17 @@ func TestJsonSchemaDereferenceHelper(t *testing.T) {
 		expectedErrMsg string
 	}{
 		{
-			name:       "primitive value",
-			obj:        "string",
-			fullSchema: schema,
-			skipKeys:   []string{},
+			name:           "primitive value",
+			obj:            "string",
+			fullSchema:     schema,
+			skipKeys:       []string{},
 			expectedResult: "string",
 		},
 		{
-			name:       "map without refs",
-			obj:        map[string]any{"type": "string"},
-			fullSchema: schema,
-			skipKeys:   []string{},
+			name:           "map without refs",
+			obj:            map[string]any{"type": "string"},
+			fullSchema:     schema,
+			skipKeys:       []string{},
 			expectedResult: map[string]any{"type": "string"},
 		},
 		{
@@ -277,7 +279,7 @@ func TestJsonSchemaDereferenceHelper(t *testing.T) {
 			processedRefs: map[string]struct{}{
 				"#/components/schemas/User": {},
 			},
-			expectedErrMsg: "self recursive schema is currently not supported",
+			expectedErrMsg: "circular reference detected",
 		},
 		{
 			name: "skip key",
@@ -293,17 +295,23 @@ func TestJsonSchemaDereferenceHelper(t *testing.T) {
 			},
 		},
 		{
-			name:       "slice",
-			obj:        []any{"a", "b"},
-			fullSchema: schema,
-			skipKeys:   []string{},
+			name:           "slice",
+			obj:            []any{"a", "b"},
+			fullSchema:     schema,
+			skipKeys:       []string{},
 			expectedResult: []any{"a", "b"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := jsonSchemaDereferenceHelper(tc.obj, tc.fullSchema, tc.skipKeys, tc.processedRefs)
+			// Create processedRefs if provided
+			processedRefs := tc.processedRefs
+			if processedRefs == nil {
+				processedRefs = make(map[string]struct{})
+			}
+
+			got, err := jsonSchemaDereferenceHelper(tc.obj, tc.fullSchema, tc.skipKeys, processedRefs, 0)
 
 			if tc.expectedErrMsg != "" {
 				require.ErrorContains(t, err, tc.expectedErrMsg)
@@ -365,7 +373,7 @@ func TestJsonSchemaSkipKeys(t *testing.T) {
 			processedRefs: map[string]struct{}{
 				"#/components/schemas/User": {},
 			},
-			expectedErrMsg: "self recursive schema is currently not supported",
+			expectedErrMsg: "circular reference detected",
 		},
 		{
 			name:           "slice",
@@ -377,7 +385,13 @@ func TestJsonSchemaSkipKeys(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := jsonSchemaSkipKeys(tc.obj, tc.fullSchema, tc.processedRefs)
+			// Create processedRefs if provided
+			processedRefs := tc.processedRefs
+			if processedRefs == nil {
+				processedRefs = make(map[string]struct{})
+			}
+
+			got, err := jsonSchemaSkipKeys(tc.obj, tc.fullSchema, processedRefs, 0)
 
 			if tc.expectedErrMsg != "" {
 				require.ErrorContains(t, err, tc.expectedErrMsg)
@@ -486,7 +500,7 @@ func TestJsonSchemaToGapic(t *testing.T) {
 				"type": 123,
 			},
 			allowedFields:  allowedFields,
-			expectedErrMsg: "the value of 'type' must be a list or a string, got int",
+			expectedErrMsg: "'type' must be a list or string, got int",
 		},
 		{
 			name: "type list with wrong length",
@@ -494,7 +508,7 @@ func TestJsonSchemaToGapic(t *testing.T) {
 				"type": []any{"string", "number", "boolean"},
 			},
 			allowedFields:  allowedFields,
-			expectedErrMsg: "length of the list must be 2",
+			expectedErrMsg: "if type is a list, length must be 2",
 		},
 		{
 			name: "type list without null",
@@ -529,7 +543,7 @@ func TestJsonSchemaToGapic(t *testing.T) {
 				},
 			},
 			allowedFields:  allowedFields,
-			expectedErrMsg: "Only one value for 'allOf' key is supported",
+			expectedErrMsg: "only one value for 'allOf' key is supported",
 		},
 		{
 			name: "invalid allOf item type",
@@ -670,7 +684,7 @@ func TestJsonSchemaToGemini(t *testing.T) {
 			schema: map[string]any{
 				"$ref": "#/invalid/ref",
 			},
-			expectedErrMsg: "Reference '#/invalid/ref' not found",
+			expectedErrMsg: "component 'invalid' does not exist",
 		},
 	}
 
