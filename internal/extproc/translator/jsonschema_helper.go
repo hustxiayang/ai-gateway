@@ -13,6 +13,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// jsonSchemaDeepCopyMapStringAny creates a deep copy of a map[string]any.
 func jsonSchemaDeepCopyMapStringAny(original map[string]any) map[string]any {
 	if original == nil {
 		return nil
@@ -25,6 +26,7 @@ func jsonSchemaDeepCopyMapStringAny(original map[string]any) map[string]any {
 	return copied
 }
 
+// jsonSchemaDeepCopyAny performs a deep copy of any value, recursively handling maps and slices.
 func jsonSchemaDeepCopyAny(value any) any {
 	switch v := value.(type) {
 	case map[string]any:
@@ -44,27 +46,47 @@ func jsonSchemaDeepCopyAny(value any) any {
 
 // jsonSchemaRetrieveRef fetches a deeply-nested reference from a schema map.
 func jsonSchemaRetrieveRef(path string, schema map[string]any) (any, error) {
+	if path == "" {
+		return nil, fmt.Errorf("invalid JSON schema: ref path cannot be empty")
+	}
+
 	components := strings.Split(path, "/")
-	if components[0] != "#" {
+	if len(components) == 0 || components[0] != "#" {
 		msg := "ref paths are expected to be URI fragments, meaning they should start with #."
 		return nil, fmt.Errorf("invalid JSON schema: %s", msg)
 	}
 
-	out := schema
-	for _, component := range components[1:] {
-		// Type assertion to ensure `out` is a map.
-		val, ok := out[component]
-		if ok {
-			out = val.(map[string]any)
-		} else {
-			msg := fmt.Sprintf("Reference '%s' not found: intermediate component is not a map", path)
+	current := schema
+	for i, component := range components[1:] {
+		if component == "" {
+			return nil, fmt.Errorf("invalid JSON schema: ref path contains empty component at position %d", i+1)
+		}
+
+		// Type assertion to ensure `current` is a map.
+		val, ok := current[component]
+		if !ok {
+			msg := fmt.Sprintf("Reference '%s' not found: component '%s' does not exist", path, component)
 			return nil, fmt.Errorf("invalid JSON schema: %s", msg)
 		}
+
+		// Check if we're at the last component
+		if i == len(components[1:])-1 {
+			// Create and return a deep copy to prevent mutation of the original schema.
+			deepCopy := jsonSchemaDeepCopyAny(val)
+			return deepCopy, nil
+		}
+
+		// For intermediate components, ensure they are maps
+		nextMap, ok := val.(map[string]any)
+		if !ok {
+			msg := fmt.Sprintf("Reference '%s' not found: intermediate component '%s' is not a map", path, component)
+			return nil, fmt.Errorf("invalid JSON schema: %s", msg)
+		}
+		current = nextMap
 	}
 
-	// Create and return a deep copy to prevent mutation of the original schema.
-	deepCopy := jsonSchemaDeepCopyAny(out)
-	return deepCopy, nil
+	// This should never be reached, but included for completeness
+	return nil, fmt.Errorf("invalid JSON schema: unexpected end of ref path traversal")
 }
 
 // jsonSchemaDereferenceHelper recursively dereferences JSON schema references.
@@ -85,7 +107,7 @@ func jsonSchemaDereferenceHelper(
 		objOut := make(map[string]any)
 		for k, v := range dict {
 			// Check if key should be skipped.
-			var shouldSkip bool
+			shouldSkip := false
 			for _, skipKey := range skipKeys {
 				if k == skipKey {
 					shouldSkip = true
@@ -101,7 +123,7 @@ func jsonSchemaDereferenceHelper(
 			if k == "$ref" {
 				refPath, isString := v.(string)
 				if !isString {
-					return nil, fmt.Errorf("'$ref' value must be a string")
+					return nil, fmt.Errorf("'$ref' value must be a string, got %T", v)
 				}
 				if _, ok := processedRefs[refPath]; ok {
 					return nil, fmt.Errorf("self recursive schema is currently not supported")
@@ -157,7 +179,8 @@ func jsonSchemaDereferenceHelper(
 	return obj, nil
 }
 
-// jsonSchemaSkipKeys recursively traverses a schema to find keys that should be skipped., which is modified from https://github.com/langchain-ai/langchain/blob/fce8caca16121024547fb0e8eb2d289c8f96396a/libs/core/langchain_core/utils/json_schema.py#L71
+// jsonSchemaSkipKeys recursively traverses a schema to find keys that should be skipped.
+// This is modified from https://github.com/langchain-ai/langchain/blob/fce8caca16121024547fb0e8eb2d289c8f96396a/libs/core/langchain_core/utils/json_schema.py#L71
 func jsonSchemaSkipKeys(
 	obj any,
 	fullSchema map[string]any,
@@ -168,7 +191,7 @@ func jsonSchemaSkipKeys(
 		processedRefs = make(map[string]struct{})
 	}
 
-	keys := []string{}
+	var keys []string
 
 	// Handle dictionaries (maps).
 	if dict, ok := obj.(map[string]any); ok {
@@ -176,7 +199,7 @@ func jsonSchemaSkipKeys(
 			if k == "$ref" {
 				refPath, isString := v.(string)
 				if !isString {
-					return nil, fmt.Errorf("'$ref' value must be a string")
+					return nil, fmt.Errorf("'$ref' value must be a string, got %T", v)
 				}
 				// Skip if reference has already been processed.
 				if _, ok := processedRefs[refPath]; ok {
@@ -230,10 +253,15 @@ func jsonSchemaSkipKeys(
 	return keys, nil
 }
 
-// jsonSchemaDereference substitutes $refs in a JSON Schema object., this is adapted from https://github.com/langchain-ai/langchain/blob/fce8caca16121024547fb0e8eb2d289c8f96396a/libs/core/langchain_core/utils/json_schema.py#L95
+// jsonSchemaDereference substitutes $refs in a JSON Schema object.
+// This is adapted from https://github.com/langchain-ai/langchain/blob/fce8caca16121024547fb0e8eb2d289c8f96396a/libs/core/langchain_core/utils/json_schema.py#L95
 func jsonSchemaDereference(
 	schemaObj map[string]any,
 ) (any, error) {
+	if schemaObj == nil {
+		return nil, fmt.Errorf("invalid JSON schema: schema object cannot be nil")
+	}
+
 	skipKeys, err := jsonSchemaSkipKeys(schemaObj, schemaObj, nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid JSON schema: %w", err)
@@ -244,8 +272,16 @@ func jsonSchemaDereference(
 	return jsonSchemaDereferenceHelper(schemaObj, schemaObj, skipKeys, processedRefs)
 }
 
-// jsonSchemaToGapic formats a JSON schema for a gapic request, which is modified from https://github.com/langchain-ai/langchain-google/blob/06a5857841675461ae282648a155e1cd90d1e5d5/libs/vertexai/langchain_google_vertexai/functions_utils.py#L109
+// jsonSchemaToGapic formats a JSON schema for a gapic request.
+// This is modified from https://github.com/langchain-ai/langchain-google/blob/06a5857841675461ae282648a155e1cd90d1e5d5/libs/vertexai/langchain_google_vertexai/functions_utils.py#L109
 func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
+	if schema == nil {
+		return nil, fmt.Errorf("invalid JSON schema: schema cannot be nil")
+	}
+	if allowedSchemaFieldsSet == nil {
+		return nil, fmt.Errorf("invalid JSON schema: allowedSchemaFieldsSet cannot be nil")
+	}
+
 	convertedSchema := make(map[string]any)
 
 	for key, value := range schema {
@@ -255,7 +291,7 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		case "items":
 			subSchema, ok := value.(map[string]any)
 			if !ok {
-				return nil, fmt.Errorf("invalid JSON schema: 'items' must be a dict")
+				return nil, fmt.Errorf("invalid JSON schema: 'items' must be a dict, got %T", value)
 			}
 			var err error
 			convertedSchema["items"], err = jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
@@ -265,7 +301,7 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		case "properties":
 			properties, ok := value.(map[string]any)
 			if !ok {
-				return nil, fmt.Errorf("invalid JSON schema: 'properties' must be a dict")
+				return nil, fmt.Errorf("invalid JSON schema: 'properties' must be a dict, got %T", value)
 			}
 
 			convertedSchema["properties"] = make(map[string]any)
@@ -276,10 +312,11 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 					if err != nil {
 						return nil, err
 					}
+				} else {
+					return nil, fmt.Errorf("invalid JSON schema: property '%s' must be a dict, got %T", pkey, pvalue)
 				}
 			}
 		case "type":
-
 			switch typeList := value.(type) {
 			case []any:
 				if len(typeList) != 2 {
@@ -315,33 +352,39 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 			case string:
 				convertedSchema["type"] = typeList
 			default:
-				return nil, fmt.Errorf("invalid JSON schema: the value of 'type' must be a list or a string")
+				return nil, fmt.Errorf("invalid JSON schema: the value of 'type' must be a list or a string, got %T", value)
 			}
 		case "allOf":
 			allOfList, ok := value.([]any)
 			if !ok {
-				return nil, fmt.Errorf("invalid JSON schema: 'allOf' must be a list")
+				return nil, fmt.Errorf("invalid JSON schema: 'allOf' must be a list, got %T", value)
 			}
 			if len(allOfList) > 1 {
 				msg := fmt.Sprintf("Only one value for 'allOf' key is supported. Got %d.", len(allOfList))
 				return nil, fmt.Errorf("invalid JSON schema: %s", msg)
 			}
+			if len(allOfList) == 0 {
+				return nil, fmt.Errorf("invalid JSON schema: 'allOf' cannot be empty")
+			}
 			subSchema, ok := allOfList[0].(map[string]any)
 			if !ok {
-				return nil, fmt.Errorf("invalid JSON schema: item in 'allOf' must be an object (map[string]any)")
+				return nil, fmt.Errorf("invalid JSON schema: item in 'allOf' must be an object (map[string]any), got %T", allOfList[0])
 			}
 			return jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
 		case "anyOf":
 			anyOfList, ok := value.([]any)
 			if !ok {
-				return nil, fmt.Errorf("invalid JSON schema: 'anyOf' must be a list")
+				return nil, fmt.Errorf("invalid JSON schema: 'anyOf' must be a list, got %T", value)
+			}
+			if len(anyOfList) == 0 {
+				return nil, fmt.Errorf("invalid JSON schema: 'anyOf' cannot be empty")
 			}
 			anyOfResults := make([]any, 0)
 			nullable := false
-			for _, v := range anyOfList {
+			for i, v := range anyOfList {
 				subSchema, ok := v.(map[string]any)
 				if !ok {
-					return nil, fmt.Errorf("invalid JSON schema: item in 'anyOf' must be a dict")
+					return nil, fmt.Errorf("invalid JSON schema: item %d in 'anyOf' must be a dict, got %T", i, v)
 				}
 				if t, exists := subSchema["type"]; exists && t == "null" {
 					nullable = true
@@ -369,6 +412,10 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 
 // jsonSchemaMapToSchema converts a map[string]any to a Schema struct.
 func jsonSchemaMapToSchema(schemaMap map[string]any) (*genai.Schema, error) {
+	if schemaMap == nil {
+		return nil, fmt.Errorf("failed to convert schema: schemaMap cannot be nil")
+	}
+
 	jsonBytes, err := json.Marshal(schemaMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal map to JSON: %w", err)
@@ -382,8 +429,13 @@ func jsonSchemaMapToSchema(schemaMap map[string]any) (*genai.Schema, error) {
 	return &genSchema, nil
 }
 
-// sanitizeJSONSchema first dereferences the schema and then formats it for GCP.
+// jsonSchemaToGemini converts a JSON schema to a Gemini Schema by first dereferencing
+// the schema and then formatting it for GCP.
 func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
+	if schema == nil {
+		return nil, fmt.Errorf("failed to convert schema: schema cannot be nil")
+	}
+
 	dereferencedSchema, err := jsonSchemaDereference(schema)
 	if err != nil {
 		return nil, err
@@ -391,7 +443,7 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 
 	dereferencedMap, ok := dereferencedSchema.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("dereferenced schema was not a map[string]any")
+		return nil, fmt.Errorf("dereferenced schema was not a map[string]any, got %T", dereferencedSchema)
 	}
 
 	// allowedSchemaFieldsSet is the set of supported field names in genai.Schema.
@@ -425,8 +477,7 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 		return nil, err
 	}
 
-	var retSchema *genai.Schema
-	retSchema, err = jsonSchemaMapToSchema(schemaMap)
+	retSchema, err := jsonSchemaMapToSchema(schemaMap)
 	if err != nil {
 		return nil, err
 	}
