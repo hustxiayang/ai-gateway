@@ -15,13 +15,13 @@ import (
 
 // Constants for safety limits
 const (
-	maxRecursionDepth = 100
+	jsonSchemaMaxRecursionDepth = 100
 )
 
 // Errors for safety violations
 var (
-	ErrMaxRecursionDepthExceeded = fmt.Errorf("maximum recursion depth exceeded")
-	ErrInvalidSchema             = fmt.Errorf("invalid JSON schema")
+	errJSONSchemaMaxRecursionDepthExceeded = fmt.Errorf("maximum recursion depth exceeded")
+	errInvalidJSONSchema                   = fmt.Errorf("invalid JSON schema")
 )
 
 // jsonSchemaDeepCopyMapStringAny creates a safe deep copy of a map[string]any.
@@ -38,8 +38,8 @@ func jsonSchemaDeepCopyMapStringAnySafe(original map[string]any, depth int) (map
 		return nil, nil
 	}
 
-	if depth >= maxRecursionDepth {
-		return nil, fmt.Errorf("%w: depth %d", ErrMaxRecursionDepthExceeded, depth)
+	if depth >= jsonSchemaMaxRecursionDepth {
+		return nil, fmt.Errorf("%w: depth %d", errJSONSchemaMaxRecursionDepthExceeded, depth)
 	}
 
 	copied := make(map[string]any, len(original))
@@ -60,8 +60,8 @@ func jsonSchemaDeepCopyAny(value any) (any, error) {
 
 // jsonSchemaDeepCopyAnySafe performs the actual deep copy with recursion depth checks.
 func jsonSchemaDeepCopyAnySafe(value any, depth int) (any, error) {
-	if depth >= maxRecursionDepth {
-		return nil, fmt.Errorf("%w: depth %d", ErrMaxRecursionDepthExceeded, depth)
+	if depth >= jsonSchemaMaxRecursionDepth {
+		return nil, fmt.Errorf("%w: depth %d", errJSONSchemaMaxRecursionDepthExceeded, depth)
 	}
 
 	switch v := value.(type) {
@@ -88,22 +88,22 @@ func jsonSchemaDeepCopyAnySafe(value any, depth int) (any, error) {
 // It includes input validation and protection against path traversal attacks.
 func jsonSchemaRetrieveRef(path string, schema map[string]any) (any, error) {
 	if path == "" {
-		return nil, fmt.Errorf("%w: ref path cannot be empty", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: ref path cannot be empty", errInvalidJSONSchema)
 	}
 
 	if schema == nil {
-		return nil, fmt.Errorf("%w: schema cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: schema cannot be nil", errInvalidJSONSchema)
 	}
 
 	// Validate path format and prevent path traversal
 	if !strings.HasPrefix(path, "#/") {
-		return nil, fmt.Errorf("%w: ref paths must start with '#/', got: %s", ErrInvalidSchema, path)
+		return nil, fmt.Errorf("%w: ref paths must start with '#/', got: %s", errInvalidJSONSchema, path)
 	}
 
 	// Split and validate path components
 	components := strings.Split(path, "/")
 	if len(components) < 2 {
-		return nil, fmt.Errorf("%w: invalid ref path format: %s", ErrInvalidSchema, path)
+		return nil, fmt.Errorf("%w: invalid ref path format: %s", errInvalidJSONSchema, path)
 	}
 
 	// Remove the "#" prefix
@@ -112,18 +112,18 @@ func jsonSchemaRetrieveRef(path string, schema map[string]any) (any, error) {
 	current := schema
 	for i, component := range components {
 		if component == "" {
-			return nil, fmt.Errorf("%w: ref path contains empty component at position %d", ErrInvalidSchema, i+1)
+			return nil, fmt.Errorf("%w: ref path contains empty component at position %d", errInvalidJSONSchema, i+1)
 		}
 
 		// Prevent directory traversal attempts
 		if strings.Contains(component, "..") || strings.Contains(component, "./") {
-			return nil, fmt.Errorf("%w: ref path contains invalid characters: %s", ErrInvalidSchema, component)
+			return nil, fmt.Errorf("%w: ref path contains invalid characters: %s", errInvalidJSONSchema, component)
 		}
 
 		// Type assertion to ensure `current` is a map
 		val, exists := current[component]
 		if !exists {
-			return nil, fmt.Errorf("%w: reference '%s' not found: component '%s' does not exist", ErrInvalidSchema, path, component)
+			return nil, fmt.Errorf("%w: reference '%s' not found: component '%s' does not exist", errInvalidJSONSchema, path, component)
 		}
 
 		// Check if we're at the last component
@@ -139,13 +139,13 @@ func jsonSchemaRetrieveRef(path string, schema map[string]any) (any, error) {
 		// For intermediate components, ensure they are maps
 		nextMap, ok := val.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("%w: reference '%s' invalid: intermediate component '%s' is not a map (got %T)", ErrInvalidSchema, path, component, val)
+			return nil, fmt.Errorf("%w: reference '%s' invalid: intermediate component '%s' is not a map (got %T)", errInvalidJSONSchema, path, component, val)
 		}
 		current = nextMap
 	}
 
 	// This should never be reached due to the loop structure above
-	return nil, fmt.Errorf("%w: unexpected end of ref path traversal for: %s", ErrInvalidSchema, path)
+	return nil, fmt.Errorf("%w: unexpected end of ref path traversal for: %s", errInvalidJSONSchema, path)
 }
 
 // jsonSchemaDereferenceHelper recursively dereferences JSON schema references.
@@ -157,8 +157,8 @@ func jsonSchemaDereferenceHelper(
 	depth int,
 ) (any, error) {
 	// Check recursion depth
-	if depth >= maxRecursionDepth {
-		return nil, fmt.Errorf("%w: depth %d", ErrMaxRecursionDepthExceeded, depth)
+	if depth >= jsonSchemaMaxRecursionDepth {
+		return nil, fmt.Errorf("%w: depth %d", errJSONSchemaMaxRecursionDepthExceeded, depth)
 	}
 
 	// Handle dictionaries (maps)
@@ -183,12 +183,12 @@ func jsonSchemaDereferenceHelper(
 			if k == "$ref" {
 				refPath, isString := v.(string)
 				if !isString {
-					return nil, fmt.Errorf("%w: '$ref' value must be a string, got %T", ErrInvalidSchema, v)
+					return nil, fmt.Errorf("%w: '$ref' value must be a string, got %T", errInvalidJSONSchema, v)
 				}
 
 				// Check for circular references
 				if _, exists := processedRefs[refPath]; exists {
-					return nil, fmt.Errorf("%w: circular reference detected: %s", ErrInvalidSchema, refPath)
+					return nil, fmt.Errorf("%w: circular reference detected: %s", errInvalidJSONSchema, refPath)
 				}
 
 				// Mark as being processed
@@ -256,8 +256,8 @@ func jsonSchemaSkipKeys(
 	depth int,
 ) ([]string, error) {
 	// Check recursion depth
-	if depth >= maxRecursionDepth {
-		return nil, fmt.Errorf("%w: depth %d", ErrMaxRecursionDepthExceeded, depth)
+	if depth >= jsonSchemaMaxRecursionDepth {
+		return nil, fmt.Errorf("%w: depth %d", errJSONSchemaMaxRecursionDepthExceeded, depth)
 	}
 
 	var keys []string
@@ -268,12 +268,12 @@ func jsonSchemaSkipKeys(
 			if k == "$ref" {
 				refPath, isString := v.(string)
 				if !isString {
-					return nil, fmt.Errorf("%w: '$ref' value must be a string, got %T", ErrInvalidSchema, v)
+					return nil, fmt.Errorf("%w: '$ref' value must be a string, got %T", errInvalidJSONSchema, v)
 				}
 
 				// Skip if reference has already been processed (circular reference protection)
 				if _, exists := processedRefs[refPath]; exists {
-					return nil, fmt.Errorf("%w: circular reference detected: %s", ErrInvalidSchema, refPath)
+					return nil, fmt.Errorf("%w: circular reference detected: %s", errInvalidJSONSchema, refPath)
 				}
 				processedRefs[refPath] = struct{}{}
 
@@ -331,7 +331,7 @@ func jsonSchemaSkipKeys(
 // jsonSchemaDereference substitutes $refs in a JSON Schema object.
 func jsonSchemaDereference(schemaObj map[string]any) (any, error) {
 	if schemaObj == nil {
-		return nil, fmt.Errorf("%w: schema object cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: schema object cannot be nil", errInvalidJSONSchema)
 	}
 
 	processedRefs := make(map[string]struct{})
@@ -351,10 +351,10 @@ func jsonSchemaDereference(schemaObj map[string]any) (any, error) {
 // This is modified from the langchain-google implementation with enhanced error handling.
 func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
 	if schema == nil {
-		return nil, fmt.Errorf("%w: schema cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: schema cannot be nil", errInvalidJSONSchema)
 	}
 	if allowedSchemaFieldsSet == nil {
-		return nil, fmt.Errorf("%w: allowedSchemaFieldsSet cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: allowedSchemaFieldsSet cannot be nil", errInvalidJSONSchema)
 	}
 
 	convertedSchema := make(map[string]any)
@@ -368,7 +368,7 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		case "items":
 			subSchema, ok := value.(map[string]any)
 			if !ok {
-				return nil, fmt.Errorf("%w: 'items' must be a dict, got %T", ErrInvalidSchema, value)
+				return nil, fmt.Errorf("%w: 'items' must be a dict, got %T", errInvalidJSONSchema, value)
 			}
 			convertedItems, err := jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
 			if err != nil {
@@ -379,14 +379,14 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		case "properties":
 			properties, ok := value.(map[string]any)
 			if !ok {
-				return nil, fmt.Errorf("%w: 'properties' must be a dict, got %T", ErrInvalidSchema, value)
+				return nil, fmt.Errorf("%w: 'properties' must be a dict, got %T", errInvalidJSONSchema, value)
 			}
 
 			convertedProperties := make(map[string]any)
 			for pkey, pvalue := range properties {
 				pSubSchema, ok := pvalue.(map[string]any)
 				if !ok {
-					return nil, fmt.Errorf("%w: property '%s' must be a dict, got %T", ErrInvalidSchema, pkey, pvalue)
+					return nil, fmt.Errorf("%w: property '%s' must be a dict, got %T", errInvalidJSONSchema, pkey, pvalue)
 				}
 
 				convertedProperty, err := jsonSchemaToGapic(pSubSchema, allowedSchemaFieldsSet)
@@ -398,7 +398,7 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 			convertedSchema["properties"] = convertedProperties
 
 		case "type":
-			convertedType, err := processTypeField(value)
+			convertedType, err := processJSONSchemaTypeField(value)
 			if err != nil {
 				return nil, err
 			}
@@ -408,14 +408,14 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 			}
 
 		case "allOf":
-			convertedAllOf, err := processAllOfField(value, allowedSchemaFieldsSet)
+			convertedAllOf, err := processJSONSchemaAllOfField(value, allowedSchemaFieldsSet)
 			if err != nil {
 				return nil, err
 			}
 			return convertedAllOf, nil
 
 		case "anyOf":
-			convertedAnyOf, err := processAnyOfField(value, allowedSchemaFieldsSet)
+			convertedAnyOf, err := processJSONSchemaAnyOfField(value, allowedSchemaFieldsSet)
 			if err != nil {
 				return nil, err
 			}
@@ -434,14 +434,14 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 	return convertedSchema, nil
 }
 
-// processTypeField handles the "type" field conversion with improved type safety
-func processTypeField(value any) (map[string]any, error) {
+// processJSONSchemaTypeField handles the "type" field conversion with improved type safety
+func processJSONSchemaTypeField(value any) (map[string]any, error) {
 	result := make(map[string]any)
 
 	switch typeValue := value.(type) {
 	case []any:
 		if len(typeValue) != 2 {
-			return nil, fmt.Errorf("%w: if type is a list, length must be 2, got %d", ErrInvalidSchema, len(typeValue))
+			return nil, fmt.Errorf("%w: if type is a list, length must be 2, got %d", errInvalidJSONSchema, len(typeValue))
 		}
 
 		hasNull := false
@@ -455,12 +455,12 @@ func processTypeField(value any) (map[string]any, error) {
 		}
 
 		if !hasNull || nonNullType == nil {
-			return nil, fmt.Errorf("%w: if type is a list, it must contain one non-null type and 'null'", ErrInvalidSchema)
+			return nil, fmt.Errorf("%w: if type is a list, it must contain one non-null type and 'null'", errInvalidJSONSchema)
 		}
 
 		// Non-null types in JSON Schema should be strings, not maps
 		if _, ok := nonNullType.(map[string]any); ok {
-			return nil, fmt.Errorf("%w: unexpected map type in type array", ErrInvalidSchema)
+			return nil, fmt.Errorf("%w: unexpected map type in type array", errInvalidJSONSchema)
 		}
 
 		result["type"] = fmt.Sprintf("%v", nonNullType)
@@ -470,44 +470,44 @@ func processTypeField(value any) (map[string]any, error) {
 		result["type"] = typeValue
 
 	default:
-		return nil, fmt.Errorf("%w: 'type' must be a list or string, got %T", ErrInvalidSchema, value)
+		return nil, fmt.Errorf("%w: 'type' must be a list or string, got %T", errInvalidJSONSchema, value)
 	}
 
 	return result, nil
 }
 
-// processAllOfField handles the "allOf" field conversion
-func processAllOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
+// processJSONSchemaAllOfField handles the "allOf" field conversion
+func processJSONSchemaAllOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
 	allOfList, ok := value.([]any)
 	if !ok {
-		return nil, fmt.Errorf("%w: 'allOf' must be a list, got %T", ErrInvalidSchema, value)
+		return nil, fmt.Errorf("%w: 'allOf' must be a list, got %T", errInvalidJSONSchema, value)
 	}
 
 	if len(allOfList) == 0 {
-		return nil, fmt.Errorf("%w: 'allOf' cannot be empty", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: 'allOf' cannot be empty", errInvalidJSONSchema)
 	}
 
 	if len(allOfList) > 1 {
-		return nil, fmt.Errorf("%w: only one value for 'allOf' key is supported, got %d", ErrInvalidSchema, len(allOfList))
+		return nil, fmt.Errorf("%w: only one value for 'allOf' key is supported, got %d", errInvalidJSONSchema, len(allOfList))
 	}
 
 	subSchema, ok := allOfList[0].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("%w: item in 'allOf' must be an object, got %T", ErrInvalidSchema, allOfList[0])
+		return nil, fmt.Errorf("%w: item in 'allOf' must be an object, got %T", errInvalidJSONSchema, allOfList[0])
 	}
 
 	return jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
 }
 
-// processAnyOfField handles the "anyOf" field conversion
-func processAnyOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
+// processJSONSchemaAnyOfField handles the "anyOf" field conversion
+func processJSONSchemaAnyOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (map[string]any, error) {
 	anyOfList, ok := value.([]any)
 	if !ok {
-		return nil, fmt.Errorf("%w: 'anyOf' must be a list, got %T", ErrInvalidSchema, value)
+		return nil, fmt.Errorf("%w: 'anyOf' must be a list, got %T", errInvalidJSONSchema, value)
 	}
 
 	if len(anyOfList) == 0 {
-		return nil, fmt.Errorf("%w: 'anyOf' cannot be empty", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: 'anyOf' cannot be empty", errInvalidJSONSchema)
 	}
 
 	result := make(map[string]any)
@@ -517,7 +517,7 @@ func processAnyOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (m
 	for i, v := range anyOfList {
 		subSchema, ok := v.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("%w: item %d in 'anyOf' must be a dict, got %T", ErrInvalidSchema, i, v)
+			return nil, fmt.Errorf("%w: item %d in 'anyOf' must be a dict, got %T", errInvalidJSONSchema, i, v)
 		}
 
 		if t, exists := subSchema["type"]; exists && t == "null" {
@@ -543,7 +543,7 @@ func processAnyOfField(value any, allowedSchemaFieldsSet map[string]struct{}) (m
 // This function includes proper input validation and error handling.
 func jsonSchemaMapToSchema(schemaMap map[string]any) (*genai.Schema, error) {
 	if schemaMap == nil {
-		return nil, fmt.Errorf("%w: schemaMap cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: schemaMap cannot be nil", errInvalidJSONSchema)
 	}
 
 	// Marshal the map to JSON
@@ -565,7 +565,7 @@ func jsonSchemaMapToSchema(schemaMap map[string]any) (*genai.Schema, error) {
 // This function combines dereferencing and GCP formatting with proper error handling.
 func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 	if schema == nil {
-		return nil, fmt.Errorf("%w: schema cannot be nil", ErrInvalidSchema)
+		return nil, fmt.Errorf("%w: schema cannot be nil", errInvalidJSONSchema)
 	}
 
 	// Step 1: Dereference the schema to resolve all $ref pointers
@@ -577,7 +577,7 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 	// Ensure the dereferenced result is a map
 	dereferencedMap, ok := dereferencedSchema.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("%w: dereferenced schema is not a map[string]any, got %T", ErrInvalidSchema, dereferencedSchema)
+		return nil, fmt.Errorf("%w: dereferenced schema is not a map[string]any, got %T", errInvalidJSONSchema, dereferencedSchema)
 	}
 
 	// Step 2: Define allowed schema fields for genai.Schema
