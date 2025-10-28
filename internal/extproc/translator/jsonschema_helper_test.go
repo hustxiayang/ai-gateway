@@ -21,6 +21,7 @@ func TestJsonSchemaToGemini(t *testing.T) {
 		name                   string
 		input                  json.RawMessage
 		expectedResponseSchema *genai.Schema
+		expectedErrMsg         string
 	}{
 		{
 			name: "nested schema for ResponseSchema",
@@ -249,6 +250,23 @@ func TestJsonSchemaToGemini(t *testing.T) {
 				Type:     "object",
 			},
 		},
+
+		{
+			name: "allOf with not a list",
+			input: json.RawMessage(`{
+    "type": "object",
+    "properties": {
+        "item": {
+            "allOf": "string"
+        }
+    },
+    "additionalProperties": false,
+    "required": [
+        "item"
+    ]
+}`),
+			expectedErrMsg: "invalid JSON schema: 'allOf' must be a list",
+		},
 	}
 
 	for _, tc := range tests {
@@ -259,10 +277,14 @@ func TestJsonSchemaToGemini(t *testing.T) {
 
 			got, err := jsonSchemaToGemini(schemaMap)
 
-			require.NoError(t, err)
+			if tc.expectedErrMsg != "" {
+				require.ErrorContains(t, err, tc.expectedErrMsg)
+			} else {
+				require.NoError(t, err)
 
-			if diff := cmp.Diff(tc.expectedResponseSchema, got, cmpopts.IgnoreUnexported(genai.Schema{})); diff != "" {
-				t.Errorf("ResponseSchema mismatch (-want +got):\n%s", diff)
+				if diff := cmp.Diff(tc.expectedResponseSchema, got, cmpopts.IgnoreUnexported(genai.Schema{})); diff != "" {
+					t.Errorf("ResponseSchema mismatch (-want +got):\n%s", diff)
+				}
 			}
 		})
 	}
