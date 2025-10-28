@@ -654,7 +654,7 @@ func geminiUsageToOpenAIUsage(metadata *genai.GenerateContentResponseUsageMetada
 	}
 
 	return openai.Usage{
-		CompletionTokens: int(metadata.CandidatesTokenCount),
+		CompletionTokens: int(metadata.CandidatesTokenCount) + int(metadata.ThoughtsTokenCount),
 		PromptTokens:     int(metadata.PromptTokenCount),
 		TotalTokens:      int(metadata.TotalTokenCount),
 		PromptTokensDetails: &openai.PromptTokensDetails{
