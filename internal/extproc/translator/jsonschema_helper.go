@@ -253,98 +253,113 @@ func jsonSchemaToGapic(schema map[string]any, allowedSchemaFieldsSet map[string]
 		case "$defs":
 			continue
 		case "items":
-			if subSchema, ok := value.(map[string]any); ok {
-				var err error
-				convertedSchema["items"], err = jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
-				if err != nil {
-					return nil, err
-				}
+			subSchema, ok := value.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON schema: 'items' must be a dict")
+			}
+			var err error
+			convertedSchema["items"], err = jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
+			if err != nil {
+				return nil, err
 			}
 		case "properties":
-			if properties, ok := value.(map[string]any); ok {
-				convertedSchema["properties"] = make(map[string]any)
-				for pkey, pvalue := range properties {
-					if pSubSchema, ok := pvalue.(map[string]any); ok {
-						var err error
-						convertedSchema["properties"].(map[string]any)[pkey], err = jsonSchemaToGapic(pSubSchema, allowedSchemaFieldsSet)
-						if err != nil {
-							return nil, err
-						}
+			properties, ok := value.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON schema: 'properties' must be a dict")
+			}
+
+			convertedSchema["properties"] = make(map[string]any)
+			for pkey, pvalue := range properties {
+				if pSubSchema, ok := pvalue.(map[string]any); ok {
+					var err error
+					convertedSchema["properties"].(map[string]any)[pkey], err = jsonSchemaToGapic(pSubSchema, allowedSchemaFieldsSet)
+					if err != nil {
+						return nil, err
 					}
 				}
 			}
 		case "type":
-			if typeList, ok := value.([]any); ok {
-				if len(typeList) == 2 {
-					hasNull := false
-					var nonNullType any
-					for _, t := range typeList {
-						if t == "null" {
-							hasNull = true
-						} else {
-							nonNullType = t
-						}
-					}
-					if hasNull && nonNullType != nil {
-						if nonNullTypeMap, ok := nonNullType.(map[string]any); ok {
-							res, err := jsonSchemaToGapic(nonNullTypeMap, allowedSchemaFieldsSet)
-							if err != nil {
-								return nil, err
-							}
-							for resKey, resVal := range res {
-								convertedSchema[resKey] = resVal
-							}
-						} else {
-							convertedSchema["type"] = fmt.Sprintf("%v", nonNullType)
-						}
-						convertedSchema["nullable"] = true
-					} else {
-						msg := "If type is a list, it must contain one non-null type and 'null'."
-						return nil, fmt.Errorf("invalid JSON schema: %s", msg)
-					}
-				} else {
+
+			switch typeList := value.(type) {
+			case []any:
+				if len(typeList) != 2 {
 					msg := fmt.Sprintf("If the value of type is a list, the length of the list must be 2. Got %d.", len(typeList))
 					return nil, fmt.Errorf("invalid JSON schema: %s", msg)
 				}
-			} else {
-				convertedSchema["type"] = fmt.Sprintf("%v", value)
-			}
-		case "allOf":
-			if allOfList, ok := value.([]any); ok {
-				if len(allOfList) > 1 {
-					msg := fmt.Sprintf("Only one value for 'allOf' key is supported. Got %d.", len(allOfList))
-					return nil, fmt.Errorf("invalid JSON schema: %s", msg)
-				}
-				if subSchema, ok := allOfList[0].(map[string]any); ok {
-					return jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
-				}
-			}
-		case "anyOf":
-			if anyOfList, ok := value.([]any); ok {
-				anyOfResults := make([]any, 0)
-				nullable := false
-				for _, v := range anyOfList {
-					if subSchema, ok := v.(map[string]any); ok {
-						if t, exists := subSchema["type"]; exists && t == "null" {
-							nullable = true
-						} else {
-							res, err := jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
-							if err != nil {
-								return nil, err
-							}
-							anyOfResults = append(anyOfResults, res)
-						}
+				hasNull := false
+				var nonNullType any
+				for _, t := range typeList {
+					if t == "null" {
+						hasNull = true
+					} else {
+						nonNullType = t
 					}
 				}
-				if nullable {
+				if hasNull && nonNullType != nil {
+					if nonNullTypeMap, ok := nonNullType.(map[string]any); ok {
+						res, err := jsonSchemaToGapic(nonNullTypeMap, allowedSchemaFieldsSet)
+						if err != nil {
+							return nil, err
+						}
+						for resKey, resVal := range res {
+							convertedSchema[resKey] = resVal
+						}
+					} else {
+						convertedSchema["type"] = fmt.Sprintf("%v", nonNullType)
+					}
 					convertedSchema["nullable"] = true
+				} else {
+					msg := "If type is a list, it must contain one non-null type and 'null'."
+					return nil, fmt.Errorf("invalid JSON schema: %s", msg)
 				}
-				convertedSchema["anyOf"] = anyOfResults
+			case string:
+				convertedSchema["type"] = typeList
+			default:
+				return nil, fmt.Errorf("invalid JSON schema: the value of 'type' must be a list or a string")
 			}
+		case "allOf":
+			allOfList, ok := value.([]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON schema: 'allOf' must be a list")
+			}
+			if len(allOfList) > 1 {
+				msg := fmt.Sprintf("Only one value for 'allOf' key is supported. Got %d.", len(allOfList))
+				return nil, fmt.Errorf("invalid JSON schema: %s", msg)
+			}
+			subSchema, ok := allOfList[0].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON schema: item in 'allOf' must be an object (map[string]any)")
+			}
+			return jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
+		case "anyOf":
+			anyOfList, ok := value.([]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON schema: 'anyOf' must be a list")
+			}
+			anyOfResults := make([]any, 0)
+			nullable := false
+			for _, v := range anyOfList {
+				subSchema, ok := v.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("invalid JSON schema: item in 'anyOf' must be a dict")
+				}
+				if t, exists := subSchema["type"]; exists && t == "null" {
+					nullable = true
+				} else {
+					res, err := jsonSchemaToGapic(subSchema, allowedSchemaFieldsSet)
+					if err != nil {
+						return nil, err
+					}
+					anyOfResults = append(anyOfResults, res)
+				}
+			}
+			if nullable {
+				convertedSchema["nullable"] = true
+			}
+			convertedSchema["anyOf"] = anyOfResults
 		default:
 			// Check if the key is in the allowed set.
 			if _, allowed := allowedSchemaFieldsSet[key]; allowed {
-				fmt.Println(key, "allowed", value)
 				convertedSchema[key] = value
 			}
 		}
@@ -379,6 +394,7 @@ func jsonSchemaToGemini(schema map[string]any) (*genai.Schema, error) {
 		return nil, fmt.Errorf("dereferenced schema was not a map[string]any")
 	}
 
+	// allowedSchemaFieldsSet is the set of supported field names in genai.Schema.
 	allowedSchemaFieldsSet := map[string]struct{}{
 		"anyOf":            {},
 		"default":          {},

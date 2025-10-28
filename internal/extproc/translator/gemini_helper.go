@@ -393,6 +393,11 @@ func openAIToolChoiceToGeminiToolConfig(toolChoice *openai.ChatCompletionToolCho
 	}
 }
 
+// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema, separate it as a small function to make it easir to maintain
+func responseJSONSchemaAvailable(requestModel internalapi.RequestModel) bool {
+	return strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "2.5")
+}
+
 // openAIReqToGeminiGenerationConfig converts OpenAI request to Gemini GenerationConfig.
 func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest, requestModel internalapi.RequestModel) (*genai.GenerationConfig, geminiResponseMode, error) {
 	responseMode := responseModeNone
@@ -439,13 +444,13 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest, 
 			}
 
 			responseMode = responseModeJSON
-			// it only works with gemini2.5 according to https://ai.google.dev/gemini-api/docs/structured-output#json-schema
-			if strings.Contains(requestModel, "gemini") && strings.Contains(requestModel, "2.5") {
+
+			if responseJSONSchemaAvailable(requestModel) {
 				gc.ResponseJsonSchema = schemaMap
 			} else {
 				convertedSchema, err := jsonSchemaToGemini(schemaMap)
 				if err != nil {
-					return nil, fmt.Errorf("invalid JSON schema: %w", err)
+					return nil, responseMode, fmt.Errorf("invalid JSON schema: %w", err)
 				}
 				gc.ResponseSchema = convertedSchema
 
