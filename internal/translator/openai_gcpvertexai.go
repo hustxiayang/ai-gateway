@@ -401,16 +401,13 @@ func getGenerationConfigThinkingConfig(tu *openai.ThinkingUnion) *genai.Thinking
 	result := &genai.ThinkingConfig{}
 
 	if tu.OfEnabled != nil {
+
 		result.IncludeThoughts = tu.OfEnabled.IncludeThoughts
 
-		// Only set the budget if it's not the zero value.
-		// A zero budget would likely be treated the same as a disabled config.
-		if tu.OfEnabled.BudgetTokens > 0 {
-			// Convert int64 to int32,
-			//nolint:gosec // G115: BudgetTokens is known to be within int32 range.
-			budget := int32(tu.OfEnabled.BudgetTokens)
-			result.ThinkingBudget = &budget
-		}
+		// Convert int64 to int32,
+		//nolint:gosec // G115: BudgetTokens is known to be within int32 range.
+		budget := int32(tu.OfEnabled.BudgetTokens)
+		result.ThinkingBudget = &budget
 	} else if tu.OfDisabled != nil {
 		// If thinking is disabled, the target config should have default values.
 		// The `omitempty` tags will ensure they aren't marshaled.
