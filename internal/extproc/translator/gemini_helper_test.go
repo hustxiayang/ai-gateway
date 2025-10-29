@@ -1532,7 +1532,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel: "gemini-pro", // older model that doesn't support native JSON schema
+			requestModel: "gemini-2.0-flash", // older model that doesn't support native JSON schema
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
@@ -1586,7 +1586,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel: "gemini-pro", // older model
+			requestModel: "gemini-2.0-flash", // older model
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
@@ -1643,7 +1643,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel: "gemini-pro",
+			requestModel: "gemini-2.0-flash",
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
@@ -1682,7 +1682,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel: "gemini-pro",
+			requestModel: "gemini-2.0-flash",
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
@@ -1725,7 +1725,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel: "gemini-pro",
+			requestModel: "gemini-2.0-flash",
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ResponseMIMEType: "application/json",
 				ResponseSchema: &genai.Schema{
@@ -1760,7 +1760,7 @@ func TestOpenAIReqToGeminiGenerationConfigWithJsonSchemaToGemini(t *testing.T) {
 					},
 				},
 			},
-			requestModel:   "gemini-pro",
+			requestModel:   "gemini-2.0-flash",
 			expectedErrMsg: "invalid JSON schema",
 		},
 		{
