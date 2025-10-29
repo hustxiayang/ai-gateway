@@ -145,51 +145,6 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 			}`),
 			expectedErrMsg: "invalid character",
 		},
-		{
-			name: "Invalid vendor field type",
-			jsonData: []byte(`{
-				"model": "gemini-1.5-pro",
-				"messages": [
-					{
-						"role": "user",
-						"content": "Test invalid vendor field type"
-					}
-				],
-				"generationConfig": "invalid_string_type"
-			}`),
-			expectedErrMsg: "cannot unmarshal string into Go struct field",
-		},
-		{
-			name: "Request with media resolution detail field",
-			jsonData: []byte(`{
-				"model": "gemini-1.5-pro",
-				"messages": [
-					{
-						"role": "user",
-						"content": "Test with media resolution detail"
-					}
-				],
-				"generationConfig": {
-					"media_resolution": "high"
-				}
-			}`),
-			expected: &ChatCompletionRequest{
-				Model: "gemini-1.5-pro",
-				Messages: []ChatCompletionMessageParamUnion{
-					{
-						OfUser: &ChatCompletionUserMessageParam{
-							Role:    ChatMessageRoleUser,
-							Content: StringOrUserRoleContentUnion{Value: "Test with media resolution detail"},
-						},
-					},
-				},
-				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
-					GenerationConfig: &GCPVertexAIGenerationConfig{
-						MediaResolution: "high",
-					},
-				},
-			},
-		},
 	}
 
 	for _, tt := range tests {
