@@ -36,12 +36,6 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 						"content": "Hello, world!"
 					}
 				],
-				"generationConfig": {
-					"thinkingConfig": {
-						"includeThoughts": true,
-						"thinkingBudget": 1000
-					}
-				},
                 "safetySettings": [{
                     "category": "HARM_CATEGORY_HARASSMENT",
                     "threshold": "BLOCK_ONLY_HIGH"
@@ -58,65 +52,10 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 					},
 				},
 				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
-					GenerationConfig: &GCPVertexAIGenerationConfig{
-						ThinkingConfig: &genai.ThinkingConfig{
-							IncludeThoughts: true,
-							ThinkingBudget:  ptr.To(int32(1000)),
-						},
-					},
 					SafetySettings: []*genai.SafetySetting{
 						{
 							Category:  genai.HarmCategoryHarassment,
 							Threshold: genai.HarmBlockThresholdBlockOnlyHigh,
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "Request with multiple vendor fields",
-			jsonData: []byte(`{
-				"model": "claude-3",
-				"messages": [
-					{
-						"role": "user",
-						"content": "Multiple vendors test"
-					}
-				],
-				"generationConfig": {
-					"thinkingConfig": {
-						"includeThoughts": true,
-						"thinkingBudget": 1000
-					}
-				},
-				"thinking": {
-					"type": "enabled",
-					"budget_tokens": 1000
-				}
-			}`),
-			expected: &ChatCompletionRequest{
-				Model: "claude-3",
-				Messages: []ChatCompletionMessageParamUnion{
-					{
-						OfUser: &ChatCompletionUserMessageParam{
-							Role:    ChatMessageRoleUser,
-							Content: StringOrUserRoleContentUnion{Value: "Multiple vendors test"},
-						},
-					},
-				},
-				AnthropicVendorFields: &AnthropicVendorFields{
-					Thinking: &anthropic.ThinkingConfigParamUnion{
-						OfEnabled: &anthropic.ThinkingConfigEnabledParam{
-							BudgetTokens: 1000,
-							Type:         "enabled",
-						},
-					},
-				},
-				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
-					GenerationConfig: &GCPVertexAIGenerationConfig{
-						ThinkingConfig: &genai.ThinkingConfig{
-							IncludeThoughts: true,
-							ThinkingBudget:  ptr.To(int32(1000)),
 						},
 					},
 				},

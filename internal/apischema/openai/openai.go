@@ -825,24 +825,63 @@ type ThinkingUnion struct {
 	OfDisabled *ThinkingDisabled `json:",omitzero,inline"`
 }
 
-// The properties BudgetTokens, Type are required.
 type ThinkingEnabled struct {
-	// Determines how many tokens Claude can use for its internal reasoning process.
+	// Determines how many tokens the model can use for its internal reasoning process.
 	// Larger budgets can enable more thorough analysis for complex problems, improving
 	// response quality.
-	//
-	// Must be ≥1024 and less than `max_tokens`.
-	//
-	// See
-	// [extended thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking)
-	// for details.
-	BudgetTokens int64 `json:"budget_tokens,required"`
+	BudgetTokens int64 `json:"budget_tokens"`
 	// This field can be elided, and will marshal its zero value as "enabled".
-	Type string `json:"type,required"`
+	Type string `json:"type"`
+
+	// Optional. Indicates the thinking budget in tokens.
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
 }
 
 type ThinkingDisabled struct {
-	Type string `json:"type,required"`
+	Type string `json:"type,"`
+}
+
+// MarshalJSON implements the json.Marshaler interface for ThinkingUnion.
+func (t *ThinkingUnion) MarshalJSON() ([]byte, error) {
+	if t.OfEnabled != nil {
+		return json.Marshal(t.OfEnabled)
+	}
+	if t.OfDisabled != nil {
+		return json.Marshal(t.OfDisabled)
+	}
+	// If both are nil, return an empty object or an error, depending on your desired behavior.
+	return []byte(`{}`), nil
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface for ThinkingUnion.
+func (t *ThinkingUnion) UnmarshalJSON(data []byte) error {
+	// Use a temporary struct to determine the type
+	typeResult := gjson.GetBytes(data, "type")
+	if !typeResult.Exists() {
+		return errors.New("thinking config does not have a type")
+	}
+
+	// Based on the 'type' field, unmarshal into the correct struct.
+	typeVal := typeResult.String()
+
+	switch typeVal {
+	case "enabled":
+		var enabled ThinkingEnabled
+		if err := json.Unmarshal(data, &enabled); err != nil {
+			return err
+		}
+		t.OfEnabled = &enabled
+	case "disabled":
+		var disabled ThinkingDisabled
+		if err := json.Unmarshal(data, &disabled); err != nil {
+			return err
+		}
+		t.OfDisabled = &disabled
+	default:
+		return fmt.Errorf("invalid thinking union type: %s", typeVal)
+	}
+
+	return nil
 }
 
 type ChatCompletionRequest struct {
@@ -1008,9 +1047,6 @@ type ChatCompletionRequest struct {
 	// GCPVertexAIVendorFields configures the GCP VertexAI specific fields during schema translation.
 	*GCPVertexAIVendorFields `json:",inline,omitempty"`
 
-	// AnthropicVendorFields configures the Anthropic specific fields during schema translation.
-	*AnthropicVendorFields `json:",inline,omitempty"`
-
 	// GuidedChoice: The output will be exactly one of the choices.
 	GuidedChoice []string `json:"guided_choice,omitzero"`
 
@@ -1021,8 +1057,7 @@ type ChatCompletionRequest struct {
 	GuidedJSON json.RawMessage `json:"guided_json,omitzero"`
 
 	// Thinking: The thinking config for reasoning models
-	//Thinking *anthropic.ThinkingConfigParamUnion `json:"thinking,omitzero"`
-	Thinking Thinking `json:"thinking,omitzero"`
+	Thinking *ThinkingUnion `json:"thinking,omitzero"`
 }
 
 type StreamOptions struct {
@@ -1594,12 +1629,6 @@ func (t JSONUNIXTime) Equal(other JSONUNIXTime) bool {
 
 // GCPVertexAIVendorFields contains GCP Vertex AI (Gemini) vendor-specific fields.
 type GCPVertexAIVendorFields struct {
-	// GenerationConfig holds Gemini generation configuration options.
-	// Currently only a subset of the options are supported.
-	//
-	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig
-	GenerationConfig *GCPVertexAIGenerationConfig `json:"generationConfig,omitzero"`
-
 	// SafetySettings: Safety settings in the request to block unsafe content in the response.
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
