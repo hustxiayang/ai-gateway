@@ -647,6 +647,44 @@ func extractToolCallsFromGeminiParts(parts []*genai.Part) ([]openai.ChatCompleti
 	return toolCalls, nil
 }
 
+// extractToolCallsFromGeminiPartsStream extracts tool calls from Gemini parts with stream mode. It's better to make it separate as the real struct definition of field like Function should be separate.
+func extractToolCallsFromGeminiPartsStream(parts []*genai.Part) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
+	var toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall
+
+	for _, part := range parts {
+		if part == nil || part.FunctionCall == nil {
+			continue
+		}
+
+		// Convert function call arguments to JSON string.
+		args, err := json.Marshal(part.FunctionCall.Args)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal function arguments: %w", err)
+		}
+
+		// Generate a random ID for the tool call.
+		toolCallID := uuid.New().String()
+
+		toolCall := openai.ChatCompletionChunkChoiceDeltaToolCall{
+			ID:   &toolCallID,
+			Type: openai.ChatCompletionMessageToolCallTypeFunction,
+			Function: openai.ChatCompletionMessageToolCallFunctionParam{
+				Name:      part.FunctionCall.Name,
+				Arguments: string(args),
+			},
+			Index: 0,
+		}
+
+		toolCalls = append(toolCalls, toolCall)
+	}
+
+	if len(toolCalls) == 0 {
+		return nil, nil
+	}
+
+	return toolCalls, nil
+}
+
 // geminiUsageToOpenAIUsage converts Gemini usage metadata to OpenAI usage.
 func geminiUsageToOpenAIUsage(metadata *genai.GenerateContentResponseUsageMetadata) openai.Usage {
 	if metadata == nil {
@@ -746,7 +784,7 @@ func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, res
 			}
 
 			// Extract tool calls if any.
-			toolCalls, err := extractToolCallsFromGeminiParts(candidate.Content.Parts)
+			toolCalls, err := extractToolCallsFromGeminiPartsStream(candidate.Content.Parts)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}

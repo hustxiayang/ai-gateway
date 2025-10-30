@@ -775,12 +775,13 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 				Index: 0,
 				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
 					Role: o.role,
-					ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+					ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
 						{
 							Function: openai.ChatCompletionMessageToolCallFunctionParam{
 								Arguments: event.Delta.ToolUse.Input,
 							},
-							Type: openai.ChatCompletionMessageToolCallTypeFunction,
+							Type:  openai.ChatCompletionMessageToolCallTypeFunction,
+							Index: 0,
 						},
 					},
 				},
@@ -811,13 +812,14 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 				Index: 0,
 				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
 					Role: o.role,
-					ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+					ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
 						{
 							ID: &event.Start.ToolUse.ToolUseID,
 							Function: openai.ChatCompletionMessageToolCallFunctionParam{
 								Name: event.Start.ToolUse.Name,
 							},
-							Type: openai.ChatCompletionMessageToolCallTypeFunction,
+							Type:  openai.ChatCompletionMessageToolCallTypeFunction,
+							Index: 0,
 						},
 					},
 				},
