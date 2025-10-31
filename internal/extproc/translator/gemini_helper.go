@@ -647,9 +647,12 @@ func extractToolCallsFromGeminiParts(parts []*genai.Part) ([]openai.ChatCompleti
 	return toolCalls, nil
 }
 
-// extractToolCallsFromGeminiPartsStream extracts tool calls from Gemini parts with stream mode. It's better to make it separate as the real struct definition of field like Function should be separate.
+// extractToolCallsFromGeminiPartsStream extracts tool calls from Gemini parts for streaming responses.
+// Each tool call is assigned an incremental index starting from 0, matching OpenAI's streaming protocol.
+// Returns ChatCompletionChunkChoiceDeltaToolCall types suitable for streaming responses, or nil if no tool calls are found.
 func extractToolCallsFromGeminiPartsStream(parts []*genai.Part) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
 	var toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall
+	toolCallIndex := int64(0)
 
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
@@ -672,10 +675,11 @@ func extractToolCallsFromGeminiPartsStream(parts []*genai.Part) ([]openai.ChatCo
 				Name:      part.FunctionCall.Name,
 				Arguments: string(args),
 			},
-			Index: 0,
+			Index: toolCallIndex,
 		}
 
 		toolCalls = append(toolCalls, toolCall)
+		toolCallIndex++
 	}
 
 	if len(toolCalls) == 0 {
