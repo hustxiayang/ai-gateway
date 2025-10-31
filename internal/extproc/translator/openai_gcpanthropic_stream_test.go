@@ -296,6 +296,111 @@ data: {"type":"message_stop"}
 		require.NotNil(t, bm)
 		bodyStr := string(bm.GetBody())
 
+		// Parse all streaming events to verify the event flow
+		var chunks []openai.ChatCompletionResponseChunk
+		var textChunks []string
+		var toolCallStarted bool
+		var hasRole bool
+		var toolCallCompleted bool
+		var finalFinishReason openai.ChatCompletionChoicesFinishReason
+		var finalUsageChunk *openai.ChatCompletionResponseChunk
+		var toolCallChunks []string // Track partial JSON chunks
+
+		lines := strings.SplitSeq(strings.TrimSpace(bodyStr), "\n\n")
+		for line := range lines {
+			if !strings.HasPrefix(line, "data: ") || strings.Contains(line, "[DONE]") {
+				continue
+			}
+			jsonBody := strings.TrimPrefix(line, "data: ")
+
+			var chunk openai.ChatCompletionResponseChunk
+			err = json.Unmarshal([]byte(jsonBody), &chunk)
+			require.NoError(t, err, "Failed to unmarshal chunk: %s", jsonBody)
+			chunks = append(chunks, chunk)
+
+			// Check if this is the final usage chunk
+			if strings.Contains(jsonBody, `"usage"`) {
+				finalUsageChunk = &chunk
+			}
+
+			if len(chunk.Choices) > 0 {
+				choice := chunk.Choices[0]
+				// Check for role in first content chunk
+				if choice.Delta != nil && choice.Delta.Content != nil && *choice.Delta.Content != "" && !hasRole {
+					require.NotNil(t, choice.Delta.Role, "Role should be present on first content chunk")
+					require.Equal(t, openai.ChatMessageRoleAssistant, choice.Delta.Role)
+					hasRole = true
+				}
+
+				// Collect text content
+				if choice.Delta != nil && choice.Delta.Content != nil {
+					textChunks = append(textChunks, *choice.Delta.Content)
+				}
+
+				// Check tool calls - start and accumulate partial JSON
+				if choice.Delta != nil && len(choice.Delta.ToolCalls) > 0 {
+					toolCall := choice.Delta.ToolCalls[0]
+
+					// Check tool call initiation
+					if toolCall.Function.Name == "get_weather" && !toolCallStarted {
+						require.Equal(t, "get_weather", toolCall.Function.Name)
+						require.NotNil(t, toolCall.ID)
+						require.Equal(t, "toolu_01T1x1fJ34qAmk2tNTrN7Up6", *toolCall.ID)
+						require.Equal(t, int64(0), toolCall.Index, "Tool call should be at index 1 (after text content at index 0)")
+						toolCallStarted = true
+					}
+
+					// Accumulate partial JSON arguments - these should also be at index 1
+					if toolCall.Function.Arguments != "" {
+						toolCallChunks = append(toolCallChunks, toolCall.Function.Arguments)
+
+						// Verify the index remains consistent at 1 for all tool call chunks
+						require.Equal(t, int64(0), toolCall.Index, "Tool call argument chunks should be at index 1")
+					}
+				}
+
+				// Track finish reason
+				if choice.FinishReason != "" {
+					finalFinishReason = choice.FinishReason
+					if finalFinishReason == "tool_calls" {
+						toolCallCompleted = true
+					}
+				}
+			}
+		}
+
+		// Check the final usage chunk for accumulated tool call arguments
+		if finalUsageChunk != nil {
+			require.Equal(t, 472, finalUsageChunk.Usage.PromptTokens)
+			require.Equal(t, 89, finalUsageChunk.Usage.CompletionTokens)
+		}
+
+		// Verify partial JSON accumulation in streaming chunks
+		if len(toolCallChunks) > 0 {
+			// Verify we got multiple partial JSON chunks during streaming
+			require.True(t, len(toolCallChunks) >= 2, "Should receive multiple partial JSON chunks for tool arguments")
+
+			// Verify some expected partial content appears in the chunks
+			fullPartialJSON := strings.Join(toolCallChunks, "")
+			require.Contains(t, fullPartialJSON, `"location":`, "Partial JSON should contain location field")
+			require.Contains(t, fullPartialJSON, `"unit":`, "Partial JSON should contain unit field")
+			require.Contains(t, fullPartialJSON, "San Francisco", "Partial JSON should contain location value")
+			require.Contains(t, fullPartialJSON, "fahrenheit", "Partial JSON should contain unit value")
+		}
+
+		// Verify streaming event assertions
+		require.True(t, len(chunks) >= 5, "Should have multiple streaming chunks")
+		require.True(t, hasRole, "Should have role in first content chunk")
+		require.True(t, toolCallStarted, "Tool call should have been initiated")
+		require.True(t, toolCallCompleted, "Tool call should have complete arguments in final chunk")
+		require.Equal(t, openai.ChatCompletionChoicesFinishReasonToolCalls, finalFinishReason, "Final finish reason should be tool_calls")
+
+		// Verify text content was streamed correctly
+		fullText := strings.Join(textChunks, "")
+		require.Contains(t, fullText, "Okay, let's check the weather for San Francisco, CA:")
+		require.True(t, len(textChunks) >= 3, "Text should be streamed in multiple chunks")
+
+		// Original aggregate response assertions
 		require.Contains(t, bodyStr, `"content":"Okay"`)
 		require.Contains(t, bodyStr, `"name":"get_weather"`)
 		require.Contains(t, bodyStr, "\"arguments\":\"{\\\"location\\\":")
