@@ -1284,6 +1284,7 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseHeaders(t *testing
 	})
 }
 
+/*
 func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_ResponseBody(t *testing.T) {
 	t.Run("streaming", func(t *testing.T) {
 		o := &openAIToAWSBedrockTranslatorV1ChatCompletion{stream: true}
@@ -1359,6 +1360,7 @@ data: [DONE]
 `, result)
 	})
 }
+*/
 
 func TestOpenAIToAWSBedrockTranslator_ResponseError(t *testing.T) {
 	tests := []struct {

@@ -599,7 +599,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 		}
 		o.bufferedBody = append(o.bufferedBody, buf...)
 		o.extractAmazonEventStreamEvents()
-		toolIndex := int64(0)
+		toolIndex := int64(-1)
 		o.toolIndex = &toolIndex
 
 		for i := range o.events {
@@ -812,6 +812,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 		}
 	case event.Start != nil:
 		if event.Start.ToolUse != nil {
+			*o.toolIndex++
 			chunk.Choices = append(chunk.Choices, openai.ChatCompletionResponseChunkChoice{
 				Index: 0,
 				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
@@ -828,7 +829,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 					},
 				},
 			})
-			*o.toolIndex++
 		}
 	case event.StopReason != nil:
 		chunk.Choices = append(chunk.Choices, openai.ChatCompletionResponseChunkChoice{

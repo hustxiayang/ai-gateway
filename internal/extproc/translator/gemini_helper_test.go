@@ -1733,7 +1733,7 @@ func TestExtractToolCallsStreamVsNonStream(t *testing.T) {
 	assert.NotNil(t, streamCall.ID)
 	assert.NotEmpty(t, *streamCall.ID)
 	// UUID should be longer than a simple sequential ID
-	assert.True(t, len(*streamCall.ID) > 10, "Stream ID should be a UUID, got: %s", *streamCall.ID)
+	assert.Greater(t, len(*streamCall.ID), 10, "Stream ID should be a UUID, got: %s", *streamCall.ID)
 
 	// 3. Non-stream version should have a UUID as well (both generate UUIDs now)
 	assert.NotNil(t, nonStreamCall.ID)
@@ -1785,13 +1785,13 @@ func TestExtractToolCallsStreamIndexing(t *testing.T) {
 
 	// Verify specific function names and arguments
 	assert.Equal(t, "first_function", calls[0].Function.Name)
-	assert.Equal(t, `{"param":"value1"}`, calls[0].Function.Arguments)
+	assert.JSONEq(t, `{"param":"value1"}`, calls[0].Function.Arguments)
 
 	assert.Equal(t, "second_function", calls[1].Function.Name)
-	assert.Equal(t, `{"param":"value2"}`, calls[1].Function.Arguments)
+	assert.JSONEq(t, `{"param":"value2"}`, calls[1].Function.Arguments)
 
 	assert.Equal(t, "third_function", calls[2].Function.Name)
-	assert.Equal(t, `{"param":"value3"}`, calls[2].Function.Arguments)
+	assert.JSONEq(t, `{"param":"value3"}`, calls[2].Function.Arguments)
 
 	// Verify all IDs are unique
 	ids := make(map[string]bool)
