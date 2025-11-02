@@ -845,7 +845,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 	default:
 		// this is the content stop event if none of the above is set.
 		if o.activeToolStream {
-			o.toolIndex = o.toolIndex + 1
+			o.toolIndex++
 			o.activeToolStream = false
 		}
 		return chunk, false
