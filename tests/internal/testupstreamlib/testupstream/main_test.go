@@ -339,7 +339,7 @@ func Test_main(t *testing.T) {
 			message, err = decoder.Decode(response.Body, nil)
 			require.NoError(t, err)
 			require.Equal(t, "contentBlockDelta", message.Headers.Get("event-type").String())
-			require.Equal(t, fmt.Sprintf("{\"contentBlockIndex\": 0, \"delta\":{\"text\":\"%d\"}}", i+1), string(message.Payload))
+			require.JSONEq(t, fmt.Sprintf("{\"contentBlockIndex\": 0, \"delta\":{\"text\":\"%d\"}}", i+1), string(message.Payload))
 
 			// Ensure that the server sends the response line every second.
 			require.Greater(t, time.Since(now), 100*time.Millisecond, time.Since(now).String())

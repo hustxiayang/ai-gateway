@@ -348,7 +348,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				eventType = "contentBlockDelta"
 			} else if _, ok = bedrockStreamEvent["stopReason"]; ok {
 				eventType = "messageStop"
-				eventType = "messageStop"
 			} else if _, ok = bedrockStreamEvent["usage"]; ok {
 				eventType = "metadata"
 			} else if _, ok = bedrockStreamEvent["contentBlockIndex"]; ok {

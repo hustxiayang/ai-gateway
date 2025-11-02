@@ -356,6 +356,9 @@ func TestWithTestUpstream(t *testing.T) {
 {"start":{"toolUse":{"name":"cosine","toolUseId":"tooluse_QklrEHKjRu6Oc4BQUfy7ZQ"}}}
 {"contentBlockIndex": 1, "delta":{"toolUse": {"input": "{\"x\": \"17\"}"}}}
 {"contentBlockIndex": 1}
+{"start":{"toolUse":{"name":"sine","toolUseId":"tooluse_stream2"}}}
+{"contentBlockIndex": 2, "delta":{"toolUse": {"input": "{\"x\": \"17\"}"}}}
+{"contentBlockIndex": 2}
 {"stopReason":"tool_use"}
 {"usage":{"inputTokens":41, "outputTokens":36, "totalTokens":77}}
 `,
@@ -371,6 +374,10 @@ data: {"choices":[{"index":0,"delta":{"content":" seems like you're testing my a
 data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tooluse_QklrEHKjRu6Oc4BQUfy7ZQ","function":{"arguments":"","name":"cosine"},"type":"function"}]}}],"object":"chat.completion.chunk"}
 
 data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"object":"chat.completion.chunk"}
+
+data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"tooluse_stream2","function":{"arguments":"","name":"sine"},"type":"function"}]}}],"object":"chat.completion.chunk"}
+
+data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"object":"chat.completion.chunk"}
 
 data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls"}],"object":"chat.completion.chunk"}
 
