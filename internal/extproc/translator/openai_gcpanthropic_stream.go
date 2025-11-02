@@ -41,7 +41,7 @@ type anthropicStreamParser struct {
 	buffer          bytes.Buffer
 	activeMessageID string
 	activeToolCalls map[int64]*streamingToolCall
-	toolIndex       *int64
+	toolIndex       int64
 	tokenUsage      LLMTokenUsage
 	stopReason      anthropic.StopReason
 	requestModel    internalapi.RequestModel
@@ -54,7 +54,7 @@ func newAnthropicStreamParser(requestModel string) *anthropicStreamParser {
 	return &anthropicStreamParser{
 		requestModel:    requestModel,
 		activeToolCalls: make(map[int64]*streamingToolCall),
-		toolIndex:       &toolIdx,
+		toolIndex:       toolIdx,
 	}
 }
 
@@ -202,8 +202,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		p.tokenUsage.CachedInputTokens += uint32(event.Message.Usage.CacheReadInputTokens) //nolint:gosec
 
 		// reset the toolIndex for each message
-		*p.toolIndex = -1
-		fmt.Print("message start works")
+		p.toolIndex = -1
 		return nil, nil
 
 	case string(constant.ValueOf[constant.ContentBlockStart]()):
@@ -212,7 +211,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			return nil, fmt.Errorf("failed to unmarshal content_block_start: %w", err)
 		}
 		if event.ContentBlock.Type == string(constant.ValueOf[constant.ToolUse]()) || event.ContentBlock.Type == string(constant.ValueOf[constant.ServerToolUse]()) {
-			*p.toolIndex++
+			p.toolIndex++
 			var argsJSON string
 			// Check if the input field is provided directly in the start event.
 			if event.ContentBlock.Input != nil {
@@ -235,7 +234,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			}
 
 			// Store the complete input JSON in our state.
-			p.activeToolCalls[*p.toolIndex] = &streamingToolCall{
+			p.activeToolCalls[p.toolIndex] = &streamingToolCall{
 				id:        event.ContentBlock.ID,
 				name:      event.ContentBlock.Name,
 				inputJSON: argsJSON,
@@ -244,7 +243,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			delta := openai.ChatCompletionResponseChunkChoiceDelta{
 				ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
 					{
-						Index: *p.toolIndex,
+						Index: p.toolIndex,
 						ID:    &event.ContentBlock.ID,
 						Type:  openai.ChatCompletionMessageToolCallTypeFunction,
 						Function: openai.ChatCompletionMessageToolCallFunctionParam{
@@ -255,7 +254,6 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 					},
 				},
 			}
-			fmt.Print("tool use block works")
 			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
 		}
 		if event.ContentBlock.Type == string(constant.ValueOf[constant.Thinking]()) {
@@ -293,14 +291,14 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: &event.Delta.Text}
 			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
 		case string(constant.ValueOf[constant.InputJSONDelta]()):
-			tool, ok := p.activeToolCalls[*p.toolIndex]
+			tool, ok := p.activeToolCalls[p.toolIndex]
 			if !ok {
-				return nil, fmt.Errorf("received input_json_delta for unknown tool at index %d", *p.toolIndex)
+				return nil, fmt.Errorf("received input_json_delta for unknown tool at index %d", p.toolIndex)
 			}
 			delta := openai.ChatCompletionResponseChunkChoiceDelta{
 				ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
 					{
-						Index: *p.toolIndex,
+						Index: p.toolIndex,
 						Function: openai.ChatCompletionMessageToolCallFunctionParam{
 							Arguments: event.Delta.PartialJSON,
 						},
@@ -317,7 +315,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if err := json.Unmarshal(data, &event); err != nil {
 			return nil, fmt.Errorf("unmarshal content_block_stop: %w", err)
 		}
-		delete(p.activeToolCalls, *p.toolIndex)
+		delete(p.activeToolCalls, p.toolIndex)
 		return nil, nil
 
 	case string(constant.ValueOf[constant.MessageStop]()):
