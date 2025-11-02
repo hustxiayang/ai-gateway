@@ -42,7 +42,7 @@ type openAIToAWSBedrockTranslatorV1ChatCompletion struct {
 	// Translator is created for each request/response stream inside external processor, accordingly the role is not reused by multiple streams.
 	role         string
 	requestModel internalapi.RequestModel
-	toolIndex    *int64
+	toolIndex    int64
 }
 
 // RequestBody implements [OpenAIChatCompletionTranslator.RequestBody].
@@ -599,8 +599,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 		}
 		o.bufferedBody = append(o.bufferedBody, buf...)
 		o.extractAmazonEventStreamEvents()
-		toolIndex := int64(-1)
-		o.toolIndex = &toolIndex
 
 		for i := range o.events {
 			event := &o.events[i]
@@ -774,7 +772,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 				},
 			})
 		case event.Delta.ToolUse != nil:
-
 			chunk.Choices = append(chunk.Choices, openai.ChatCompletionResponseChunkChoice{
 				Index: 0,
 				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
@@ -785,7 +782,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 								Arguments: event.Delta.ToolUse.Input,
 							},
 							Type:  openai.ChatCompletionMessageToolCallTypeFunction,
-							Index: *o.toolIndex,
+							Index: o.toolIndex,
 						},
 					},
 				},
@@ -812,7 +809,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 		}
 	case event.Start != nil:
 		if event.Start.ToolUse != nil {
-			*o.toolIndex++
 			chunk.Choices = append(chunk.Choices, openai.ChatCompletionResponseChunkChoice{
 				Index: 0,
 				Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
@@ -824,7 +820,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 								Name: event.Start.ToolUse.Name,
 							},
 							Type:  openai.ChatCompletionMessageToolCallTypeFunction,
-							Index: *o.toolIndex,
+							Index: o.toolIndex,
 						},
 					},
 				},
