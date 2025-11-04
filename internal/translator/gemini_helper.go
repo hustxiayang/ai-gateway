@@ -749,3 +749,45 @@ func buildGCPModelPathSuffix(publisher, model, gcpMethod string, queryParams ...
 	}
 	return pathSuffix
 }
+
+// geminiCandidatesToOpenAIStreamingChoices converts Gemini candidates to OpenAI streaming choices.
+func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, responseMode geminiResponseMode) ([]openai.ChatCompletionResponseChunkChoice, error) {
+	choices := make([]openai.ChatCompletionResponseChunkChoice, 0, len(candidates))
+
+	for idx, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+
+		// Create the streaming choice.
+		choice := openai.ChatCompletionResponseChunkChoice{
+			Index:        int64(idx),
+			FinishReason: geminiFinishReasonToOpenAI(candidate.FinishReason),
+		}
+
+		if candidate.Content != nil {
+			delta := &openai.ChatCompletionResponseChunkChoiceDelta{
+				Role: openai.ChatMessageRoleAssistant,
+			}
+
+			// Extract text from parts for streaming (delta).
+			content := extractTextFromGeminiParts(candidate.Content.Parts, responseMode)
+			if content != "" {
+				delta.Content = &content
+			}
+
+			// Extract tool calls if any.
+			toolCalls, err := extractToolCallsFromGeminiPartsStream(candidate.Content.Parts)
+			if err != nil {
+				return nil, fmt.Errorf("error extracting tool calls: %w", err)
+			}
+			delta.ToolCalls = toolCalls
+
+			choice.Delta = delta
+		}
+
+		choices = append(choices, choice)
+	}
+
+	return choices, nil
+}
