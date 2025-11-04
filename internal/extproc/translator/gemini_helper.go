@@ -765,14 +765,14 @@ func buildGCPModelPathSuffix(publisher, model, gcpMethod string, queryParams ...
 func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, responseMode geminiResponseMode) ([]openai.ChatCompletionResponseChunkChoice, error) {
 	choices := make([]openai.ChatCompletionResponseChunkChoice, 0, len(candidates))
 
-	for _, candidate := range candidates {
+	for idx, candidate := range candidates {
 		if candidate == nil {
 			continue
 		}
 
 		// Create the streaming choice.
 		choice := openai.ChatCompletionResponseChunkChoice{
-			Index:        0,
+			Index:        int64(idx),
 			FinishReason: geminiFinishReasonToOpenAI(candidate.FinishReason),
 		}
 
