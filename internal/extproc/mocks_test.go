@@ -19,6 +19,8 @@ import (
 
 	cohere "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/backendauth"
+	"github.com/envoyproxy/ai-gateway/internal/extproc/translator"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -345,7 +347,7 @@ func (m *mockEmbeddingTranslator) ResponseError(map[string]string, io.Reader) (n
 // mockBackendAuthHandler implements [filterapi.BackendAuthHandler] for testing.
 type mockBackendAuthHandler struct{}
 
-// Do implements [filterapi.BackendAuthHandler.Do].
+// Do implements [backendauth.Handler.Do].
 func (m *mockBackendAuthHandler) Do(context.Context, map[string]string, []byte) ([]internalapi.Header, error) {
 	return []internalapi.Header{{"foo", "mock-auth-handler"}}, nil
 }
