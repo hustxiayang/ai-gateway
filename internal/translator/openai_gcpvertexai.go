@@ -194,22 +194,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		// Convert GCP chunk to OpenAI chunk.
 		openAIChunk := o.convertGCPChunkToOpenAI(chunk)
 
-		// Extract token usage if present in this chunk (typically in the last chunk).
-		if chunk.UsageMetadata != nil {
-			if chunk.UsageMetadata.PromptTokenCount >= 0 {
-				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CandidatesTokenCount >= 0 {
-				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.TotalTokenCount >= 0 {
-				tokenUsage.SetTotalTokens(uint32(chunk.UsageMetadata.TotalTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CachedContentTokenCount >= 0 {
-				tokenUsage.SetCachedInputTokens(uint32(chunk.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
-			}
-		}
-
 		// Serialize to SSE format as expected by OpenAI API.
 		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &newBody)
 		if err != nil {
@@ -218,6 +202,40 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 
 		if span != nil {
 			span.RecordResponseChunk(openAIChunk)
+		}
+
+		// Extract token usage only in the last chunk.
+		if chunk.UsageMetadata != nil && chunk.UsageMetadata.PromptTokenCount > 0 {
+			// Convert usage to pointer if available.
+			usage := ptr.To(geminiUsageToOpenAIUsage(chunk.UsageMetadata))
+
+			usageChunk := openai.ChatCompletionResponseChunk{
+				Object:  "chat.completion.chunk",
+				Choices: []openai.ChatCompletionResponseChunkChoice{},
+				// usage is nil for all chunks other than the last chunk
+				Usage: usage,
+			}
+
+			// Serialize to SSE format as expected by OpenAI API.
+			var chunkBytes []byte
+			chunkBytes, err = json.Marshal(usageChunk)
+			if err != nil {
+				return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
+			}
+			sseChunkBuf.WriteString("data: ")
+			sseChunkBuf.Write(chunkBytes)
+			sseChunkBuf.WriteString("\n\n")
+
+			if span != nil {
+				span.RecordResponseChunk(openAIChunk)
+			}
+
+			tokenUsage = LLMTokenUsage{
+				InputTokens:       uint32(chunk.UsageMetadata.PromptTokenCount),        //nolint:gosec
+				OutputTokens:      uint32(chunk.UsageMetadata.CandidatesTokenCount),    //nolint:gosec
+				TotalTokens:       uint32(chunk.UsageMetadata.TotalTokenCount),         //nolint:gosec
+				CachedInputTokens: uint32(chunk.UsageMetadata.CachedContentTokenCount), //nolint:gosec
+			}
 		}
 	}
 
@@ -375,19 +393,13 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) convertGCPChunkToOpenAI(
 		choices = []openai.ChatCompletionResponseChunkChoice{}
 	}
 
-	// Convert usage to pointer if available.
-	var usage *openai.Usage
-	if chunk.UsageMetadata != nil {
-		usage = ptr.To(geminiUsageToOpenAIUsage(chunk.UsageMetadata))
-	}
-
 	return &openai.ChatCompletionResponseChunk{
 		ID:      chunk.ResponseID,
 		Created: openai.JSONUNIXTime(chunk.CreateTime),
 		Object:  "chat.completion.chunk",
 		Choices: choices,
-		Usage:   usage,
-		Model:   o.requestModel,
+		// usage is nil for all chunks other than the last chunk
+		Usage: nil,
 	}
 }
 
