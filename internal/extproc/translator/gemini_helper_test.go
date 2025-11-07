@@ -1901,7 +1901,10 @@ func TestExtractToolCallsFromGeminiPartsStream(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			calls, err := extractToolCallsFromGeminiPartsStream(toolCalls, tt.input)
+			o := openAIToGCPVertexAITranslatorV1ChatCompletion{
+				toolCallIndex: int64(-1),
+			}
+			calls, err := o.extractToolCallsFromGeminiPartsStream(toolCalls, tt.input)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1935,9 +1938,12 @@ func TestExtractToolCallsStreamVsNonStream(t *testing.T) {
 			},
 		},
 	}
+	o := openAIToGCPVertexAITranslatorV1ChatCompletion{
+		toolCallIndex: int64(-1),
+	}
 
 	// Get results from both functions
-	streamCalls, err := extractToolCallsFromGeminiPartsStream(toolCallsStream, parts)
+	streamCalls, err := o.extractToolCallsFromGeminiPartsStream(toolCallsStream, parts)
 	require.NoError(t, err)
 	require.Len(t, streamCalls, 1)
 
@@ -1999,8 +2005,11 @@ func TestExtractToolCallsStreamIndexing(t *testing.T) {
 			},
 		},
 	}
+	o := openAIToGCPVertexAITranslatorV1ChatCompletion{
+		toolCallIndex: int64(-1),
+	}
 
-	calls, err := extractToolCallsFromGeminiPartsStream(toolCalls, parts)
+	calls, err := o.extractToolCallsFromGeminiPartsStream(toolCalls, parts)
 	require.NoError(t, err)
 	require.Len(t, calls, 3)
 

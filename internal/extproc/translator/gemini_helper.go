@@ -682,9 +682,7 @@ func extractToolCallsFromGeminiParts(toolCalls []openai.ChatCompletionMessageToo
 // extractToolCallsFromGeminiPartsStream extracts tool calls from Gemini parts for streaming responses.
 // Each tool call is assigned an incremental index starting from 0, matching OpenAI's streaming protocol.
 // Returns ChatCompletionChunkChoiceDeltaToolCall types suitable for streaming responses, or nil if no tool calls are found.
-func extractToolCallsFromGeminiPartsStream(toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall, parts []*genai.Part) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
-	toolCallIndex := int64(0)
-
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGeminiPartsStream(toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall, parts []*genai.Part) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
@@ -699,6 +697,8 @@ func extractToolCallsFromGeminiPartsStream(toolCalls []openai.ChatCompletionChun
 		// Generate a random ID for the tool call.
 		toolCallID := uuid.New().String()
 
+		// a new toolCall
+		o.toolCallIndex++
 		toolCall := openai.ChatCompletionChunkChoiceDeltaToolCall{
 			ID:   &toolCallID,
 			Type: openai.ChatCompletionMessageToolCallTypeFunction,
@@ -706,11 +706,10 @@ func extractToolCallsFromGeminiPartsStream(toolCalls []openai.ChatCompletionChun
 				Name:      part.FunctionCall.Name,
 				Arguments: string(args),
 			},
-			Index: toolCallIndex,
+			Index: o.toolCallIndex,
 		}
 
 		toolCalls = append(toolCalls, toolCall)
-		toolCallIndex++
 	}
 
 	if len(toolCalls) == 0 {
@@ -793,7 +792,8 @@ func buildGCPModelPathSuffix(publisher, model, gcpMethod string, queryParams ...
 }
 
 // geminiCandidatesToOpenAIStreamingChoices converts Gemini candidates to OpenAI streaming choices.
-func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, responseMode geminiResponseMode) ([]openai.ChatCompletionResponseChunkChoice, error) {
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate) ([]openai.ChatCompletionResponseChunkChoice, error) {
+	responseMode := o.responseMode
 	choices := make([]openai.ChatCompletionResponseChunkChoice, 0, len(candidates))
 
 	for _, candidate := range candidates {
@@ -820,7 +820,7 @@ func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, res
 			}
 
 			// Extract tool calls if any.
-			toolCalls, err = extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts)
+			toolCalls, err = o.extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}

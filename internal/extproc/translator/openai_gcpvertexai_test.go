@@ -1255,6 +1255,133 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingResponseBody(t *
 	require.Equal(t, LLMTokenUsage{}, tokenUsage) // No usage in this test chunk.
 }
 
+func getChatCompletionResponseChunk(body []byte) []openai.ChatCompletionResponseChunk {
+	lines := bytes.Split(body, []byte("\n\n"))
+
+	chunks := []openai.ChatCompletionResponseChunk{}
+	for _, line := range lines {
+		// Remove "data: " prefix from SSE format if present.
+		line = bytes.TrimPrefix(line, []byte("data: "))
+
+		// Try to parse as JSON.
+		var chunk openai.ChatCompletionResponseChunk
+		if err := json.Unmarshal(line, &chunk); err == nil {
+			chunks = append(chunks, chunk)
+		}
+	}
+	return chunks
+}
+
+func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingParallelToolIndex(t *testing.T) {
+	translator := &openAIToGCPVertexAITranslatorV1ChatCompletion{
+		stream:        true,
+		toolCallIndex: int64(-1),
+	}
+	// Mock multiple GCP streaming response with parallel tool calls
+	gcpToolCallsChunk := `{
+    "candidates": [
+        {
+            "content": {
+                "parts": [
+                    {
+                        "functionCall": {
+                            "name": "get_weather",
+                            "args": {
+                                "location": "New York City"
+                            }
+                        }
+                    }
+                ],
+                "role": "model"
+            }
+        }
+    ],
+	"candidates": [
+        {
+            "content": {
+                "parts": [
+                    {
+                        "functionCall": {
+                            "name": "get_weather",
+                            "args": {
+                                "location": "Shang Hai"
+                            }
+                        }
+                    }
+                ],
+                "role": "model"
+            }
+        }
+    ],
+}`
+
+	expectedChatCompletionChunks := []openai.ChatCompletionResponseChunk{
+		{
+			Choices: []openai.ChatCompletionResponseChunkChoice{
+				{
+					Index: int64(0),
+					Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
+						Role: "assistant",
+						ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
+							{
+								Index: int64(0),
+								ID:    ptr.To("123"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Arguments: `{"location": "New York City"}`,
+									Name:      "get_weather",
+								},
+								Type: "function",
+							},
+						},
+					},
+				},
+			},
+			Object: "chat.completion.chunk",
+		},
+		{
+			Choices: []openai.ChatCompletionResponseChunkChoice{
+				{
+					Index: int64(0),
+					Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
+						Role: "assistant",
+						ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{
+							{
+								Index: int64(1),
+								ID:    ptr.To("123"),
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Arguments: `{"location": "Shang Hai}`,
+									Name:      "get_weather",
+								},
+								Type: "function",
+							},
+						},
+					},
+				},
+			},
+			Object: "chat.completion.chunk",
+		},
+	}
+
+	headerMut, bodyMut, _, _, err := translator.handleStreamingResponse(
+		bytes.NewReader([]byte(gcpToolCallsChunk)),
+		false,
+		nil,
+	)
+
+	require.Nil(t, headerMut)
+	require.NoError(t, err)
+	require.NotNil(t, bodyMut)
+	require.NotNil(t, bodyMut.Mutation)
+
+	body := bodyMut.Mutation.(*extprocv3.BodyMutation_Body).Body
+	chatCompletionChunks := getChatCompletionResponseChunk(body)
+
+	for idx, chunk := range chatCompletionChunks {
+		chunk.Choices[0].Delta.ToolCalls[0].ID = ptr.To("123")
+		require.Equal(t, chunk, expectedChatCompletionChunks[idx])
+	}
+}
+
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingEndOfStream(t *testing.T) {
 	translator := &openAIToGCPVertexAITranslatorV1ChatCompletion{
 		stream: true,
