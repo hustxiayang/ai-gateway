@@ -199,6 +199,28 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 					inputSchema.Required = requiredSlice
 				}
 
+				// Keys to skip
+				keysToSkip := map[string]bool{
+					"required":   true,
+					"type":       true,
+					"properties": true,
+				}
+
+				// ExtraFieldsMap to construct
+				ExtraFieldsMap := make(map[string]any)
+
+				// Iterate over the original map
+				for key, value := range paramsMap {
+					// Check if the current key should be skipped
+					if _, found := keysToSkip[key]; found {
+						continue // Skip the current iteration
+					}
+
+					// If not skipped, add the key-value pair to the new map
+					ExtraFieldsMap[key] = value
+				}
+				inputSchema.ExtraFields = ExtraFieldsMap
+
 				toolParam.InputSchema = inputSchema
 			}
 
