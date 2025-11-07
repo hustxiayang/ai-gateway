@@ -35,6 +35,14 @@ const (
 	tempNotSupportedError = "temperature %.2f is not supported by Anthropic (must be between 0.0 and 1.0)"
 )
 
+// anthropicInputSchemaKeysToSkip defines the keys from an OpenAI function parameter map
+// that are handled explicitly and should not go into the ExtraFields map.
+var anthropicInputSchemaKeysToSkip = map[string]struct{}{
+	"required":   {},
+	"type":       {},
+	"properties": {},
+}
+
 // NewChatCompletionOpenAIToGCPAnthropicTranslator implements [Factory] for OpenAI to GCP Anthropic translation.
 // This translator converts OpenAI ChatCompletion API requests to GCP Anthropic API format.
 func NewChatCompletionOpenAIToGCPAnthropicTranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIChatCompletionTranslator {
@@ -199,24 +207,17 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 					inputSchema.Required = requiredSlice
 				}
 
-				// Keys to skip
-				keysToSkip := map[string]bool{
-					"required":   true,
-					"type":       true,
-					"properties": true,
-				}
-
 				// ExtraFieldsMap to construct
 				ExtraFieldsMap := make(map[string]any)
 
-				// Iterate over the original map
+				// Iterate over the original map from openai
 				for key, value := range paramsMap {
 					// Check if the current key should be skipped
-					if _, found := keysToSkip[key]; found {
-						continue // Skip the current iteration
+					if _, found := anthropicInputSchemaKeysToSkip[key]; found {
+						continue
 					}
 
-					// If not skipped, add the key-value pair to the new map
+					// If not skipped, add the key-value pair to extra field map
 					ExtraFieldsMap[key] = value
 				}
 				inputSchema.ExtraFields = ExtraFieldsMap
