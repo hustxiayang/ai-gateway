@@ -1248,6 +1248,77 @@ func TestTranslateOpenAItoAnthropicTools(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name: "nested schema in tool's defintions",
+			openAIReq: &openai.ChatCompletionRequest{
+				Tools: []openai.Tool{
+					{
+						Type: "function",
+						Function: &openai.FunctionDefinition{
+							Name:        "get_weather",
+							Description: "Get the weather without type",
+							Parameters: map[string]any{
+								"properties": map[string]any{
+									"location": map[string]any{"type": "string"},
+								},
+								"required": []any{"location"},
+								"$defs": map[string]any{
+									"ReferencePassage": map[string]any{
+										"properties": map[string]any{
+											"url": map[string]any{
+												"title": "Url",
+												"type":  "string",
+											},
+											"passage_id": map[string]any{
+												"title": "Passage Id",
+												"type":  "string",
+											},
+										},
+										"required": []string{"url", "passage_id"},
+										"title":    "ReferencePassage",
+										"type":     "object",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTools: []anthropic.ToolUnionParam{
+				{
+					OfTool: &anthropic.ToolParam{
+						Name:        "get_weather",
+						Description: anthropic.String("Get the weather without type"),
+						InputSchema: anthropic.ToolInputSchemaParam{
+							Type: "",
+							Properties: map[string]any{
+								"location": map[string]any{"type": "string"},
+							},
+							Required: []string{"location"},
+							ExtraFields: map[string]any{
+								"$defs": map[string]any{
+									"ReferencePassage": map[string]any{
+										"properties": map[string]any{
+											"url": map[string]any{
+												"title": "Url",
+												"type":  "string",
+											},
+											"passage_id": map[string]any{
+												"title": "Passage Id",
+												"type":  "string",
+											},
+										},
+										"required": []string{"url", "passage_id"},
+										"title":    "ReferencePassage",
+										"type":     "object",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
