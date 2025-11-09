@@ -1430,24 +1430,27 @@ func TestGeminiFinishReasonToOpenAI(t *testing.T) {
 	}
 }
 
-func TestExtractTextFromGeminiParts(t *testing.T) {
+func TestExtractTextAndThoughtSummaryFromGeminiParts(t *testing.T) {
 	tests := []struct {
-		name         string
-		parts        []*genai.Part
-		responseMode geminiResponseMode
-		expected     string
+		name                   string
+		parts                  []*genai.Part
+		responseMode           geminiResponseMode
+		expectedThoughtSummary string
+		expectedText           string
 	}{
 		{
-			name:         "nil parts",
-			parts:        nil,
-			responseMode: responseModeNone,
-			expected:     "",
+			name:                   "nil parts",
+			parts:                  nil,
+			responseMode:           responseModeNone,
+			expectedThoughtSummary: "",
+			expectedText:           "",
 		},
 		{
-			name:         "empty parts",
-			parts:        []*genai.Part{},
-			responseMode: responseModeNone,
-			expected:     "",
+			name:                   "empty parts",
+			parts:                  []*genai.Part{},
+			responseMode:           responseModeNone,
+			expectedThoughtSummary: "",
+			expectedText:           "",
 		},
 		{
 			name: "multiple text parts without regex mode",
@@ -1455,8 +1458,9 @@ func TestExtractTextFromGeminiParts(t *testing.T) {
 				{Text: "Hello, "},
 				{Text: "world!"},
 			},
-			responseMode: responseModeJSON,
-			expected:     "Hello, world!",
+			responseMode:           responseModeJSON,
+			expectedThoughtSummary: "",
+			expectedText:           "Hello, world!",
 		},
 		{
 			name: "regex mode with mixed quoted and unquoted text",
@@ -1465,40 +1469,56 @@ func TestExtractTextFromGeminiParts(t *testing.T) {
 				{Text: `unquoted`},
 				{Text: `"negative"`},
 			},
-			responseMode: responseModeRegex,
-			expected:     "positiveunquotednegative",
+			responseMode:           responseModeRegex,
+			expectedThoughtSummary: "",
+			expectedText:           "positiveunquotednegative",
 		},
 		{
 			name: "regex mode with only double-quoted first and last words",
 			parts: []*genai.Part{
 				{Text: "\"\"ERROR\" Unable to connect to database \"DatabaseModule\"\""},
 			},
-			responseMode: responseModeRegex,
-			expected:     "\"ERROR\" Unable to connect to database \"DatabaseModule\"",
+			responseMode:           responseModeRegex,
+			expectedThoughtSummary: "",
+			expectedText:           "\"ERROR\" Unable to connect to database \"DatabaseModule\"",
 		},
 		{
 			name: "non-regex mode with double-quoted text (should not remove quotes)",
 			parts: []*genai.Part{
 				{Text: `"positive"`},
 			},
-			responseMode: responseModeJSON,
-			expected:     `"positive"`,
+			responseMode:           responseModeJSON,
+			expectedThoughtSummary: "",
+			expectedText:           `"positive"`,
 		},
 		{
 			name: "regex mode with text containing internal quotes",
 			parts: []*genai.Part{
 				{Text: `"He said \"hello\" to me"`},
 			},
-			responseMode: responseModeRegex,
-			expected:     `He said \"hello\" to me`,
+			responseMode:           responseModeRegex,
+			expectedThoughtSummary: "",
+			expectedText:           `He said \"hello\" to me`,
+		},
+		{
+			name: "test thought summary",
+			parts: []*genai.Part{
+				{Text: "Let me think step by step", Thought: true},
+				{Text: "Here is the conclusion"},
+			},
+			expectedThoughtSummary: "Let me think step by step",
+			expectedText:           "Here is the conclusion",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := extractTextFromGeminiParts(tc.parts, tc.responseMode)
-			if result != tc.expected {
-				t.Errorf("extractTextFromGeminiParts() = %q, want %q", result, tc.expected)
+			thoughtSummary, text := extractTextAndThoughtSummaryFromGeminiParts(tc.parts, tc.responseMode)
+			if thoughtSummary != tc.expectedThoughtSummary {
+				t.Errorf("thought summary result of extractTextAndThoughtSummaryFromGeminiParts() = %q, want %q", thoughtSummary, tc.expectedText)
+			}
+			if text != tc.expectedText {
+				t.Errorf("text result of extractTextAndThoughtSummaryFromGeminiParts() = %q, want %q", text, tc.expectedText)
 			}
 		})
 	}
