@@ -371,11 +371,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) openAIMessageToGeminiMes
 	if err != nil {
 		return nil, fmt.Errorf("error converting tool choice: %w", err)
 	}
-	if openAIReq.EnterpriseWebSearch {
-		tools = append(tools, genai.Tool{
-			EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
-		})
-	}
 
 	// Convert generation config.
 	generationConfig, responseMode, err := openAIReqToGeminiGenerationConfig(openAIReq, requestModel)
@@ -420,6 +415,12 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) applyVendorSpecificField
 	}
 	if gcpVendorFields.SafetySettings != nil {
 		gcr.SafetySettings = gcpVendorFields.SafetySettings
+	}
+
+	if gcpVendorFields.EnterpriseWebSearch {
+		gcr.Tools = append(gcr.Tools, genai.Tool{
+			EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
+		})
 	}
 }
 
