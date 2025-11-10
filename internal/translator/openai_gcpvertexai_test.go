@@ -348,13 +348,13 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
     ],
     "tools": [
         {
-			"enterpriseWebSearch": {},
+            "enterpriseWebSearch": {}
         }
     ],
     "generation_config": {
         "maxOutputTokens": 1024,
         "temperature": 0.7
-    },
+    }
 }`)
 
 	tests := []struct {
@@ -792,7 +792,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 					{
 						Header: &corev3.HeaderValue{
 							Key:      "Content-Length",
-							RawValue: []byte("395"),
+							RawValue: []byte("190"),
 						},
 					},
 				},
