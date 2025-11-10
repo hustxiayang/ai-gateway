@@ -439,7 +439,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) openAIMessageToGeminiMes
 	if err != nil {
 		return nil, fmt.Errorf("error converting tool choice: %w", err)
 	}
-	if openAIReq.GCPVertexAIVendorFields.EnterpriseWebSearch {
+	if openAIReq.EnterpriseWebSearch {
 		tools = append(tools, genai.Tool{
 			EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
 		})
