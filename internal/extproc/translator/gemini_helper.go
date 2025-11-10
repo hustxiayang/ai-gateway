@@ -321,21 +321,43 @@ func assistantMsgToGeminiParts(msg openai.ChatCompletionAssistantMessageParam) (
 //	}
 //
 // ].
-func openAIToolsToGeminiTools(openaiTools []openai.Tool) ([]genai.Tool, error) {
+func openAIToolsToGeminiTools(openaiTools []openai.Tool, parametersJSONSchemaAvailable bool) ([]genai.Tool, error) {
 	if len(openaiTools) == 0 {
 		return nil, nil
 	}
 	var functionDecls []*genai.FunctionDeclaration
+
 	for _, tool := range openaiTools {
-		if tool.Type == openai.ToolTypeFunction {
+		switch tool.Type {
+		case openai.ToolTypeFunction:
 			if tool.Function != nil {
+
 				functionDecl := &genai.FunctionDeclaration{
-					Name:                 tool.Function.Name,
-					Description:          tool.Function.Description,
-					ParametersJsonSchema: tool.Function.Parameters,
+					Name:        tool.Function.Name,
+					Description: tool.Function.Description,
+				}
+
+				if parametersJSONSchemaAvailable {
+					functionDecl.ParametersJsonSchema = tool.Function.Parameters
+				} else if tool.Function.Parameters != nil {
+					paramsMap, ok := tool.Function.Parameters.(map[string]any)
+					if !ok {
+						return nil, fmt.Errorf("invalid JSON schema for parameters in tool %s: expected map[string]any, got %T", tool.Function.Name, tool.Function.Parameters)
+					}
+
+					if len(paramsMap) > 0 {
+						var err error
+						if functionDecl.Parameters, err = jsonSchemaToGemini(paramsMap); err != nil {
+							return nil, fmt.Errorf("invalid JSON schema for parameters in tool %s: %w", tool.Function.Name, err)
+						}
+					}
 				}
 				functionDecls = append(functionDecls, functionDecl)
 			}
+		case openai.ToolTypeImageGeneration:
+			return nil, fmt.Errorf("tool-type image generation not supported yet when translating OpenAI req to Gemini")
+		default:
+			return nil, fmt.Errorf("unsupported tool type: %s", tool.Type)
 		}
 	}
 	if len(functionDecls) == 0 {
@@ -529,9 +551,11 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 
 		// Create the choice.
 		choice := openai.ChatCompletionResponseChoice{
-			Index:        int64(idx),
-			FinishReason: geminiFinishReasonToOpenAI(candidate.FinishReason),
+			Index: int64(idx),
 		}
+
+		toolCalls := []openai.ChatCompletionMessageToolCallParam{}
+		var err error
 
 		if candidate.Content != nil {
 			message := openai.ChatCompletionResponseChoiceMessage{
@@ -542,7 +566,7 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			message.Content = &content
 
 			// Extract tool calls if any.
-			toolCalls, err := extractToolCallsFromGeminiParts(candidate.Content.Parts)
+			toolCalls, err = extractToolCallsFromGeminiParts(toolCalls, candidate.Content.Parts)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}
@@ -569,16 +593,26 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			choice.Logprobs = geminiLogprobsToOpenAILogprobs(*candidate.LogprobsResult)
 		}
 
+		choice.FinishReason = geminiFinishReasonToOpenAI(candidate.FinishReason, toolCalls)
+
 		choices = append(choices, choice)
 	}
 
 	return choices, nil
 }
 
+// Define a type constraint that includes both stream and non-stream tool call slice types.
+type toolCallSlice interface {
+	[]openai.ChatCompletionMessageToolCallParam | []openai.ChatCompletionChunkChoiceDeltaToolCall
+}
+
 // geminiFinishReasonToOpenAI converts Gemini finish reason to OpenAI finish reason.
-func geminiFinishReasonToOpenAI(reason genai.FinishReason) openai.ChatCompletionChoicesFinishReason {
+func geminiFinishReasonToOpenAI[T toolCallSlice](reason genai.FinishReason, toolCalls T) openai.ChatCompletionChoicesFinishReason {
 	switch reason {
 	case genai.FinishReasonStop:
+		if len(toolCalls) > 0 {
+			return openai.ChatCompletionChoicesFinishReasonToolCalls
+		}
 		return openai.ChatCompletionChoicesFinishReasonStop
 	case genai.FinishReasonMaxTokens:
 		return openai.ChatCompletionChoicesFinishReasonLength
@@ -611,9 +645,7 @@ func extractTextFromGeminiParts(parts []*genai.Part, responseMode geminiResponse
 }
 
 // extractToolCallsFromGeminiParts extracts tool calls from Gemini parts.
-func extractToolCallsFromGeminiParts(parts []*genai.Part) ([]openai.ChatCompletionMessageToolCallParam, error) {
-	var toolCalls []openai.ChatCompletionMessageToolCallParam
-
+func extractToolCallsFromGeminiParts(toolCalls []openai.ChatCompletionMessageToolCallParam, parts []*genai.Part) ([]openai.ChatCompletionMessageToolCallParam, error) {
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
@@ -717,46 +749,4 @@ func buildGCPModelPathSuffix(publisher, model, gcpMethod string, queryParams ...
 		pathSuffix += "?" + strings.Join(queryParams, "&")
 	}
 	return pathSuffix
-}
-
-// geminiCandidatesToOpenAIStreamingChoices converts Gemini candidates to OpenAI streaming choices.
-func geminiCandidatesToOpenAIStreamingChoices(candidates []*genai.Candidate, responseMode geminiResponseMode) ([]openai.ChatCompletionResponseChunkChoice, error) {
-	choices := make([]openai.ChatCompletionResponseChunkChoice, 0, len(candidates))
-
-	for _, candidate := range candidates {
-		if candidate == nil {
-			continue
-		}
-
-		// Create the streaming choice.
-		choice := openai.ChatCompletionResponseChunkChoice{
-			Index:        0,
-			FinishReason: geminiFinishReasonToOpenAI(candidate.FinishReason),
-		}
-
-		if candidate.Content != nil {
-			delta := &openai.ChatCompletionResponseChunkChoiceDelta{
-				Role: openai.ChatMessageRoleAssistant,
-			}
-
-			// Extract text from parts for streaming (delta).
-			content := extractTextFromGeminiParts(candidate.Content.Parts, responseMode)
-			if content != "" {
-				delta.Content = &content
-			}
-
-			// Extract tool calls if any.
-			toolCalls, err := extractToolCallsFromGeminiParts(candidate.Content.Parts)
-			if err != nil {
-				return nil, fmt.Errorf("error extracting tool calls: %w", err)
-			}
-			delta.ToolCalls = toolCalls
-
-			choice.Delta = delta
-		}
-
-		choices = append(choices, choice)
-	}
-
-	return choices, nil
 }
