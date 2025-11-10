@@ -342,6 +342,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) convertGCPChunkToOpenAI(
 		Object:  "chat.completion.chunk",
 		Choices: choices,
 		Usage:   usage,
+		Model:   o.requestModel,
 	}
 }
 
