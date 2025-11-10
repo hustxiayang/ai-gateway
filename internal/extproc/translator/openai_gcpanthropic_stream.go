@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
@@ -46,6 +47,7 @@ type anthropicStreamParser struct {
 	stopReason      anthropic.StopReason
 	requestModel    internalapi.RequestModel
 	sentFirstChunk  bool
+	created         openai.JSONUNIXTime
 }
 
 // newAnthropicStreamParser creates a new parser for a streaming request.
@@ -198,6 +200,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			return nil, fmt.Errorf("unmarshal message_start: %w", err)
 		}
 		p.activeMessageID = event.Message.ID
+		p.created = openai.JSONUNIXTime(time.Now())
 		p.tokenUsage.InputTokens = uint32(event.Message.Usage.InputTokens)                 //nolint:gosec
 		p.tokenUsage.CachedInputTokens += uint32(event.Message.Usage.CacheReadInputTokens) //nolint:gosec
 
@@ -360,12 +363,15 @@ func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta openai.
 	}
 
 	return &openai.ChatCompletionResponseChunk{
-		Object: "chat.completion.chunk",
+		ID:      p.activeMessageID,
+		Created: p.created,
+		Object:  "chat.completion.chunk",
 		Choices: []openai.ChatCompletionResponseChunkChoice{
 			{
 				Delta:        &delta,
 				FinishReason: finishReason,
 			},
 		},
+		Model: p.requestModel,
 	}
 }

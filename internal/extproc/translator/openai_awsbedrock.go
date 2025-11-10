@@ -13,10 +13,12 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/google/uuid"
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
@@ -644,7 +646,9 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 		// We use request model as response model since bedrock does not return the modelName in the response.
 		Model:   o.requestModel,
 		Object:  "chat.completion",
+		Created: openai.JSONUNIXTime(time.Now()),
 		Choices: make([]openai.ChatCompletionResponseChoice, 0),
+		ID:      uuid.New().String(),
 	}
 	// Convert token usage.
 	if bedrockResp.Usage != nil {
@@ -743,7 +747,7 @@ var emptyString = ""
 // This is a static method and does not require a receiver, but defined as a method for namespacing.
 func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbedrock.ConverseStreamEvent) (*openai.ChatCompletionResponseChunk, bool) {
 	const object = "chat.completion.chunk"
-	chunk := &openai.ChatCompletionResponseChunk{Object: object}
+	chunk := &openai.ChatCompletionResponseChunk{Object: object, Model: o.requestModel, ID: uuid.New().String(), Created: openai.JSONUNIXTime(time.Now())}
 
 	switch event.EventType {
 	// Usage event.
