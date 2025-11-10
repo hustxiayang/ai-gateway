@@ -337,6 +337,8 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) convertGCPChunkToOpenAI(
 	}
 
 	return &openai.ChatCompletionResponseChunk{
+		ID:      chunk.ResponseID,
+		Created: openai.JSONUNIXTime(chunk.CreateTime),
 		Object:  "chat.completion.chunk",
 		Choices: choices,
 		Usage:   usage,
@@ -420,9 +422,11 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiResponseToOpenAIMe
 
 	// Set up the OpenAI response.
 	openaiResp := &openai.ChatCompletionResponse{
+		ID:      gcr.ResponseID,
 		Model:   responseModel,
 		Choices: choices,
 		Object:  "chat.completion",
+		Created: openai.JSONUNIXTime(gcr.CreateTime),
 		Usage:   geminiUsageToOpenAIUsage(gcr.UsageMetadata),
 	}
 
