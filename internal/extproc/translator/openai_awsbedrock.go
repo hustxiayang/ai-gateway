@@ -619,17 +619,13 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 			if !ok {
 				continue
 			}
-			var oaiEventBytes []byte
-			oaiEventBytes, err = json.Marshal(oaiEvent)
+			err = serializeOpenAIChatCompletionChunk(*oaiEvent, &mut.Body)
 			if err != nil {
 				panic(fmt.Errorf("failed to marshal event: %w", err))
 			}
 			if span != nil {
 				span.RecordResponseChunk(oaiEvent)
 			}
-			mut.Body = append(mut.Body, []byte("data: ")...)
-			mut.Body = append(mut.Body, oaiEventBytes...)
-			mut.Body = append(mut.Body, []byte("\n\n")...)
 		}
 
 		if endOfStream {

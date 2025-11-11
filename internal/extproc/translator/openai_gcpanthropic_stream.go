@@ -24,8 +24,6 @@ import (
 
 var (
 	sseEventPrefix = []byte("event:")
-	sseDataPrefix  = []byte("data: ")
-	sseDoneMessage = []byte("[DONE]")
 	emptyStrPtr    = ptr.To("")
 )
 
@@ -66,14 +64,10 @@ func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error
 		return err
 	}
 	if chunk != nil {
-		var chunkBytes []byte
-		chunkBytes, err = json.Marshal(chunk)
+		err := serializeOpenAIChatCompletionChunk(*chunk, buf)
 		if err != nil {
-			return fmt.Errorf("failed to marshal stream chunk: %w", err)
+			return err
 		}
-		*buf = append(*buf, sseDataPrefix...)
-		*buf = append(*buf, chunkBytes...)
-		*buf = append(*buf, '\n', '\n')
 	}
 	return nil
 }
@@ -151,14 +145,10 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		}
 
 		if finalChunk.Usage.PromptTokens > 0 || finalChunk.Usage.CompletionTokens > 0 || len(finalChunk.Choices) > 0 {
-			chunkBytes, err := json.Marshal(finalChunk)
+			err := serializeOpenAIChatCompletionChunk(finalChunk, &mut.Body)
 			if err != nil {
 				return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("failed to marshal final stream chunk: %w", err)
 			}
-			// Write the final chunk to the response body.
-			mut.Body = append(mut.Body, sseDataPrefix...)
-			mut.Body = append(mut.Body, chunkBytes...)
-			mut.Body = append(mut.Body, '\n', '\n')
 		}
 		// Add the final [DONE] message to indicate the end of the stream.
 		mut.Body = append(mut.Body, sseDataPrefix...)

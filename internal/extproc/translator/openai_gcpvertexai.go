@@ -171,7 +171,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error parsing GCP streaming chunks: %w", err)
 	}
 
-	sseChunkBuf := bytes.Buffer{}
+	mut := &extprocv3.BodyMutation_Body{Body: nil}
 
 	for _, chunk := range chunks {
 		// Convert GCP chunk to OpenAI chunk.
@@ -188,21 +188,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		}
 
 		// Serialize to SSE format as expected by OpenAI API.
-		var chunkBytes []byte
-		chunkBytes, err = json.Marshal(openAIChunk)
+		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &mut.Body)
 		if err != nil {
 			return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
 		}
-		sseChunkBuf.WriteString("data: ")
-		sseChunkBuf.Write(chunkBytes)
-		sseChunkBuf.WriteString("\n\n")
 
 		if span != nil {
 			span.RecordResponseChunk(openAIChunk)
 		}
-	}
-	mut := &extprocv3.BodyMutation_Body{
-		Body: sseChunkBuf.Bytes(),
 	}
 
 	if endOfStream {
