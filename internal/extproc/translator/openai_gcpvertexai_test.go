@@ -1750,6 +1750,7 @@ data: {"candidates": [
 
 	body := bodyMut.Mutation.(*extprocv3.BodyMutation_Body).Body
 	chatCompletionChunks := getChatCompletionResponseChunk(body)
+	require.Len(t, chatCompletionChunks, 2)
 
 	for idx, chunk := range chatCompletionChunks {
 		chunk.Choices[0].Delta.ToolCalls[0].ID = ptr.To("123")
