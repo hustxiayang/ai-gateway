@@ -110,6 +110,8 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 	if endOfStream {
 		p.tokenUsage.TotalTokens = p.tokenUsage.InputTokens + p.tokenUsage.OutputTokens
 		finalChunk := openai.ChatCompletionResponseChunk{
+			ID:      p.activeMessageID,
+			Created: p.created,
 			Object:  "chat.completion.chunk",
 			Choices: []openai.ChatCompletionResponseChunkChoice{},
 			Usage: &openai.Usage{
@@ -120,6 +122,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 					CachedTokens: int(p.tokenUsage.CachedInputTokens),
 				},
 			},
+			Model: p.requestModel,
 		}
 
 		// Add active tool calls to the final chunk.

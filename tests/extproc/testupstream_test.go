@@ -48,7 +48,7 @@ func TestWithTestUpstream(t *testing.T) {
 	// Substitute any dynamically generated UUIDs in the response body with a placeholder
 	// example generated UUID 703482f8-2e5b-4dcc-a872-d74bd66c386.
 	m := regexp.MustCompile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-	createdReg := regexp.MustCompile(`"created":\s*(-?\d+(\.\d+)?([eE][+-]?\d+)?)`)
+	createdReg := regexp.MustCompile(`"created":\d+`)
 
 	config := &filterapi.Config{
 		LLMRequestCosts: []filterapi.LLMRequestCost{
@@ -376,25 +376,25 @@ func TestWithTestUpstream(t *testing.T) {
 {"usage":{"inputTokens":41, "outputTokens":36, "totalTokens":77}}
 `,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"object":"chat.completion.chunk"}
+			expResponseBody: `data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"Don","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"Don","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"'t worry,  I'm here to help. It","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"'t worry,  I'm here to help. It","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" seems like you're testing my ability to respond appropriately","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":" seems like you're testing my ability to respond appropriately","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tooluse_QklrEHKjRu6Oc4BQUfy7ZQ","function":{"arguments":"","name":"cosine"},"type":"function"}]}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tooluse_QklrEHKjRu6Oc4BQUfy7ZQ","function":{"arguments":"","name":"cosine"},"type":"function"}]}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"tooluse_stream2","function":{"arguments":"","name":"sine"},"type":"function"}]}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"tooluse_stream2","function":{"arguments":"","name":"sine"},"type":"function"}]}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":null,"function":{"arguments":"{\"x\": \"17\"}","name":""},"type":"function"}]}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls"}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls"}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"object":"chat.completion.chunk","usage":{"prompt_tokens":41,"completion_tokens":36,"total_tokens":77}}
+data: {"id":"<UUID4-replaced>","created":123,"model":"something","object":"chat.completion.chunk","usage":{"prompt_tokens":41,"completion_tokens":36,"total_tokens":77}}
 
 data: [DONE]
 `,
@@ -418,13 +418,13 @@ data: [DONE]
 	{"delta":{"text":"Hello!"}}
 	{"stopReason":"end_turn"}`,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"object":"chat.completion.chunk"}
+			expResponseBody: `data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":{"text":"First, I'll start by acknowledging the user..."}}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":{"text":"First, I'll start by acknowledging the user..."}}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"Hello!","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"Hello!","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"object":"chat.completion.chunk"}
+data: {"id":"<UUID4-replaced>","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
 data: [DONE]
 `,
@@ -555,27 +555,27 @@ data: [DONE]
 			expRawQuery:       "alt=sse",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
-			responseBody: `{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":"! How"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":" can I"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":" help"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":" you"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":" today"}],"role":"model"}}]}
-{"candidates":[{"content":{"parts":[{"text":"?"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":17}}`,
+			responseBody: `{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"! How"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" can I"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" help"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" you"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" today"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"?"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":17}}`,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"}}],"object":"chat.completion.chunk"}
+			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"! How","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"choices":[{"index":0,"delta":{"content":"! How","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" can I","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"choices":[{"index":0,"delta":{"content":" can I","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" help","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"choices":[{"index":0,"delta":{"content":" help","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" you","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"choices":[{"index":0,"delta":{"content":" you","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" today","role":"assistant"}}],"object":"chat.completion.chunk"}
+data: {"choices":[{"index":0,"delta":{"content":" today","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"?","role":"assistant"},"finish_reason":"stop"}],"object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"completion_tokens_details":{},"prompt_tokens_details":{}}}
+data: {"choices":[{"index":0,"delta":{"content":"?","role":"assistant"},"finish_reason":"stop"}],"model":"gemini-1.5-pro","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"completion_tokens_details":{},"prompt_tokens_details":{}}}
 
 data: [DONE]
 `,
@@ -613,13 +613,13 @@ event: message_stop
 data: {"type": "message_stop"}
 `,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"The sky appears blue","role":"assistant"}}],"object":"chat.completion.chunk"}
+			expResponseBody: `data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":"The sky appears blue","role":"assistant"}}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" due to Rayleigh scattering."}}],"object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" due to Rayleigh scattering."}}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"object":"chat.completion.chunk","usage":{"prompt_tokens":15,"completion_tokens":12,"total_tokens":27,"prompt_tokens_details":{"cached_tokens":10}}}
+data: {"id":"msg_123","created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":15,"completion_tokens":12,"total_tokens":27,"prompt_tokens_details":{"cached_tokens":10}}}
 
 data: [DONE]
 
@@ -675,15 +675,15 @@ data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {
 event: message_stop
 data: {"type": "message_stop"}`,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"toolu_abc123","function":{"arguments":"","name":"get_weather"},"type":"function"}]}}],"object":"chat.completion.chunk"}
+			expResponseBody: `data: {"id":"msg_123","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"toolu_abc123","function":{"arguments":"","name":"get_weather"},"type":"function"}]}}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"location\":\"Bosto","name":""}}]}}],"object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"{\"location\":\"Bosto","name":""}}]}}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"n, MA\"}","name":""}}]}}],"object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":null,"function":{"arguments":"n, MA\"}","name":""}}]}}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"object":"chat.completion.chunk","usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70,"prompt_tokens_details":{}}}
+data: {"id":"msg_123","created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70,"prompt_tokens_details":{}}}
 
 data: [DONE]
 
@@ -1155,8 +1155,15 @@ data: {"type":"message_stop"}
 				tc.expResponseBodyFunc(t, lastBody)
 			case tc.responseType != "" || tc.expStatus == http.StatusNotFound:
 				expResponseBody := cmp.Or(tc.expResponseBody, tc.responseBody)
+
+				bodyStr := m.ReplaceAllString(string(lastBody), "<UUID4-replaced>")
+				bodyStr = createdReg.ReplaceAllString(string(bodyStr), `"created":123`)
+
+				expectedResponseBody := m.ReplaceAllString(expResponseBody, "<UUID4-replaced>")
+				expectedResponseBody = createdReg.ReplaceAllString(string(expectedResponseBody), `"created":123`)
+
 				// Use plain-text comparison for streaming or 404 responses.
-				require.Equal(t, strings.TrimSpace(expResponseBody), strings.TrimSpace(string(lastBody)), "Response body mismatch")
+				require.Equal(t, strings.TrimSpace(expectedResponseBody), strings.TrimSpace(string(bodyStr)), "Response body mismatch")
 			default:
 				expResponseBody := cmp.Or(tc.expResponseBody, tc.responseBody)
 				// Use JSON comparison for regular responses.
