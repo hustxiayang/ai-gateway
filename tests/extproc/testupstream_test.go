@@ -555,27 +555,27 @@ data: [DONE]
 			expRawQuery:       "alt=sse",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
-			responseBody: `{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"! How"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" can I"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" help"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" you"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":" today"}],"role":"model"}}]}
-{"responseId":"msg_123","createTime":1731679200,"candidates":[{"content":{"parts":[{"text":"?"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":17}}`,
+			responseBody: `{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":"! How"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" can I"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" help"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" you"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":" today"}],"role":"model"}}]}
+{"responseId":"msg_123","createTime":"2024-11-15T09:00:00Z","candidates":[{"content":{"parts":[{"text":"?"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":17}}`,
 			expStatus: http.StatusOK,
-			expResponseBody: `data: {"choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+			expResponseBody: `data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"! How","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":"! How","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" can I","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" can I","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" help","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" help","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" you","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" you","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":" today","role":"assistant"}}],"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" today","role":"assistant"}}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk"}
 
-data: {"choices":[{"index":0,"delta":{"content":"?","role":"assistant"},"finish_reason":"stop"}],"model":"gemini-1.5-pro","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"completion_tokens_details":{},"prompt_tokens_details":{}}}
+data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":"?","role":"assistant"},"finish_reason":"stop"}],"created":123,"model":"gemini-1.5-pro","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"completion_tokens_details":{},"prompt_tokens_details":{}}}
 
 data: [DONE]
 `,
@@ -1157,21 +1157,21 @@ data: {"type":"message_stop"}
 				expResponseBody := cmp.Or(tc.expResponseBody, tc.responseBody)
 
 				bodyStr := m.ReplaceAllString(string(lastBody), "<UUID4-replaced>")
-				bodyStr = createdReg.ReplaceAllString(string(bodyStr), `"created":123`)
+				bodyStr = createdReg.ReplaceAllString(bodyStr, `"created":123`)
 
 				expectedResponseBody := m.ReplaceAllString(expResponseBody, "<UUID4-replaced>")
-				expectedResponseBody = createdReg.ReplaceAllString(string(expectedResponseBody), `"created":123`)
+				expectedResponseBody = createdReg.ReplaceAllString(expectedResponseBody, `"created":123`)
 
 				// Use plain-text comparison for streaming or 404 responses.
-				require.Equal(t, strings.TrimSpace(expectedResponseBody), strings.TrimSpace(string(bodyStr)), "Response body mismatch")
+				require.Equal(t, strings.TrimSpace(expectedResponseBody), strings.TrimSpace(bodyStr), "Response body mismatch")
 			default:
 				expResponseBody := cmp.Or(tc.expResponseBody, tc.responseBody)
 				// Use JSON comparison for regular responses.
 				bodyStr := m.ReplaceAllString(string(lastBody), "<UUID4-replaced>")
-				bodyStr = createdReg.ReplaceAllString(string(bodyStr), `"created":123`)
+				bodyStr = createdReg.ReplaceAllString(bodyStr, `"created":123`)
 
 				expectedResponseBody := m.ReplaceAllString(expResponseBody, "<UUID4-replaced>")
-				expectedResponseBody = createdReg.ReplaceAllString(string(expectedResponseBody), `"created":123`)
+				expectedResponseBody = createdReg.ReplaceAllString(expectedResponseBody, `"created":123`)
 
 				require.JSONEq(t, expectedResponseBody, bodyStr, "Response body mismatch")
 			}
