@@ -48,6 +48,7 @@ func TestWithTestUpstream(t *testing.T) {
 	// Substitute any dynamically generated UUIDs in the response body with a placeholder
 	// example generated UUID 703482f8-2e5b-4dcc-a872-d74bd66c386.
 	m := regexp.MustCompile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+	createdReg := regexp.MustCompile(`created:(\d+)`)
 
 	config := &filterapi.Config{
 		LLMRequestCosts: []filterapi.LLMRequestCost{
@@ -1160,7 +1161,11 @@ data: {"type":"message_stop"}
 				expResponseBody := cmp.Or(tc.expResponseBody, tc.responseBody)
 				// Use JSON comparison for regular responses.
 				bodyStr := m.ReplaceAllString(string(lastBody), "<UUID4-replaced>")
+				bodyStr = createdReg.ReplaceAllString(string(bodyStr), `"created":123`)
+
 				expectedResponseBody := m.ReplaceAllString(expResponseBody, "<UUID4-replaced>")
+				expectedResponseBody = createdReg.ReplaceAllString(string(expectedResponseBody), `"created":123`)
+
 				require.JSONEq(t, expectedResponseBody, bodyStr, "Response body mismatch")
 			}
 
