@@ -8,6 +8,7 @@ package translator
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -1687,7 +1688,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingParallelToolInde
                 "role": "model"
             }
         }
-    ],
+    ]
 }`
 
 	expectedChatCompletionChunks := []openai.ChatCompletionResponseChunk{
@@ -1724,7 +1725,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingParallelToolInde
 								Index: int64(1),
 								ID:    ptr.To("123"),
 								Function: openai.ChatCompletionMessageToolCallFunctionParam{
-									Arguments: `{"location": "Shang Hai}`,
+									Arguments: `{"location": "Shang Hai"}`,
 									Name:      "get_weather",
 								},
 								Type: "function",
@@ -1751,10 +1752,12 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingParallelToolInde
 	body := bodyMut.Mutation.(*extprocv3.BodyMutation_Body).Body
 	chatCompletionChunks := getChatCompletionResponseChunk(body)
 
+	fmt.Print("len: len(chatCompletionChunks)", len(chatCompletionChunks))
 	for idx, chunk := range chatCompletionChunks {
 		chunk.Choices[0].Delta.ToolCalls[0].ID = ptr.To("123")
 		require.Equal(t, chunk, expectedChatCompletionChunks[idx])
 	}
+	require.Equal(t, 1, 2)
 }
 
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingEndOfStream(t *testing.T) {
