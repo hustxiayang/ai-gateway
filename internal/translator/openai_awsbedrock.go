@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
+	"github.com/google/uuid"
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
@@ -609,7 +610,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 			if !ok {
 				continue
 			}
-			err = serializeOpenAIChatCompletionChunk(*oaiEvent, &mut.Body)
+			err = serializeOpenAIChatCompletionChunk(*oaiEvent, &newBody)
 			if err != nil {
 				panic(fmt.Errorf("failed to marshal event: %w", err))
 			}

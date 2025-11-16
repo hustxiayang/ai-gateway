@@ -149,7 +149,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		}
 
 		if finalChunk.Usage.PromptTokens > 0 || finalChunk.Usage.CompletionTokens > 0 || len(finalChunk.Choices) > 0 {
-			err := serializeOpenAIChatCompletionChunk(finalChunk, &mut.Body)
+			err := serializeOpenAIChatCompletionChunk(finalChunk, &newBody)
 			if err != nil {
 				return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("failed to marshal final stream chunk: %w", err)
 			}

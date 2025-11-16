@@ -167,8 +167,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error parsing GCP streaming chunks: %w", err)
 	}
 
-	mut := &extprocv3.BodyMutation_Body{Body: nil}
-
 	for _, chunk := range chunks {
 		// Convert GCP chunk to OpenAI chunk.
 		openAIChunk := o.convertGCPChunkToOpenAI(chunk)
@@ -184,7 +182,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		}
 
 		// Serialize to SSE format as expected by OpenAI API.
-		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &mut.Body)
+		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &newBody)
 		if err != nil {
 			return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
 		}
