@@ -143,9 +143,10 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseBody(_ map[strin
 	// Update token usage if available.
 	if gcpResp.UsageMetadata != nil {
 		tokenUsage = LLMTokenUsage{
-			InputTokens:  uint32(gcpResp.UsageMetadata.PromptTokenCount),     // nolint:gosec
-			OutputTokens: uint32(gcpResp.UsageMetadata.CandidatesTokenCount), // nolint:gosec
-			TotalTokens:  uint32(gcpResp.UsageMetadata.TotalTokenCount),      // nolint:gosec
+			InputTokens:       uint32(gcpResp.UsageMetadata.PromptTokenCount),        // nolint:gosec
+			OutputTokens:      uint32(gcpResp.UsageMetadata.CandidatesTokenCount),    // nolint:gosec
+			TotalTokens:       uint32(gcpResp.UsageMetadata.TotalTokenCount),         // nolint:gosec
+			CachedInputTokens: uint32(gcpResp.UsageMetadata.CachedContentTokenCount), // nolint:gosec
 		}
 	}
 

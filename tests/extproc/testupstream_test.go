@@ -325,7 +325,7 @@ func TestWithTestUpstream(t *testing.T) {
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody:      `{"id":"msg_123","type":"message","role":"assistant","stop_reason": "end_turn", "content":[{"type":"text","text":"Hello from cached Anthropic!"}],"usage":{"input_tokens":10,"output_tokens":25, "cache_read_input_tokens": 8}}`,
 			expStatus:         http.StatusOK,
-			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from cached Anthropic!","role":"assistant"}}],"model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"prompt_tokens":18,"total_tokens":43,"prompt_tokens_details":{"cached_tokens":8}}}`,
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from cached Anthropic!","role":"assistant"}}], "created":123, "id":"msg_123", "model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"prompt_tokens":18,"total_tokens":43,"prompt_tokens_details":{"cached_tokens":8}}}`,
 		},
 		{
 			name:            "modelname-override - /v1/chat/completions",

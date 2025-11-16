@@ -779,9 +779,10 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_ResponseBody(t *testing.T
     }
 }`),
 			wantTokenUsage: LLMTokenUsage{
-				InputTokens:  10,
-				OutputTokens: 15,
-				TotalTokens:  25,
+				InputTokens:       10,
+				OutputTokens:      15,
+				TotalTokens:       25,
+				CachedInputTokens: 10,
 			},
 		},
 		{
