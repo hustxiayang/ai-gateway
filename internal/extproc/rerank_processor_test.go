@@ -491,15 +491,8 @@ func Test_rerankProcessorUpstreamFilter_ProcessResponseBody_Tracing_EndSpanOnSuc
 	inBody := &extprocv3.HttpBody{Body: []byte("ok"), EndOfStream: true}
 	mm := &mockRerankMetrics{}
 	mt := &mockRerankTranslator{
-<<<<<<< HEAD
 		t:               t,
 		expResponseBody: inBody,
-=======
-		t:                 t,
-		expResponseBody:   inBody,
-		retHeaderMutation: &extprocv3.HeaderMutation{},
-		retBodyMutation:   &extprocv3.BodyMutation{},
->>>>>>> 55b23ff2 (feat: implement otel tracing for cohere v2 rerank endpoint (#1539))
 	}
 	span := &mockRerankSpan{}
 	p := &rerankProcessorUpstreamFilter{
