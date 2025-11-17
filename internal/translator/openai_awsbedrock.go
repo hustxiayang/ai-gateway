@@ -734,8 +734,10 @@ var emptyString = ""
 // This is a static method and does not require a receiver, but defined as a method for namespacing.
 func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbedrock.ConverseStreamEvent) (*openai.ChatCompletionResponseChunk, bool) {
 	const object = "chat.completion.chunk"
-	chunk := &openai.ChatCompletionResponseChunk{Object: object, Model: o.requestModel, ID: o.responseID,
-		Created: openai.JSONUNIXTime(time.Now())}
+	chunk := &openai.ChatCompletionResponseChunk{
+		Object: object, Model: o.requestModel, ID: o.responseID,
+		Created: openai.JSONUNIXTime(time.Now()),
+	}
 
 	switch event.EventType {
 	// Usage event.
