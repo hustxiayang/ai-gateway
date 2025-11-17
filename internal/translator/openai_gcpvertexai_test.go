@@ -998,16 +998,10 @@ data: [DONE]
         "totalTokenCount": 20
     }
 }`,
-			endOfStream: true,
-			wantError:   false,
-			wantHeaderMut: &extprocv3.HeaderMutation{
-				SetHeaders: []*corev3.HeaderValueOption{{
-					Header: &corev3.HeaderValue{Key: "Content-Length", RawValue: []byte("418")},
-				}},
-			},
-			wantBodyMut: &extprocv3.BodyMutation{
-				Mutation: &extprocv3.BodyMutation_Body{
-					Body: []byte(`{
+			endOfStream:   true,
+			wantError:     false,
+			wantHeaderMut: []internalapi.Header{{contentLengthHeaderName, "418"}},
+			wantBodyMut: []byte(`{
     "choices": [
         {
             "finish_reason": "stop",
@@ -1035,8 +1029,6 @@ data: [DONE]
         "total_tokens": 20
     }
 }`),
-				},
-			},
 			wantTokenUsage: LLMTokenUsage{
 				InputTokens:  8,
 				OutputTokens: 12,
@@ -1155,11 +1147,9 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingResponseBody(t *
 			require.Nil(t, headerMut)
 			require.NoError(t, err)
 			require.NotNil(t, bodyMut)
-			require.NotNil(t, bodyMut.Mutation)
-
 			// Check that the response is in SSE format.
-			body := bodyMut.Mutation.(*extprocv3.BodyMutation_Body).Body
-			bodyStr := string(body)
+			bodyStr := string(bodyMut)
+			print(bodyStr)
 			require.Contains(t, bodyStr, "data: ")
 			require.Contains(t, bodyStr, "chat.completion.chunk")
 			require.Equal(t, LLMTokenUsage{}, tokenUsage) // No usage in this test chunk.
