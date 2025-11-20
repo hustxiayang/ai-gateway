@@ -1772,7 +1772,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_parseGCPStreamingChunks(t
 					},
 				},
 			},
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
 		},
 		{
 			name:         "multiple complete chunks",
@@ -1806,7 +1806,7 @@ data: {"candidates":[{"content":{"parts":[{"text":" world"}]}}]}
 					},
 				},
 			},
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
 		},
 		{
 			name:         "incomplete chunk at end",
@@ -1861,7 +1861,54 @@ data: {"candidates":[{"content":{"parts":[{"text":"new"}]}}]}
 					},
 				},
 			},
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
+		},
+		{
+			name: "invalid JSON chunk in bufferedBody - ignored",
+			bufferedBody: []byte(`data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}
+
+data: invalid-json
+
+data: {"candidates":[{"content":{"parts":[{"text":"world"}]}}]}
+
+`),
+			input: `data: {"candidates":[{"content":{"parts":[{"text":"Foo"}]}}]}`,
+			wantChunks: []genai.GenerateContentResponse{
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "Hello"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "world"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "Foo"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantBuffered: nil,
 		},
 		{
 			name:         "invalid JSON chunk in middle - ignored",
@@ -1897,14 +1944,14 @@ data: {"candidates":[{"content":{"parts":[{"text":"world"}]}}]}
 					},
 				},
 			},
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
 		},
 		{
 			name:         "empty input",
 			bufferedBody: nil,
 			input:        "",
 			wantChunks:   nil,
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
 		},
 		{
 			name:         "chunk without data prefix",
@@ -1925,7 +1972,67 @@ data: {"candidates":[{"content":{"parts":[{"text":"world"}]}}]}
 					},
 				},
 			},
-			wantBuffered: []byte(""),
+			wantBuffered: nil,
+		},
+		{
+			name:         "CRLF CRLF delimiter",
+			bufferedBody: nil,
+			input:        `data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}` + "\r\n\r\n" + `data: {"candidates":[{"content":{"parts":[{"text":"World"}]}}]}`,
+			wantChunks: []genai.GenerateContentResponse{
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "Hello"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "World"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantBuffered: nil,
+		},
+		{
+			name:         "CR CR delimiter",
+			bufferedBody: nil,
+			input:        `data: {"candidates":[{"content":{"parts":[{"text":"Test"}]}}]}` + "\r\r" + `data: {"candidates":[{"content":{"parts":[{"text":"Message"}]}}]}`,
+			wantChunks: []genai.GenerateContentResponse{
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "Test"},
+								},
+							},
+						},
+					},
+				},
+				{
+					Candidates: []*genai.Candidate{
+						{
+							Content: &genai.Content{
+								Parts: []*genai.Part{
+									{Text: "Message"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantBuffered: nil,
 		},
 	}
 
