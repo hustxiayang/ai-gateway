@@ -1643,7 +1643,7 @@ type GCPVertexAIVendorFields struct {
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
 	SafetySettings []*genai.SafetySetting `json:"safetySettings,omitzero"`
 
-	//EnterpriseWebSearch controls whether to use Web Grounding for Enterprise
+	// EnterpriseWebSearch controls whether to use Web Grounding for Enterprise
 	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/web-grounding-enterprise
 	EnterpriseWebSearch bool `json:"enterprise_search,omitzero"`
 }
