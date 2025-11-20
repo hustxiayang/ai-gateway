@@ -129,8 +129,9 @@ type ChatCompletionContentPartInputAudioInputAudioParam struct {
 type ChatCompletionContentPartImageImageURLDetail string
 
 const (
-	ChatCompletionContentPartImageImageURLDetailAuto   ChatCompletionContentPartImageImageURLDetail = "auto"
-	ChatCompletionContentPartImageImageURLDetailLow    ChatCompletionContentPartImageImageURLDetail = "low"
+	ChatCompletionContentPartImageImageURLDetailAuto ChatCompletionContentPartImageImageURLDetail = "auto"
+	ChatCompletionContentPartImageImageURLDetailLow  ChatCompletionContentPartImageImageURLDetail = "low"
+	// medium is only supported in gemini-3
 	ChatCompletionContentPartImageImageURLDetailMedium ChatCompletionContentPartImageImageURLDetail = "medium"
 	ChatCompletionContentPartImageImageURLDetailHigh   ChatCompletionContentPartImageImageURLDetail = "high"
 )
