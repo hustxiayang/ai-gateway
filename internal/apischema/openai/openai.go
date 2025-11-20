@@ -1582,7 +1582,7 @@ type GCPVertexAIGenerationConfig struct {
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig#ThinkingConfig
 	ThinkingConfig *genai.ThinkingConfig `json:"thinkingConfig,omitzero"`
 
-	// Detail is media resolution in gemini models
+	// Detail here is to set global media resolution in gemini models: https://ai.google.dev/api/caching#MediaResolution
 	Detail genai.MediaResolution `json:"detail,omitempty"`
 }
 
