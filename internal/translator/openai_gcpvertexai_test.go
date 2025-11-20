@@ -781,27 +781,11 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 			},
 			onRetry:   false,
 			wantError: false,
-			wantHeaderMut: &extprocv3.HeaderMutation{
-				SetHeaders: []*corev3.HeaderValueOption{
-					{
-						Header: &corev3.HeaderValue{
-							Key:      ":path",
-							RawValue: []byte("publishers/google/models/gemini-1.5-pro:generateContent"),
-						},
-					},
-					{
-						Header: &corev3.HeaderValue{
-							Key:      "Content-Length",
-							RawValue: []byte("190"),
-						},
-					},
-				},
+			wantHeaderMut: []internalapi.Header{
+				{":path", "publishers/google/models/gemini-1.5-pro:generateContent"},
+				{"content-length", "190"},
 			},
-			wantBody: &extprocv3.BodyMutation{
-				Mutation: &extprocv3.BodyMutation_Body{
-					Body: wantBdyWithEnterpriseWebSearch,
-				},
-			},
+			wantBody: wantBdyWithEnterpriseWebSearch,
 		},
 	}
 
