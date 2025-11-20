@@ -129,9 +129,10 @@ type ChatCompletionContentPartInputAudioInputAudioParam struct {
 type ChatCompletionContentPartImageImageURLDetail string
 
 const (
-	ChatCompletionContentPartImageImageURLDetailAuto ChatCompletionContentPartImageImageURLDetail = "auto"
-	ChatCompletionContentPartImageImageURLDetailLow  ChatCompletionContentPartImageImageURLDetail = "low"
-	ChatCompletionContentPartImageImageURLDetailHigh ChatCompletionContentPartImageImageURLDetail = "high"
+	ChatCompletionContentPartImageImageURLDetailAuto   ChatCompletionContentPartImageImageURLDetail = "auto"
+	ChatCompletionContentPartImageImageURLDetailLow    ChatCompletionContentPartImageImageURLDetail = "low"
+	ChatCompletionContentPartImageImageURLDetailMedium ChatCompletionContentPartImageImageURLDetail = "medium"
+	ChatCompletionContentPartImageImageURLDetailHigh   ChatCompletionContentPartImageImageURLDetail = "high"
 )
 
 type ChatCompletionContentPartImageImageURLParam struct {
@@ -1580,6 +1581,9 @@ type GCPVertexAIGenerationConfig struct {
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig#ThinkingConfig
 	ThinkingConfig *genai.ThinkingConfig `json:"thinkingConfig,omitzero"`
+
+	// Detail is media resolution in gemini models
+	Detail genai.MediaResolution `json:"detail,omitempty"`
 }
 
 // AnthropicVendorFields contains Anthropic vendor-specific fields.
