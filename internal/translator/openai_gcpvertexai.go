@@ -448,8 +448,8 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) applyVendorSpecificField
 		if vendorGenConfig.ThinkingConfig != nil {
 			gcr.GenerationConfig.ThinkingConfig = vendorGenConfig.ThinkingConfig
 		}
-		if vendorGenConfig.Detail != "" {
-			gcr.GenerationConfig.MediaResolution = vendorGenConfig.Detail
+		if vendorGenConfig.MediaResolution != "" {
+			gcr.GenerationConfig.MediaResolution = vendorGenConfig.MediaResolution
 		}
 	}
 	if gcpVendorFields.SafetySettings != nil {

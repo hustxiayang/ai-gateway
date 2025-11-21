@@ -232,7 +232,7 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 					}
 				],
 				"generationConfig": {
-					"detail": "high"
+					"media_resolution": "high"
 				}
 			}`),
 			expected: &ChatCompletionRequest{
@@ -247,7 +247,7 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 				},
 				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
 					GenerationConfig: &GCPVertexAIGenerationConfig{
-						Detail: "high",
+						MediaResolution: "high",
 					},
 				},
 			},
@@ -263,7 +263,7 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 					}
 				],
 				"generationConfig": {
-					"detail": "medium",
+					"media_resolution": "medium",
 					"thinkingConfig": {
 						"includeThoughts": true,
 						"thinkingBudget": 500
@@ -282,7 +282,7 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 				},
 				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
 					GenerationConfig: &GCPVertexAIGenerationConfig{
-						Detail: "medium",
+						MediaResolution: "medium",
 						ThinkingConfig: &genai.ThinkingConfig{
 							IncludeThoughts: true,
 							ThinkingBudget:  ptr.To(int32(500)),

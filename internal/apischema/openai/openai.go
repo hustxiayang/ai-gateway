@@ -1583,8 +1583,8 @@ type GCPVertexAIGenerationConfig struct {
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig#ThinkingConfig
 	ThinkingConfig *genai.ThinkingConfig `json:"thinkingConfig,omitzero"`
 
-	// Detail here is to set global media resolution in gemini models: https://ai.google.dev/api/caching#MediaResolution
-	Detail genai.MediaResolution `json:"detail,omitempty"`
+	// MediaResolution is to set global media resolution in gemini models: https://ai.google.dev/api/caching#MediaResolution
+	MediaResolution genai.MediaResolution `json:"media_resolution,omitempty"`
 }
 
 // AnthropicVendorFields contains Anthropic vendor-specific fields.

@@ -641,7 +641,7 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 				},
 				GCPVertexAIVendorFields: &openai.GCPVertexAIVendorFields{
 					GenerationConfig: &openai.GCPVertexAIGenerationConfig{
-						Detail: "high",
+						MediaResolution: "high",
 					},
 				},
 			},
