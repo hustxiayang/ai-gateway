@@ -121,7 +121,7 @@ func TestOpenAIMessagesToGeminiContents(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			contents, systemInstruction, err := openAIMessagesToGeminiContents(tc.messages)
+			contents, systemInstruction, err := openAIMessagesToGeminiContents(tc.messages, "gemini-3-pro")
 
 			if tc.expectedErrorMsg != "" || err != nil {
 				require.Error(t, err)
@@ -847,7 +847,7 @@ func TestUserMsgToGeminiParts(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			parts, err := userMsgToGeminiParts(tc.msg)
+			parts, err := userMsgToGeminiParts(tc.msg, "gemini-3-pro")
 
 			if tc.expectedErrMsg != "" || err != nil {
 				require.Error(t, err)
