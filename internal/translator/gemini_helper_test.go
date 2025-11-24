@@ -1060,7 +1060,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				},
 			},
 			expectedResponseMode: responseModeNone,
-			requestModel:         "gemini-2.5-flash",
+			requestModel:         "gemini-3-pro",
 		},
 		{
 			name: "reasoning effort medium",
@@ -1073,7 +1073,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				},
 			},
 			expectedResponseMode: responseModeNone,
-			requestModel:         "gemini-2.5-flash",
+			requestModel:         "gemini-3-pro",
 		},
 		{
 			name: "reasoning effort unsupported",
@@ -1081,7 +1081,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				ReasoningEffort: openaigo.ReasoningEffortHigh,
 			},
 			expectedErrMsg: "reasoning effort:",
-			requestModel:   "gemini-2.5-flash",
+			requestModel:   "gemini-3-pro",
 		},
 	}
 
