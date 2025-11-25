@@ -40,7 +40,7 @@ type ChatCompletionRequest struct {
 
 // GCPVertexAIVendorFields contains GCP Vertex AI (Gemini) vendor-specific fields.
 type GCPVertexAIVendorFields struct {
-  // GenerationConfig holds Gemini generation configuration options.
+	// GenerationConfig holds Gemini generation configuration options.
 	// Currently only a subset of the options are supported.
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig
