@@ -16,7 +16,6 @@ import (
 	"github.com/openai/openai-go/v2/packages/param"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
-	"k8s.io/utils/ptr"
 )
 
 func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
@@ -187,45 +186,6 @@ func TestChatCompletionRequest_VendorFieldsExtraction(t *testing.T) {
 				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
 					GenerationConfig: &GCPVertexAIGenerationConfig{
 						MediaResolution: "high",
-					},
-				},
-			},
-		},
-		{
-			name: "Request with both detail and thinkingConfig fields",
-			jsonData: []byte(`{
-				"model": "gemini-1.5-pro",
-				"messages": [
-					{
-						"role": "user",
-						"content": "Test with both detail and thinking config"
-					}
-				],
-				"generationConfig": {
-					"media_resolution": "medium",
-					"thinkingConfig": {
-						"includeThoughts": true,
-						"thinkingBudget": 500
-					}
-				}
-			}`),
-			expected: &ChatCompletionRequest{
-				Model: "gemini-1.5-pro",
-				Messages: []ChatCompletionMessageParamUnion{
-					{
-						OfUser: &ChatCompletionUserMessageParam{
-							Role:    ChatMessageRoleUser,
-							Content: StringOrUserRoleContentUnion{Value: "Test with both detail and thinking config"},
-						},
-					},
-				},
-				GCPVertexAIVendorFields: &GCPVertexAIVendorFields{
-					GenerationConfig: &GCPVertexAIGenerationConfig{
-						MediaResolution: "medium",
-						ThinkingConfig: &genai.ThinkingConfig{
-							IncludeThoughts: true,
-							ThinkingBudget:  ptr.To(int32(500)),
-						},
 					},
 				},
 			},

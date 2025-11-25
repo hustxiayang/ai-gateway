@@ -1629,6 +1629,12 @@ func (t JSONUNIXTime) Equal(other JSONUNIXTime) bool {
 
 // GCPVertexAIVendorFields contains GCP Vertex AI (Gemini) vendor-specific fields.
 type GCPVertexAIVendorFields struct {
+	// GenerationConfig holds Gemini generation configuration options.
+	// Currently only a subset of the options are supported.
+	//
+	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig
+	GenerationConfig *GCPVertexAIGenerationConfig `json:"generationConfig,omitzero"`
+
 	// SafetySettings: Safety settings in the request to block unsafe content in the response.
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
@@ -1637,21 +1643,8 @@ type GCPVertexAIVendorFields struct {
 
 // GCPVertexAIGenerationConfig represents Gemini generation configuration options.
 type GCPVertexAIGenerationConfig struct {
-	// ThinkingConfig holds Gemini thinking configuration options.
-	//
-	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig#ThinkingConfig
-	ThinkingConfig *genai.ThinkingConfig `json:"thinkingConfig,omitzero"`
-
 	// MediaResolution is to set global media resolution in gemini models: https://ai.google.dev/api/caching#MediaResolution
 	MediaResolution genai.MediaResolution `json:"media_resolution,omitempty"`
-}
-
-// AnthropicVendorFields contains Anthropic vendor-specific fields.
-type AnthropicVendorFields struct {
-	// Thinking holds Anthropic thinking configuration options.
-	//
-	// https://docs.anthropic.com/en/api/messages#body-thinking
-	Thinking *anthropic.ThinkingConfigParamUnion `json:"thinking,omitzero"`
 }
 
 // ReasoningContentUnion content regarding the reasoning that is carried out by the model.

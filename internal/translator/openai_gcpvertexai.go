@@ -413,36 +413,6 @@ func getGenerationConfigThinkingConfig(tu *openai.ThinkingUnion) *genai.Thinking
 	return result
 }
 
-// NewGenerationConfigThinkingConfig converts a ThinkingUnion to GenerationConfigThinkingConfig.
-// It maps the values from the populated field of the union to the target struct.
-func getGenerationConfigThinkingConfig(tu *openai.ThinkingUnion) *genai.ThinkingConfig {
-	if tu == nil {
-		return nil
-	}
-
-	result := &genai.ThinkingConfig{}
-
-	if tu.OfEnabled != nil {
-		result.IncludeThoughts = tu.OfEnabled.IncludeThoughts
-
-		// Only set the budget if it's not the zero value.
-		// A zero budget would likely be treated the same as a disabled config.
-		if tu.OfEnabled.BudgetTokens > 0 {
-			// Convert int64 to int32,
-			//nolint:gosec // G115: BudgetTokens is known to be within int32 range.
-			budget := int32(tu.OfEnabled.BudgetTokens)
-			result.ThinkingBudget = &budget
-		}
-	} else if tu.OfDisabled != nil {
-		// If thinking is disabled, the target config should have default values.
-		// The `omitempty` tags will ensure they aren't marshaled.
-		result.IncludeThoughts = false
-		result.ThinkingBudget = nil
-	}
-
-	return result
-}
-
 // openAIMessageToGeminiMessage converts an OpenAI ChatCompletionRequest to a GCP Gemini GenerateContentRequest.
 func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) openAIMessageToGeminiMessage(openAIReq *openai.ChatCompletionRequest, requestModel internalapi.RequestModel) (*gcp.GenerateContentRequest, error) {
 	// Convert OpenAI messages to Gemini Contents and SystemInstruction.
@@ -504,9 +474,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) applyVendorSpecificField
 	if vendorGenConfig := gcpVendorFields.GenerationConfig; vendorGenConfig != nil {
 		if gcr.GenerationConfig == nil {
 			gcr.GenerationConfig = &genai.GenerationConfig{}
-		}
-		if vendorGenConfig.ThinkingConfig != nil {
-			gcr.GenerationConfig.ThinkingConfig = vendorGenConfig.ThinkingConfig
 		}
 		if vendorGenConfig.MediaResolution != "" && mediaResolutionAvailable(requestModel) {
 			gcr.GenerationConfig.MediaResolution = vendorGenConfig.MediaResolution
