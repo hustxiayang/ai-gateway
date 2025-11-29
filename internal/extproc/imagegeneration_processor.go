@@ -29,7 +29,7 @@ import (
 )
 
 // ImageGenerationProcessorFactory returns a factory method to instantiate the image generation processor.
-func ImageGenerationProcessorFactory(igm metrics.ImageGenerationMetrics) ProcessorFactory {
+func ImageGenerationProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, tracing tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "image-generation", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
@@ -44,7 +44,7 @@ func ImageGenerationProcessorFactory(igm metrics.ImageGenerationMetrics) Process
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
-			metrics:        igm,
+			metrics:        f.NewMetrics(),
 		}, nil
 	}
 }
@@ -128,7 +128,7 @@ func (i *imageGenerationProcessorRouterFilter) ProcessRequestBody(ctx context.Co
 	i.span = i.tracer.StartSpanAndInjectHeaders(
 		ctx,
 		i.requestHeaders,
-		headerMutation,
+		&headerMutationCarrier{m: headerMutation},
 		body,
 		rawBody.Body,
 	)
@@ -167,9 +167,9 @@ type imageGenerationProcessorUpstreamFilter struct {
 	// stream is set to true if the request is a streaming request (for GPT-Image-1).
 	stream bool
 	// cost is the cost of the request that is accumulated during the processing of the response.
-	costs translator.LLMTokenUsage
+	costs metrics.TokenUsage
 	// metrics tracking.
-	metrics metrics.ImageGenerationMetrics
+	metrics metrics.Metrics
 	// span is the tracing span for this request, inherited from the router filter.
 	span tracing.ImageGenerationSpan
 }
@@ -179,7 +179,7 @@ type imageGenerationProcessorUpstreamFilter struct {
 func (i *imageGenerationProcessorUpstreamFilter) selectTranslator(out filterapi.VersionedAPISchema) error {
 	switch out.Name {
 	case filterapi.APISchemaOpenAI:
-		i.translator = translator.NewImageGenerationOpenAIToOpenAITranslator(out.Version, i.modelNameOverride, i.span)
+		i.translator = translator.NewImageGenerationOpenAIToOpenAITranslator(out.Version, i.modelNameOverride)
 	default:
 		return fmt.Errorf("unsupported API schema: backend=%s", out)
 	}
@@ -361,9 +361,9 @@ func (i *imageGenerationProcessorUpstreamFilter) ProcessResponseBody(ctx context
 	// Translator response body transformation (if available)
 	var newHeaders []internalapi.Header
 	var newBody []byte
-	var tokenUsage translator.LLMTokenUsage
+	var tokenUsage metrics.TokenUsage
 	var responseModel internalapi.ResponseModel
-	newHeaders, newBody, tokenUsage, responseModel, err = i.translator.ResponseBody(i.responseHeaders, decodingResult.reader, body.EndOfStream, nil)
+	newHeaders, newBody, tokenUsage, responseModel, err = i.translator.ResponseBody(i.responseHeaders, decodingResult.reader, body.EndOfStream, i.span)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
@@ -383,16 +383,12 @@ func (i *imageGenerationProcessorUpstreamFilter) ProcessResponseBody(ctx context
 		},
 	}
 
-	i.costs.InputTokens += tokenUsage.InputTokens
-	i.costs.OutputTokens += tokenUsage.OutputTokens
-	i.costs.TotalTokens += tokenUsage.TotalTokens
+	i.costs.Override(tokenUsage)
 
 	// Ensure response model is set before recording metrics so attributes include it.
 	i.metrics.SetResponseModel(responseModel)
 	// Update metrics with token usage (input/output only per OTEL spec).
-	i.metrics.RecordTokenUsage(ctx, tokenUsage.InputTokens, tokenUsage.OutputTokens, i.requestHeaders)
-	// Record image generation metrics
-	i.metrics.RecordImageGeneration(ctx, i.requestHeaders)
+	i.metrics.RecordTokenUsage(ctx, i.costs, i.requestHeaders)
 
 	if body.EndOfStream && len(i.config.RequestCosts) > 0 {
 		metadata, err := buildDynamicMetadata(i.config, &i.costs, i.requestHeaders, i.backendName)

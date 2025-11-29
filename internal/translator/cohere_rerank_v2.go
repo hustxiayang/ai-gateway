@@ -16,12 +16,13 @@ import (
 
 	cohereschema "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
 // NewRerankCohereToCohereTranslator implements [Factory] for Cohere Rerank v2 translation.
-func NewRerankCohereToCohereTranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride, span tracing.RerankSpan) CohereRerankTranslator {
-	return &cohereToCohereTranslatorV2Rerank{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "rerank"), span: span} // e.g., /v2/rerank
+func NewRerankCohereToCohereTranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) CohereRerankTranslator {
+	return &cohereToCohereTranslatorV2Rerank{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "rerank")} // e.g., /v2/rerank
 }
 
 // cohereToCohereTranslatorV2Rerank is a passthrough translator for Cohere Rerank API v2.
@@ -33,8 +34,6 @@ type cohereToCohereTranslatorV2Rerank struct {
 	requestModel internalapi.RequestModel
 	// The path of the rerank endpoint to be used for the request. It is prefixed with the API path prefix.
 	path string
-	// span is the tracing span for this request, inherited from the router filter.
-	span tracing.RerankSpan
 }
 
 // RequestBody implements [CohereRerankTranslator.RequestBody].
@@ -72,8 +71,8 @@ func (t *cohereToCohereTranslatorV2Rerank) ResponseHeaders(map[string]string) (n
 
 // ResponseBody implements [CohereRerankTranslator.ResponseBody].
 // For rerank, token usage is provided via meta.tokens.input_tokens when available.
-func (t *cohereToCohereTranslatorV2Rerank) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ any) (
-	newHeaders []internalapi.Header, newBody []byte, tokenUsage LLMTokenUsage, responseModel internalapi.ResponseModel, err error,
+func (t *cohereToCohereTranslatorV2Rerank) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracing.RerankSpan) (
+	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel internalapi.ResponseModel, err error,
 ) {
 	var resp cohereschema.RerankV2Response
 	if err := json.NewDecoder(body).Decode(&resp); err != nil {
@@ -81,21 +80,25 @@ func (t *cohereToCohereTranslatorV2Rerank) ResponseBody(_ map[string]string, bod
 	}
 
 	// Record the response in the span if successful.
-	if t.span != nil {
-		t.span.RecordResponse(&resp)
+	if span != nil {
+		span.RecordResponse(&resp)
 	}
 
 	// Token accounting: rerank only has input tokens; output tokens do not apply.
 	if resp.Meta != nil && resp.Meta.Tokens != nil {
+		var totalTokens uint32
 		if resp.Meta.Tokens.InputTokens != nil {
 			// Cohere uses float; round down to uint32 like embeddings.
-			tokenUsage.InputTokens = uint32(*resp.Meta.Tokens.InputTokens) //nolint:gosec
-			tokenUsage.TotalTokens = tokenUsage.InputTokens
+			input := uint32(*resp.Meta.Tokens.InputTokens) //nolint:gosec
+			tokenUsage.SetInputTokens(input)
+			totalTokens += input
 		}
 		if resp.Meta.Tokens.OutputTokens != nil {
-			tokenUsage.OutputTokens = uint32(*resp.Meta.Tokens.OutputTokens) //nolint:gosec
-			tokenUsage.TotalTokens += tokenUsage.OutputTokens
+			output := uint32(*resp.Meta.Tokens.OutputTokens) //nolint:gosec
+			tokenUsage.SetOutputTokens(output)
+			totalTokens += output
 		}
+		tokenUsage.SetTotalTokens(totalTokens)
 	}
 
 	// Cohere rerank responses do not echo model; report the effective request model if known.

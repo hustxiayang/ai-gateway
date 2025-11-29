@@ -15,6 +15,7 @@ import (
 	cohereschema "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
@@ -61,7 +62,7 @@ type Translator[ReqT any, SpanT any] interface {
 	ResponseBody(respHeaders map[string]string, body io.Reader, endOfStream bool, span SpanT) (
 		newHeaders []internalapi.Header,
 		mutatedBody []byte,
-		tokenUsage LLMTokenUsage,
+		tokenUsage metrics.TokenUsage,
 		responseModel internalapi.ResponseModel,
 		err error,
 	)
@@ -77,29 +78,17 @@ type Translator[ReqT any, SpanT any] interface {
 type (
 	// OpenAIChatCompletionTranslator translates the OpenAI's /chat/completions endpoint.
 	OpenAIChatCompletionTranslator = Translator[openai.ChatCompletionRequest, tracing.ChatCompletionSpan]
-	// OpenAIEmbeddingTranslator = translates the OpenAI's /embeddings endpoint.
-	OpenAIEmbeddingTranslator = Translator[openai.EmbeddingRequest, any]
-	// OpenAICompletionTranslator = translates the OpenAI's /completions endpoint.
+	// OpenAIEmbeddingTranslator translates the OpenAI's /embeddings endpoint.
+	OpenAIEmbeddingTranslator = Translator[openai.EmbeddingRequest, tracing.EmbeddingsSpan]
+	// OpenAICompletionTranslator translates the OpenAI's /completions endpoint.
 	OpenAICompletionTranslator = Translator[openai.CompletionRequest, tracing.CompletionSpan]
-	// CohereRerankTranslator = translates the Cohere's /v2/rerank endpoint.
-	CohereRerankTranslator = Translator[cohereschema.RerankV2Request, any]
-	// AnthropicMessagesTranslator = translates the Anthropic's /messages endpoint.
-	AnthropicMessagesTranslator = Translator[anthropicschema.MessagesRequest, any]
+	// CohereRerankTranslator translates the Cohere's /v2/rerank endpoint.
+	CohereRerankTranslator = Translator[cohereschema.RerankV2Request, tracing.RerankSpan]
+	// AnthropicMessagesTranslator translates the Anthropic's /messages endpoint.
+	AnthropicMessagesTranslator = Translator[anthropicschema.MessagesRequest, any] // We don't have tracing implementation for /messages yet.
 	// OpenAIImageGenerationTranslator translates the OpenAI's /images/generations endpoint.
-	OpenAIImageGenerationTranslator = Translator[openaisdk.ImageGenerateParams, any]
+	OpenAIImageGenerationTranslator = Translator[openaisdk.ImageGenerateParams, tracing.ImageGenerationSpan]
 )
-
-// LLMTokenUsage represents the token usage reported usually by the backend API in the response body.
-type LLMTokenUsage struct {
-	// InputTokens is the number of tokens consumed from the input.
-	InputTokens uint32
-	// OutputTokens is the number of tokens consumed from the output.
-	OutputTokens uint32
-	// TotalTokens is the total number of tokens consumed.
-	TotalTokens uint32
-	// CachedInputTokens is the total number of tokens read from cache.
-	CachedInputTokens uint32
-}
 
 // sjsonOptions are the options used for sjson operations in the translator.
 var sjsonOptions = &sjson.Options{

@@ -28,7 +28,7 @@ import (
 )
 
 // EmbeddingsProcessorFactory returns a factory method to instantiate the embeddings processor.
-func EmbeddingsProcessorFactory(f metrics.EmbeddingsMetricsFactory) ProcessorFactory {
+func EmbeddingsProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, tracing tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "embeddings", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
@@ -43,7 +43,7 @@ func EmbeddingsProcessorFactory(f metrics.EmbeddingsMetricsFactory) ProcessorFac
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
-			metrics:        f(),
+			metrics:        f.NewMetrics(),
 		}, nil
 	}
 }
@@ -124,7 +124,7 @@ func (e *embeddingsProcessorRouterFilter) ProcessRequestBody(ctx context.Context
 	e.span = e.tracer.StartSpanAndInjectHeaders(
 		ctx,
 		e.requestHeaders,
-		headerMutation,
+		&headerMutationCarrier{m: headerMutation},
 		body,
 		rawBody.Body,
 	)
@@ -161,9 +161,9 @@ type embeddingsProcessorUpstreamFilter struct {
 	// onRetry is true if this is a retry request at the upstream filter.
 	onRetry bool
 	// cost is the cost of the request that is accumulated during the processing of the response.
-	costs translator.LLMTokenUsage
+	costs metrics.TokenUsage
 	// metrics tracking.
-	metrics metrics.EmbeddingsMetrics
+	metrics metrics.Metrics
 	// span is the tracing span for this request, inherited from the router filter.
 	span tracing.EmbeddingsSpan
 }
@@ -172,9 +172,9 @@ type embeddingsProcessorUpstreamFilter struct {
 func (e *embeddingsProcessorUpstreamFilter) selectTranslator(out filterapi.VersionedAPISchema) error {
 	switch out.Name {
 	case filterapi.APISchemaOpenAI:
-		e.translator = translator.NewEmbeddingOpenAIToOpenAITranslator(out.Version, e.modelNameOverride, e.span)
+		e.translator = translator.NewEmbeddingOpenAIToOpenAITranslator(out.Version, e.modelNameOverride)
 	case filterapi.APISchemaAzureOpenAI:
-		e.translator = translator.NewEmbeddingOpenAIToAzureOpenAITranslator(out.Version, e.modelNameOverride, e.span)
+		e.translator = translator.NewEmbeddingOpenAIToAzureOpenAITranslator(out.Version, e.modelNameOverride)
 	default:
 		return fmt.Errorf("unsupported API schema: backend=%s", out)
 	}
@@ -342,7 +342,7 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessResponseBody(ctx context.Cont
 		}, nil
 	}
 
-	newHeaders, newBody, tokenUsage, responseModel, err := e.translator.ResponseBody(e.responseHeaders, decodingResult.reader, body.EndOfStream, nil)
+	newHeaders, newBody, tokenUsage, responseModel, err := e.translator.ResponseBody(e.responseHeaders, decodingResult.reader, body.EndOfStream, e.span)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
@@ -362,14 +362,12 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessResponseBody(ctx context.Cont
 		},
 	}
 
-	// Accumulate token usage for embeddings (only input and total tokens are relevant).
-	e.costs.InputTokens += tokenUsage.InputTokens
-	e.costs.TotalTokens += tokenUsage.TotalTokens
+	e.costs.Override(tokenUsage)
 
 	e.metrics.SetResponseModel(responseModel)
 
 	// Update metrics with token usage.
-	e.metrics.RecordTokenUsage(ctx, tokenUsage.InputTokens, e.requestHeaders)
+	e.metrics.RecordTokenUsage(ctx, e.costs, e.requestHeaders)
 
 	if body.EndOfStream && len(e.config.RequestCosts) > 0 {
 		resp.DynamicMetadata, err = buildDynamicMetadata(e.config, &e.costs, e.requestHeaders, e.backendName)

@@ -33,6 +33,7 @@ import (
 const (
 	oauthWellKnownProtectedResourceMetadataPath   = "/.well-known/oauth-protected-resource"
 	oauthWellKnownAuthorizationServerMetadataPath = "/.well-known/oauth-authorization-server"
+	oidcWellKnownMetadataPath                     = "/.well-known/openid-configuration"
 
 	oauthProtectedResourceMetadataSuffix = "-oauth-protected-resource-metadata"
 	oauthAuthServerMetadataSuffix        = "-oauth-authorization-server-metadata"
@@ -46,7 +47,8 @@ func (c *MCPRouteController) syncMCPRouteSecurityPolicy(ctx context.Context, mcp
 	securityPolicy := mcpRoute.Spec.SecurityPolicy
 	hasOAuth := securityPolicy != nil && securityPolicy.OAuth != nil
 	hasAPIKeyAuth := securityPolicy != nil && securityPolicy.APIKeyAuth != nil
-	securityPolicyConfigured := hasOAuth || hasAPIKeyAuth
+	hasExtAuth := securityPolicy != nil && securityPolicy.ExtAuth != nil
+	securityPolicyConfigured := hasOAuth || hasAPIKeyAuth || hasExtAuth
 
 	if securityPolicyConfigured {
 		// Create and manage SecurityPolicy to enforce client authentication on the MCP proxy rule.
@@ -107,6 +109,8 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 
 	// Configure JWT authentication to validate access tokens if OAuth is enabled.
 	if oauth := mcpRoute.Spec.SecurityPolicy.OAuth; oauth != nil {
+		c.logger.Info("Configuring OAuth in SecurityPolicy")
+
 		name := "mcp-jwt-provider"
 		jwtProvider := egv1a1.JWTProvider{
 			Name:      name,
@@ -148,7 +152,13 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 
 	// Configure API Key authentication if enabled.
 	if apiKeyAuth := mcpRoute.Spec.SecurityPolicy.APIKeyAuth; apiKeyAuth != nil {
+		c.logger.Info("Configuring API Key in SecurityPolicy")
 		securityPolicySpec.APIKeyAuth = apiKeyAuth.DeepCopy()
+	}
+	// Configure External Auth if set up.
+	if extAuth := mcpRoute.Spec.SecurityPolicy.ExtAuth; extAuth != nil {
+		c.logger.Info("Configuring Ext Auth in SecurityPolicy")
+		securityPolicySpec.ExtAuth = extAuth.DeepCopy()
 	}
 
 	// The SecurityPolicy should only apply to the HTTPRoute MCP proxy rule.
@@ -675,6 +685,7 @@ func fetchOAuthAuthServerMetadata(authServer string, maxRetryElapsedTime time.Du
 	// Build the well-known URL according to the spec: https://datatracker.ietf.org/doc/html/rfc8414#section-3
 	// Some providers like Descope do not honor the spec and put the well-known endpoint
 	// after the issuer path, so we try a set of variants to maximize compatibility.
+	// See: https://modelcontextprotocol.io/specification/draft/basic/authorization#authorization-server-metadata-discovery
 	wellKnownURLVariants := []string{
 		fmt.Sprintf("%s://%s%s%s",
 			authServerURL.Scheme,
@@ -685,8 +696,20 @@ func fetchOAuthAuthServerMetadata(authServer string, maxRetryElapsedTime time.Du
 		fmt.Sprintf("%s://%s%s%s",
 			authServerURL.Scheme,
 			authServerURL.Host,
+			oidcWellKnownMetadataPath,
+			strings.TrimSuffix(authServerURL.Path, "/"),
+		),
+		fmt.Sprintf("%s://%s%s%s",
+			authServerURL.Scheme,
+			authServerURL.Host,
 			strings.TrimSuffix(authServerURL.Path, "/"),
 			oauthWellKnownAuthorizationServerMetadataPath,
+		),
+		fmt.Sprintf("%s://%s%s%s",
+			authServerURL.Scheme,
+			authServerURL.Host,
+			strings.TrimSuffix(authServerURL.Path, "/"),
+			oidcWellKnownMetadataPath,
 		),
 	}
 

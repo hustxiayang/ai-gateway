@@ -19,13 +19,14 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	openaisdk "github.com/openai/openai-go/v2"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
-	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
 
 func TestImageGeneration_Schema(t *testing.T) {
@@ -38,7 +39,7 @@ func TestImageGeneration_Schema(t *testing.T) {
 	})
 	t.Run("supported openai / on upstream", func(t *testing.T) {
 		cfg := &filterapi.RuntimeConfig{}
-		routeFilter, err := ImageGenerationProcessorFactory(nil)(cfg, nil, slog.Default(), tracing.NoopTracing{}, true)
+		routeFilter, err := ImageGenerationProcessorFactory(&mockMetricsFactory{})(cfg, nil, slog.Default(), tracing.NoopTracing{}, true)
 		require.NoError(t, err)
 		require.NotNil(t, routeFilter)
 		require.IsType(t, &imageGenerationProcessorUpstreamFilter{}, routeFilter)
@@ -59,19 +60,14 @@ func Test_imageGenerationProcessorUpstreamFilter_SelectTranslator(t *testing.T) 
 }
 
 type mockImageGenerationTracer struct {
-	tracing.NoopImageGenerationTracer
+	tracing.NoopTracer[openaisdk.ImageGenerateParams, tracing.ImageGenerationSpan]
 	startSpanCalled bool
 	returnedSpan    tracing.ImageGenerationSpan
 }
 
-func (m *mockImageGenerationTracer) StartSpanAndInjectHeaders(_ context.Context, _ map[string]string, headerMutation *extprocv3.HeaderMutation, _ *openaisdk.ImageGenerateParams, _ []byte) tracing.ImageGenerationSpan {
+func (m *mockImageGenerationTracer) StartSpanAndInjectHeaders(_ context.Context, _ map[string]string, carrier propagation.TextMapCarrier, _ *openaisdk.ImageGenerateParams, _ []byte) tracing.ImageGenerationSpan {
 	m.startSpanCalled = true
-	headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
-		Header: &corev3.HeaderValue{
-			Key:   "tracing-header",
-			Value: "1",
-		},
-	})
+	carrier.Set("tracing-header", "1")
 	if m.returnedSpan != nil {
 		return m.returnedSpan
 	}
@@ -97,6 +93,7 @@ func (m *mockImageGenerationSpan) EndSpanOnError(status int, body []byte) {
 func (m *mockImageGenerationSpan) RecordResponse(_ *openaisdk.ImagesResponse) {
 	// Mock implementation
 }
+func (m *mockImageGenerationSpan) RecordResponseChunk(*struct{}) {}
 
 func Test_imageGenerationProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 	t.Run("response pass-through and delegation", func(t *testing.T) {
@@ -181,8 +178,8 @@ func Test_imageGenerationProcessorRouterFilter_ProcessRequestBody(t *testing.T) 
 		headerMutation := re.RequestBody.GetResponse().GetHeaderMutation()
 		require.Contains(t, headerMutation.SetHeaders, &corev3.HeaderValueOption{
 			Header: &corev3.HeaderValue{
-				Key:   "tracing-header",
-				Value: "1",
+				Key:      "tracing-header",
+				RawValue: []byte("1"),
 			},
 		})
 	})
@@ -190,7 +187,7 @@ func Test_imageGenerationProcessorRouterFilter_ProcessRequestBody(t *testing.T) 
 
 func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseHeaders(t *testing.T) {
 	t.Run("error translation", func(t *testing.T) {
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		mt := &mockImageGenerationTranslator{t: t, expHeaders: make(map[string]string)}
 		p := &imageGenerationProcessorUpstreamFilter{
 			translator: mt,
@@ -207,7 +204,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseHeaders(t *testi
 			Headers: []*corev3.HeaderValue{{Key: "foo", Value: "bar"}, {Key: "dog", RawValue: []byte("cat")}},
 		}
 		expHeaders := map[string]string{"foo": "bar", "dog": "cat"}
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		mt := &mockImageGenerationTranslator{t: t, expHeaders: expHeaders}
 		p := &imageGenerationProcessorUpstreamFilter{
 			translator: mt,
@@ -224,7 +221,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseHeaders(t *testi
 
 func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.T) {
 	t.Run("error translation", func(t *testing.T) {
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		mt := &mockImageGenerationTranslator{t: t}
 		p := &imageGenerationProcessorUpstreamFilter{
 			translator: mt,
@@ -235,15 +232,15 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.
 		_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{})
 		require.ErrorContains(t, err, "test error")
 		mm.RequireRequestFailure(t)
-		require.Zero(t, mm.tokenUsageCount)
+		require.Zero(t, mm.inputTokenCount)
+		require.Zero(t, mm.outputTokenCount)
 	})
 	t.Run("ok", func(t *testing.T) {
 		inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
-		mm := &mockImageGenerationMetrics{}
-		mt := &mockImageGenerationTranslator{
-			t: t, expResponseBody: inBody,
-			retUsedToken: translator.LLMTokenUsage{OutputTokens: 123, InputTokens: 1},
-		}
+		mm := &mockMetrics{}
+		mt := &mockImageGenerationTranslator{t: t, expResponseBody: inBody}
+		mt.retUsedToken.SetInputTokens(1)
+		mt.retUsedToken.SetOutputTokens(123)
 
 		celProgInt, err := llmcostcel.NewProgram("54321")
 		require.NoError(t, err)
@@ -278,7 +275,8 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.
 		require.Nil(t, commonRes.BodyMutation)
 		require.Equal(t, &extprocv3.HeaderMutation{}, commonRes.HeaderMutation)
 		mm.RequireRequestSuccess(t)
-		require.Equal(t, 124, mm.tokenUsageCount) // 1 input + 123 output
+		require.Equal(t, 1, mm.inputTokenCount)
+		require.Equal(t, 123, mm.outputTokenCount)
 
 		md := res.DynamicMetadata
 		require.NotNil(t, md)
@@ -298,7 +296,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.
 	t.Run("non-2xx status failure once", func(t *testing.T) {
 		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
 		expBody := []byte("error-body")
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		mt := &mockImageGenerationTranslator{t: t, expResponseBody: inBody, retHeaderMutation: []internalapi.Header{
 			{"foo", "bar"},
 		}, retBodyMutation: expBody}
@@ -331,7 +329,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.
 		require.NoError(t, err)
 		require.NoError(t, zw.Close())
 		inBody := &extprocv3.HttpBody{Body: gz.Bytes(), EndOfStream: true}
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		mt := &mockImageGenerationTranslator{
 			// translator returns a non-nil body mutation indicating processor changed body
 			retBodyMutation:   []byte("changed"),
@@ -361,7 +359,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessResponseBody(t *testing.
 func Test_imageGenerationProcessorUpstreamFilter_ProcessRequestHeaders(t *testing.T) {
 	t.Run("ok with auth handler and header mutator", func(t *testing.T) {
 		headers := map[string]string{":path": "/v1/images/generations", internalapi.ModelNameHeaderKeyDefault: "dall-e-3"}
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		body := &openaisdk.ImageGenerateParams{Model: openaisdk.ImageModel("dall-e-3"), Prompt: "a cat"}
 		mt := &mockImageGenerationTranslator{t: t, expRequestBody: body}
 		p := &imageGenerationProcessorUpstreamFilter{
@@ -378,12 +376,12 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessRequestHeaders(t *testin
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		mm.RequireRequestNotCompleted(t)
-		mm.RequireSelectedModel(t, "dall-e-3")
+		mm.RequireSelectedModel(t, "dall-e-3", "dall-e-3", "")
 	})
 
 	t.Run("auth handler error path records failure", func(t *testing.T) {
 		headers := map[string]string{":path": "/v1/images/generations", internalapi.ModelNameHeaderKeyDefault: "dall-e-3"}
-		mm := &mockImageGenerationMetrics{}
+		mm := &mockMetrics{}
 		body := &openaisdk.ImageGenerateParams{Model: openaisdk.ImageModel("dall-e-3"), Prompt: "a cat"}
 		mt := &mockImageGenerationTranslator{t: t, expRequestBody: body}
 		p := &imageGenerationProcessorUpstreamFilter{
@@ -414,7 +412,7 @@ func Test_imageGenerationProcessorUpstreamFilter_ProcessRequestHeaders(t *testin
 
 func Test_imageGenerationProcessorUpstreamFilter_SetBackend(t *testing.T) {
 	headers := map[string]string{":path": "/v1/images/generations"}
-	mm := &mockImageGenerationMetrics{}
+	mm := &mockMetrics{}
 	p := &imageGenerationProcessorUpstreamFilter{
 		config:         &filterapi.RuntimeConfig{},
 		requestHeaders: headers,
@@ -429,7 +427,7 @@ func Test_imageGenerationProcessorUpstreamFilter_SetBackend(t *testing.T) {
 	}, nil, &imageGenerationProcessorRouterFilter{})
 	require.ErrorContains(t, err, "unsupported API schema: backend={some-schema v10.0}")
 	mm.RequireRequestFailure(t)
-	mm.RequireTokensRecorded(t, 0)
+	mm.RequireTokensRecorded(t, 0, 0, 0)
 	mm.RequireSelectedBackend(t, "some-backend")
 
 	// Supported OpenAI schema.
@@ -438,7 +436,7 @@ func Test_imageGenerationProcessorUpstreamFilter_SetBackend(t *testing.T) {
 		config:         &filterapi.RuntimeConfig{},
 		requestHeaders: map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-image-1-mini"},
 		logger:         slog.Default(),
-		metrics:        &mockImageGenerationMetrics{},
+		metrics:        &mockMetrics{},
 	}
 	err = p2.SetBackend(t.Context(), &filterapi.Backend{
 		Name:              "openai",
@@ -477,7 +475,7 @@ type mockImageGenerationTranslator struct {
 	retErr                      error
 	retHeaderMutation           []internalapi.Header
 	retBodyMutation             []byte
-	retUsedToken                translator.LLMTokenUsage
+	retUsedToken                metrics.TokenUsage
 	retResponseModel            internalapi.ResponseModel
 }
 
@@ -500,7 +498,7 @@ func (m *mockImageGenerationTranslator) ResponseHeaders(headers map[string]strin
 	return m.retHeaderMutation, m.retErr
 }
 
-func (m *mockImageGenerationTranslator) ResponseBody(headers map[string]string, body io.Reader, endOfStream bool, _ any) ([]internalapi.Header, []byte, translator.LLMTokenUsage, internalapi.ResponseModel, error) {
+func (m *mockImageGenerationTranslator) ResponseBody(headers map[string]string, body io.Reader, endOfStream bool, _ tracing.ImageGenerationSpan) ([]internalapi.Header, []byte, metrics.TokenUsage, internalapi.ResponseModel, error) {
 	_ = headers
 	if m.expResponseBody != nil {
 		bodyBytes, _ := io.ReadAll(body)
@@ -554,7 +552,7 @@ func TestImageGenerationProcessorUpstreamFilter_ProcessRequestHeaders_WithBodyMu
 			retErr:          nil,
 		}
 
-		imageMetrics := &mockImageGenerationMetrics{}
+		imageMetrics := &mockMetrics{}
 
 		p := &imageGenerationProcessorUpstreamFilter{
 			config:                 &filterapi.RuntimeConfig{},
@@ -609,7 +607,7 @@ func TestImageGenerationProcessorUpstreamFilter_ProcessRequestHeaders_WithBodyMu
 
 	t.Run("body mutator with retry", func(t *testing.T) {
 		headers := map[string]string{":path": "/v1/images/generations"}
-		imageMetrics := &mockImageGenerationMetrics{}
+		imageMetrics := &mockMetrics{}
 
 		originalRequestBodyRaw := []byte(`{"model": "dall-e-3", "prompt": "Original prompt", "size": "1024x1024", "quality": "standard"}`)
 		requestBody := &openaisdk.ImageGenerateParams{

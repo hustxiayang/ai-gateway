@@ -28,7 +28,7 @@ import (
 )
 
 // RerankProcessorFactory returns a factory method to instantiate the rerank processor.
-func RerankProcessorFactory(f metrics.RerankMetricsFactory) ProcessorFactory {
+func RerankProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, tracing tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "rerank", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
@@ -43,7 +43,7 @@ func RerankProcessorFactory(f metrics.RerankMetricsFactory) ProcessorFactory {
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
-			metrics:        f(),
+			metrics:        f.NewMetrics(),
 		}, nil
 	}
 }
@@ -124,7 +124,7 @@ func (r *rerankProcessorRouterFilter) ProcessRequestBody(ctx context.Context, ra
 	r.span = r.tracer.StartSpanAndInjectHeaders(
 		ctx,
 		r.requestHeaders,
-		headerMutation,
+		&headerMutationCarrier{m: headerMutation},
 		body,
 		rawBody.Body,
 	)
@@ -161,9 +161,9 @@ type rerankProcessorUpstreamFilter struct {
 	// onRetry is true if this is a retry request at the upstream filter.
 	onRetry bool
 	// cost is the cost of the request that is accumulated during the processing of the response.
-	costs translator.LLMTokenUsage
+	costs metrics.TokenUsage
 	// metrics tracking.
-	metrics metrics.RerankMetrics
+	metrics metrics.Metrics
 	// span is the tracing span for this request, inherited from the router filter.
 	span tracing.RerankSpan
 }
@@ -172,7 +172,7 @@ type rerankProcessorUpstreamFilter struct {
 func (r *rerankProcessorUpstreamFilter) selectTranslator(out filterapi.VersionedAPISchema) error {
 	switch out.Name {
 	case filterapi.APISchemaCohere:
-		r.translator = translator.NewRerankCohereToCohereTranslator(out.Version, r.modelNameOverride, r.span)
+		r.translator = translator.NewRerankCohereToCohereTranslator(out.Version, r.modelNameOverride)
 	default:
 		return fmt.Errorf("unsupported API schema: backend=%s", out)
 	}
@@ -332,7 +332,7 @@ func (r *rerankProcessorUpstreamFilter) ProcessResponseBody(ctx context.Context,
 		}, nil
 	}
 
-	newHeaders, newBody, tokenUsage, responseModel, err := r.translator.ResponseBody(r.responseHeaders, decodingResult.reader, body.EndOfStream, nil)
+	newHeaders, newBody, tokenUsage, responseModel, err := r.translator.ResponseBody(r.responseHeaders, decodingResult.reader, body.EndOfStream, r.span)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
@@ -352,16 +352,13 @@ func (r *rerankProcessorUpstreamFilter) ProcessResponseBody(ctx context.Context,
 		},
 	}
 
-	// Accumulate token usage for rerank (input tokens; output tokens may be reported but not used for cost by default).
-	r.costs.InputTokens += tokenUsage.InputTokens
-	r.costs.OutputTokens += tokenUsage.OutputTokens
-	r.costs.TotalTokens += tokenUsage.TotalTokens
+	r.costs.Override(tokenUsage)
 
 	// Set the response model for metrics
 	r.metrics.SetResponseModel(responseModel)
 
 	// Update metrics with token usage (rerank records only input tokens in metrics package).
-	r.metrics.RecordTokenUsage(ctx, tokenUsage.InputTokens, r.requestHeaders)
+	r.metrics.RecordTokenUsage(ctx, tokenUsage, r.requestHeaders)
 
 	if body.EndOfStream && len(r.config.RequestCosts) > 0 {
 		resp.DynamicMetadata, err = buildDynamicMetadata(r.config, &r.costs, r.requestHeaders, r.backendName)

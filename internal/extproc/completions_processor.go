@@ -29,7 +29,7 @@ import (
 )
 
 // CompletionsProcessorFactory returns a factory method to instantiate the completions processor.
-func CompletionsProcessorFactory(f metrics.CompletionMetricsFactory) ProcessorFactory {
+func CompletionsProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, tracing tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "completions", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
@@ -44,7 +44,7 @@ func CompletionsProcessorFactory(f metrics.CompletionMetricsFactory) ProcessorFa
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
-			metrics:        f(),
+			metrics:        f.NewMetrics(),
 		}, nil
 	}
 }
@@ -146,7 +146,7 @@ func (c *completionsProcessorRouterFilter) ProcessRequestBody(ctx context.Contex
 	c.span = c.tracer.StartSpanAndInjectHeaders(
 		ctx,
 		c.requestHeaders,
-		headerMutation,
+		&headerMutationCarrier{m: headerMutation},
 		body,
 		rawBody.Body,
 	)
@@ -187,11 +187,11 @@ type completionsProcessorUpstreamFilter struct {
 	// See the comment on the `forcedStreamOptionIncludeUsage` field in the router filter.
 	forcedStreamOptionIncludeUsage bool
 	// cost is the cost of the request that is accumulated during the processing of the response.
-	costs translator.LLMTokenUsage
+	costs metrics.TokenUsage
 	// span is the tracing span for this request, inherited from the router filter.
 	span tracing.CompletionSpan
 	// metrics tracking.
-	metrics metrics.CompletionMetrics
+	metrics metrics.Metrics
 }
 
 // selectTranslator selects the translator based on the output schema.
@@ -395,26 +395,19 @@ func (c *completionsProcessorUpstreamFilter) ProcessResponseBody(ctx context.Con
 		},
 	}
 
-	// Accumulate token usage for completions.
-	c.costs.InputTokens += tokenUsage.InputTokens
-	c.costs.OutputTokens += tokenUsage.OutputTokens
-	c.costs.TotalTokens += tokenUsage.TotalTokens
+	c.costs.Override(tokenUsage)
 
 	// Record metrics.
 	if c.stream {
 		// Token latency is only recorded for streaming responses
-		c.metrics.RecordTokenLatency(ctx, tokenUsage.OutputTokens, body.EndOfStream, c.requestHeaders)
+		out, _ := c.costs.OutputTokens()
+		c.metrics.RecordTokenLatency(ctx, out, body.EndOfStream, c.requestHeaders)
 		// Emit usage once at end-of-stream using final totals.
 		if body.EndOfStream {
-			c.metrics.RecordTokenUsage(ctx, c.costs.InputTokens, c.costs.OutputTokens, c.requestHeaders)
+			c.metrics.RecordTokenUsage(ctx, c.costs, c.requestHeaders)
 		}
 	} else {
-		c.metrics.RecordTokenUsage(ctx, tokenUsage.InputTokens, tokenUsage.OutputTokens, c.requestHeaders)
-	}
-
-	// Log the response model for debugging
-	if responseModel != "" {
-		c.logger.Debug("completion response model", "model", responseModel)
+		c.metrics.RecordTokenUsage(ctx, c.costs, c.requestHeaders)
 	}
 
 	if body.EndOfStream && len(c.config.RequestCosts) > 0 {

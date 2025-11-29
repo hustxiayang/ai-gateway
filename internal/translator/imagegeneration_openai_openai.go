@@ -18,12 +18,13 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
 // NewImageGenerationOpenAIToOpenAITranslator implements [Factory] for OpenAI to OpenAI image generation translation.
-func NewImageGenerationOpenAIToOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride, span tracing.ImageGenerationSpan) OpenAIImageGenerationTranslator {
-	return &openAIToOpenAIImageGenerationTranslator{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "images/generations"), span: span}
+func NewImageGenerationOpenAIToOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIImageGenerationTranslator {
+	return &openAIToOpenAIImageGenerationTranslator{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "images/generations")}
 }
 
 // openAIToOpenAIImageGenerationTranslator implements [ImageGenerationTranslator] for /v1/images/generations.
@@ -31,8 +32,6 @@ type openAIToOpenAIImageGenerationTranslator struct {
 	modelNameOverride internalapi.ModelNameOverride
 	// The path of the images generations endpoint to be used for the request. It is prefixed with the OpenAI path prefix.
 	path string
-	// span is the tracing span for this request, inherited from the router filter.
-	span tracing.ImageGenerationSpan
 	// requestModel stores the effective model for this request (override or provided)
 	// so we can attribute metrics later; the OpenAI Images response omits a model field.
 	requestModel internalapi.RequestModel
@@ -109,8 +108,8 @@ func (o *openAIToOpenAIImageGenerationTranslator) ResponseHeaders(map[string]str
 }
 
 // ResponseBody implements [ImageGenerationTranslator.ResponseBody].
-func (o *openAIToOpenAIImageGenerationTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ any) (
-	newHeaders []internalapi.Header, newBody []byte, tokenUsage LLMTokenUsage, responseModel internalapi.ResponseModel, err error,
+func (o *openAIToOpenAIImageGenerationTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracing.ImageGenerationSpan) (
+	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel internalapi.ResponseModel, err error,
 ) {
 	// Decode using OpenAI SDK v2 schema to avoid drift.
 	resp := &openaisdk.ImagesResponse{}
@@ -120,17 +119,17 @@ func (o *openAIToOpenAIImageGenerationTranslator) ResponseBody(_ map[string]stri
 
 	// Populate token usage if provided (GPT-Image-1); otherwise remain zero.
 	if resp.JSON.Usage.Valid() {
-		tokenUsage.InputTokens = uint32(resp.Usage.InputTokens)   //nolint:gosec
-		tokenUsage.OutputTokens = uint32(resp.Usage.OutputTokens) //nolint:gosec
-		tokenUsage.TotalTokens = uint32(resp.Usage.TotalTokens)   //nolint:gosec
+		tokenUsage.SetInputTokens(uint32(resp.Usage.InputTokens))   //nolint:gosec
+		tokenUsage.SetOutputTokens(uint32(resp.Usage.OutputTokens)) //nolint:gosec
+		tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))   //nolint:gosec
 	}
 
 	// There is no response model field, so use the request one.
 	responseModel = o.requestModel
 
 	// Record the response in the span if tracing is enabled.
-	if o.span != nil {
-		o.span.RecordResponse(resp)
+	if span != nil {
+		span.RecordResponse(resp)
 	}
 
 	return

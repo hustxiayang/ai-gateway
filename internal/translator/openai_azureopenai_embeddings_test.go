@@ -14,6 +14,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
 
 func TestOpenAIToAzureOpenAITranslatorV1EmbeddingRequestBody(t *testing.T) {
@@ -47,7 +48,7 @@ func TestOpenAIToAzureOpenAITranslatorV1EmbeddingRequestBody(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", tc.modelNameOverride, nil)
+			translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", tc.modelNameOverride)
 			originalBody := `{"model":"text-embedding-ada-002","input":"test input"}`
 			var req openai.EmbeddingRequest
 			require.NoError(t, json.Unmarshal([]byte(originalBody), &req))
@@ -79,7 +80,7 @@ func TestOpenAIToAzureOpenAITranslatorV1EmbeddingRequestBody(t *testing.T) {
 }
 
 func TestOpenAIToAzureOpenAITranslatorV1EmbeddingResponseHeaders(t *testing.T) {
-	translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "", nil)
+	translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "")
 	headerMutation, err := translator.ResponseHeaders(map[string]string{})
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
@@ -90,7 +91,7 @@ func TestOpenAIToAzureOpenAITranslatorV1EmbeddingResponseBody(t *testing.T) {
 		name           string
 		responseBody   string
 		responseStatus string
-		expTokenUsage  LLMTokenUsage
+		expTokenUsage  metrics.TokenUsage
 		expError       bool
 	}{
 		{
@@ -110,27 +111,23 @@ func TestOpenAIToAzureOpenAITranslatorV1EmbeddingResponseBody(t *testing.T) {
 					"total_tokens": 8
 				}
 			}`,
-			expTokenUsage: LLMTokenUsage{
-				InputTokens:  8,
-				OutputTokens: 0,
-				TotalTokens:  8,
-			},
+			expTokenUsage: tokenUsageFrom(8, -1, -1, 8),
 		},
 		{
 			name:          "invalid_json",
 			responseBody:  `invalid json`,
 			expError:      true,
-			expTokenUsage: LLMTokenUsage{},
+			expTokenUsage: tokenUsageFrom(-1, -1, -1, -1),
 		},
 		{
 			name:           "error_response",
 			responseBody:   `{"error": {"message": "Invalid input", "type": "BadRequestError"}}`,
 			responseStatus: "400",
-			expTokenUsage:  LLMTokenUsage{},
+			expTokenUsage:  tokenUsageFrom(0, -1, -1, 0),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "", nil)
+			translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "")
 			respHeaders := map[string]string{
 				"content-type": "application/json",
 			}
@@ -163,7 +160,7 @@ func TestOpenAIToAzureOpenAITranslatorV1EmbeddingResponseBody(t *testing.T) {
 }
 
 func TestOpenAIToAzureOpenAITranslatorV1EmbeddingResponseError(t *testing.T) {
-	translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "", nil).(*openAIToAzureOpenAITranslatorV1Embedding)
+	translator := NewEmbeddingOpenAIToAzureOpenAITranslator("2024-12-01-preview", "").(*openAIToAzureOpenAITranslatorV1Embedding)
 
 	t.Run("non_json_error", func(t *testing.T) {
 		respHeaders := map[string]string{

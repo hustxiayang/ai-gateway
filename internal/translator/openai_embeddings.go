@@ -16,12 +16,13 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
 // NewEmbeddingOpenAIToOpenAITranslator implements [Factory] for OpenAI to OpenAI translation for embeddings.
-func NewEmbeddingOpenAIToOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride, span tracing.EmbeddingsSpan) OpenAIEmbeddingTranslator {
-	return &openAIToOpenAITranslatorV1Embedding{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "embeddings"), span: span}
+func NewEmbeddingOpenAIToOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIEmbeddingTranslator {
+	return &openAIToOpenAITranslatorV1Embedding{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "embeddings")}
 }
 
 // openAIToOpenAITranslatorV1Embedding is a passthrough translator for OpenAI Embeddings API.
@@ -31,8 +32,6 @@ type openAIToOpenAITranslatorV1Embedding struct {
 	modelNameOverride internalapi.ModelNameOverride
 	// The path of the embeddings endpoint to be used for the request. It is prefixed with the OpenAI path prefix.
 	path string
-	// span is the tracing span for this request, inherited from the router filter.
-	span tracing.EmbeddingsSpan
 }
 
 // RequestBody implements [OpenAIEmbeddingTranslator.RequestBody].
@@ -68,8 +67,8 @@ func (o *openAIToOpenAITranslatorV1Embedding) ResponseHeaders(map[string]string)
 // OpenAI embeddings support model virtualization through automatic routing and resolution,
 // so we return the actual model from the response body which may differ from the requested model
 // (e.g., request "text-embedding-3-small" → response with specific version).
-func (o *openAIToOpenAITranslatorV1Embedding) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ any) (
-	newHeaders []internalapi.Header, newBody []byte, tokenUsage LLMTokenUsage, responseModel internalapi.ResponseModel, err error,
+func (o *openAIToOpenAITranslatorV1Embedding) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracing.EmbeddingsSpan) (
+	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel internalapi.ResponseModel, err error,
 ) {
 	var resp openai.EmbeddingResponse
 	if err := json.NewDecoder(body).Decode(&resp); err != nil {
@@ -77,16 +76,13 @@ func (o *openAIToOpenAITranslatorV1Embedding) ResponseBody(_ map[string]string, 
 	}
 
 	// Record the response in the span if successful.
-	if o.span != nil {
-		o.span.RecordResponse(&resp)
+	if span != nil {
+		span.RecordResponse(&resp)
 	}
 
-	tokenUsage = LLMTokenUsage{
-		InputTokens: uint32(resp.Usage.PromptTokens), //nolint:gosec
-		TotalTokens: uint32(resp.Usage.TotalTokens),  //nolint:gosec
-		// Embeddings don't have output tokens, only input and total.
-		OutputTokens: 0,
-	}
+	// Embeddings don't return output tokens; populate input and total when provided.
+	tokenUsage.SetInputTokens(uint32(resp.Usage.PromptTokens)) //nolint:gosec
+	tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))  //nolint:gosec
 	responseModel = resp.Model
 	return
 }

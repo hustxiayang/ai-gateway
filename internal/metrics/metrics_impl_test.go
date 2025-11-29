@@ -26,7 +26,7 @@ func TestNewProcessorMetrics(t *testing.T) {
 	var (
 		mr    = metric.NewManualReader()
 		meter = metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm    = NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm    = NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 	)
 
 	assert.NotNil(t, pm)
@@ -39,7 +39,7 @@ func TestStartRequest(t *testing.T) {
 		var (
 			mr    = metric.NewManualReader()
 			meter = metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-			pm    = NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+			pm    = NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 		)
 
 		before := time.Now()
@@ -57,11 +57,11 @@ func TestRecordTokenUsage(t *testing.T) {
 	var (
 		mr    = metric.NewManualReader()
 		meter = metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm    = NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm    = NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs = []attribute.KeyValue{
 			// gen_ai.operation.name - https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#common-attributes
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			// gen_ai.provider.name - https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#common-attributes
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 			// gen_ai.original.model - the original model from the request
@@ -80,7 +80,10 @@ func TestRecordTokenUsage(t *testing.T) {
 	pm.SetRequestModel("test-model")
 	pm.SetResponseModel("test-model")
 	pm.SetBackend(&filterapi.Backend{Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}})
-	pm.RecordTokenUsage(t.Context(), 10, 8, 5, nil)
+	pm.RecordTokenUsage(t.Context(), TokenUsage{
+		inputTokens: 10, cachedInputTokens: 8, outputTokens: 5,
+		inputTokenSet: true, cachedInputTokenSet: true, outputTokenSet: true,
+	}, nil)
 
 	count, sum := testotel.GetHistogramValues(t, mr, genaiMetricClientTokenUsage, inputAttrs)
 	assert.Equal(t, uint64(1), count)
@@ -105,9 +108,9 @@ func testRecordTokenLatency(t *testing.T) {
 	var (
 		mr    = metric.NewManualReader()
 		meter = metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm    = NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm    = NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 		attrs = attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderAWSBedrock),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -151,9 +154,9 @@ func testRecordRequestCompletion(t *testing.T) {
 	var (
 		mr    = metric.NewManualReader()
 		meter = metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm    = NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm    = NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 		attrs = []attribute.KeyValue{
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String("custom"),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -184,7 +187,7 @@ func testRecordRequestCompletion(t *testing.T) {
 
 func TestGetTimeToFirstTokenMsAndGetInterTokenLatencyMs(t *testing.T) {
 	t.Parallel()
-	c := chatCompletion{timeToFirstToken: 1 * time.Second, interTokenLatency: 2 * time.Second}
+	c := metricsImpl{timeToFirstToken: 1 * time.Second, interTokenLatency: 2 * time.Second}
 	assert.Equal(t, 1000.0, c.GetTimeToFirstTokenMs())
 	assert.Equal(t, 2000.0, c.GetInterTokenLatencyMs())
 }
@@ -201,7 +204,7 @@ func TestHeaderLabelMapping(t *testing.T) {
 			"x-org-id":  "org_id",
 		}
 
-		pm = NewChatCompletionFactory(meter, headerMapping)().(*chatCompletion)
+		pm = NewMetricsFactory(meter, headerMapping, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 	)
 
 	// Test with headers that should be mapped.
@@ -215,14 +218,17 @@ func TestHeaderLabelMapping(t *testing.T) {
 	pm.SetRequestModel("test-model")
 	pm.SetResponseModel("test-model")
 	pm.SetBackend(&filterapi.Backend{Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}})
-	pm.RecordTokenUsage(t.Context(), 10, 8, 5, requestHeaders)
+	pm.RecordTokenUsage(t.Context(), TokenUsage{
+		inputTokens: 10, outputTokens: 8, totalTokens: 5,
+		inputTokenSet: true, outputTokenSet: true, totalTokenSet: true,
+	}, requestHeaders)
 
 	// Verify that the header mapping is set correctly.
 	assert.Equal(t, headerMapping, pm.requestHeaderAttributeMapping)
 
 	// Verify that the metrics are recorded with the mapped header attributes.
 	attrs := attribute.NewSet(
-		attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 		attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 		attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 		attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -243,7 +249,7 @@ func TestModelNameHeaderKey(t *testing.T) {
 	t.Parallel()
 	mr := metric.NewManualReader()
 	meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-	pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+	pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 	// Simulate headers with model override
 	headers := map[string]string{
@@ -260,11 +266,14 @@ func TestModelNameHeaderKey(t *testing.T) {
 	// Response model is what the backend actually used
 	pm.SetResponseModel("us.meta.llama3-2-1b-instruct-v1:0")
 
-	pm.RecordTokenUsage(t.Context(), 10, 8, 5, headers)
+	pm.RecordTokenUsage(t.Context(), TokenUsage{
+		inputTokens: 10, outputTokens: 8, totalTokens: 5,
+		inputTokenSet: true, outputTokenSet: true, totalTokenSet: true,
+	}, headers)
 
 	// Verify metrics use the overridden request model and original model
 	inputAttrs := attribute.NewSet(
-		attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 		attribute.Key(genaiAttributeProviderName).String(genaiProviderAWSBedrock),
 		attribute.Key(genaiAttributeOriginalModel).String("llama3-2-1b"),
 		attribute.Key(genaiAttributeRequestModel).String("backend-specific-model"),
@@ -279,16 +288,19 @@ func TestModelNameHeaderKey(t *testing.T) {
 func TestLabels_SetModel_RequestAndResponseDiffer(t *testing.T) {
 	mr := metric.NewManualReader()
 	meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-	pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+	pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 	pm.SetBackend(&filterapi.Backend{Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}})
 	pm.SetOriginalModel("orig-model")
 	pm.SetRequestModel("req-model")
 	pm.SetResponseModel("res-model")
-	pm.RecordTokenUsage(t.Context(), 2, 1, 3, nil)
+	pm.RecordTokenUsage(t.Context(), TokenUsage{
+		inputTokens: 2, cachedInputTokens: 1, outputTokens: 3,
+		inputTokenSet: true, cachedInputTokenSet: true, outputTokenSet: true,
+	}, nil)
 
 	inputAttrs := attribute.NewSet(
-		attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 		attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 		attribute.Key(genaiAttributeOriginalModel).String("orig-model"),
 		attribute.Key(genaiAttributeRequestModel).String("req-model"),
@@ -300,7 +312,7 @@ func TestLabels_SetModel_RequestAndResponseDiffer(t *testing.T) {
 	assert.Equal(t, 2.0, sum)
 
 	cachedInputAttrs := attribute.NewSet(
-		attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 		attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 		attribute.Key(genaiAttributeOriginalModel).String("orig-model"),
 		attribute.Key(genaiAttributeRequestModel).String("req-model"),
@@ -312,7 +324,7 @@ func TestLabels_SetModel_RequestAndResponseDiffer(t *testing.T) {
 	assert.Equal(t, 1.0, sum)
 
 	outputAttrs := attribute.NewSet(
-		attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 		attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 		attribute.Key(genaiAttributeOriginalModel).String("orig-model"),
 		attribute.Key(genaiAttributeRequestModel).String("req-model"),
@@ -355,10 +367,10 @@ func TestRecordTokenLatency_MaxAcrossStream_EndHasNoUsage(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mr := metric.NewManualReader()
 		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs := attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderAWSBedrock),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -396,10 +408,10 @@ func TestRecordTokenLatency_OnlyFinalUsage(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mr := metric.NewManualReader()
 		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs := attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderAWSBedrock),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -435,10 +447,10 @@ func TestRecordTokenLatency_ZeroTokensFirst(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mr := metric.NewManualReader()
 		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs := attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -480,10 +492,10 @@ func TestRecordTokenLatency_SingleToken(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mr := metric.NewManualReader()
 		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs := attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),
@@ -524,10 +536,10 @@ func TestRecordTokenLatency_MultipleChunksFormula(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mr := metric.NewManualReader()
 		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
-		pm := NewChatCompletionFactory(meter, nil)().(*chatCompletion)
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
 
 		attrs := attribute.NewSet(
-			attribute.Key(genaiAttributeOperationName).String(genaiOperationChat),
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
 			attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
 			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
 			attribute.Key(genaiAttributeRequestModel).String("test-model"),

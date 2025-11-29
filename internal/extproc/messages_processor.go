@@ -31,7 +31,7 @@ import (
 //
 // Requests: Only accepts Anthropic format requests.
 // Responses: Returns Anthropic format responses.
-func MessagesProcessorFactory(f metrics.MessagesMetricsFactory) ProcessorFactory {
+func MessagesProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, _ tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "anthropic-messages", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
@@ -45,7 +45,7 @@ func MessagesProcessorFactory(f metrics.MessagesMetricsFactory) ProcessorFactory
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
-			metrics:        f(),
+			metrics:        f.NewMetrics(),
 		}, nil
 	}
 }
@@ -146,8 +146,8 @@ type messagesProcessorUpstreamFilter struct {
 	translator             translator.AnthropicMessagesTranslator
 	onRetry                bool
 	stream                 bool
-	metrics                metrics.MessagesMetrics
-	costs                  translator.LLMTokenUsage
+	metrics                metrics.Metrics
+	costs                  metrics.TokenUsage
 }
 
 // selectTranslator selects the translator based on the output schema.
@@ -326,15 +326,19 @@ func (c *messagesProcessorUpstreamFilter) ProcessResponseBody(ctx context.Contex
 		},
 	}
 
-	c.costs.InputTokens += tokenUsage.InputTokens
-	c.costs.OutputTokens += tokenUsage.OutputTokens
-	c.costs.TotalTokens += tokenUsage.TotalTokens
-	c.costs.CachedInputTokens += tokenUsage.CachedInputTokens
+	// Translator reports the latest cumulative token usage which we use to override existing costs.
+	c.costs.Override(tokenUsage)
 
 	// Update metrics with token usage.
-	c.metrics.RecordTokenUsage(ctx, tokenUsage.InputTokens, tokenUsage.CachedInputTokens, tokenUsage.OutputTokens, c.requestHeaders)
 	if c.stream {
-		c.metrics.RecordTokenLatency(ctx, tokenUsage.OutputTokens, body.EndOfStream, c.requestHeaders)
+		outToken, _ := tokenUsage.OutputTokens()
+		c.metrics.RecordTokenLatency(ctx, outToken, body.EndOfStream, c.requestHeaders)
+		// Emit usage once at end-of-stream using final totals.
+		if body.EndOfStream {
+			c.metrics.RecordTokenUsage(ctx, c.costs, c.requestHeaders)
+		}
+	} else {
+		c.metrics.RecordTokenUsage(ctx, c.costs, c.requestHeaders)
 	}
 
 	if body.EndOfStream && len(c.config.RequestCosts) > 0 {

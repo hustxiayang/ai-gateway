@@ -54,7 +54,7 @@ func TestCohereToCohereTranslatorV2Rerank_RequestBody(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			translator := NewRerankCohereToCohereTranslator("v2", tc.modelNameOverride, nil)
+			translator := NewRerankCohereToCohereTranslator("v2", tc.modelNameOverride)
 			originalBody := `{"model":"rerank-english-v3","query":"reset password","documents":["doc1","doc2"]}`
 			var req cohereschema.RerankV2Request
 			require.NoError(t, json.Unmarshal([]byte(originalBody), &req))
@@ -86,7 +86,7 @@ func TestCohereToCohereTranslatorV2Rerank_RequestBody(t *testing.T) {
 }
 
 func TestCohereToCohereTranslatorV2Rerank_RequestBody_InvalidJSONCreatesBodyWithOverride(t *testing.T) {
-	translator := NewRerankCohereToCohereTranslator("v2", "override-model", nil)
+	translator := NewRerankCohereToCohereTranslator("v2", "override-model")
 	// Provide invalid JSON; sjson with Optimistic mode can still produce a body with the override.
 	originalBody := []byte("not-json")
 	var req cohereschema.RerankV2Request
@@ -108,7 +108,7 @@ func TestCohereToCohereTranslatorV2Rerank_RequestBody_SetModelNameError(t *testi
 	sjsonOptions = &sjson.Options{Optimistic: false, ReplaceInPlace: false}
 	t.Cleanup(func() { sjsonOptions = orig })
 
-	translator := NewRerankCohereToCohereTranslator("v2", "override-model", nil)
+	translator := NewRerankCohereToCohereTranslator("v2", "override-model")
 	// Use an array root to make setting an object key fail with Optimistic=false.
 	originalBody := []byte("[]")
 	var req cohereschema.RerankV2Request
@@ -121,7 +121,7 @@ func TestCohereToCohereTranslatorV2Rerank_RequestBody_SetModelNameError(t *testi
 }
 
 func TestCohereToCohereTranslatorV2Rerank_ResponseHeaders(t *testing.T) {
-	translator := NewRerankCohereToCohereTranslator("v2", "", nil)
+	translator := NewRerankCohereToCohereTranslator("v2", "")
 	headerMutation, err := translator.ResponseHeaders(map[string]string{})
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
@@ -129,10 +129,12 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseHeaders(t *testing.T) {
 
 func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		responseBody  string
-		expTokenUsage LLMTokenUsage
-		expError      bool
+		name           string
+		responseBody   string
+		expectedInput  int32
+		expectedOutput int32
+		expectedTotal  int32
+		expError       bool
 	}{
 		{
 			name: "valid_response_input_only",
@@ -141,7 +143,9 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 "id": "rr-123",
 "meta": {"tokens": {"input_tokens": 25}}
 }`,
-			expTokenUsage: LLMTokenUsage{InputTokens: 25, OutputTokens: 0, TotalTokens: 25},
+			expectedInput:  25,
+			expectedOutput: -1,
+			expectedTotal:  25,
 		},
 		{
 			name: "valid_response_with_output_tokens",
@@ -150,7 +154,9 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 "id": "rr-456",
 "meta": {"tokens": {"input_tokens": 10, "output_tokens": 2}}
 }`,
-			expTokenUsage: LLMTokenUsage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+			expectedInput:  10,
+			expectedOutput: 2,
+			expectedTotal:  12,
 		},
 		{
 			name:         "invalid_json",
@@ -159,7 +165,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			translator := NewRerankCohereToCohereTranslator("v2", "", nil)
+			translator := NewRerankCohereToCohereTranslator("v2", "")
 			translator.(*cohereToCohereTranslatorV2Rerank).requestModel = "rerank-english-v3"
 			headerMutation, bodyMutation, tokenUsage, responseModel, err := translator.ResponseBody(
 				map[string]string{contentTypeHeaderName: jsonContentType},
@@ -174,7 +180,8 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 			}
 
 			require.NoError(t, err)
-			require.Equal(t, tc.expTokenUsage, tokenUsage)
+			expected := tokenUsageFrom(tc.expectedInput, -1, tc.expectedOutput, tc.expectedTotal)
+			require.Equal(t, expected, tokenUsage)
 			require.Equal(t, "rerank-english-v3", responseModel)
 			require.Nil(t, headerMutation)
 			require.Nil(t, bodyMutation)
@@ -183,7 +190,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody(t *testing.T) {
 }
 
 func TestCohereToCohereTranslatorV2Rerank_ResponseError(t *testing.T) {
-	translator := NewRerankCohereToCohereTranslator("v2", "", nil)
+	translator := NewRerankCohereToCohereTranslator("v2", "")
 
 	t.Run("non_json_error", func(t *testing.T) {
 		respHeaders := map[string]string{
@@ -236,10 +243,11 @@ func (m *mockRerankSpanTranslator) EndSpanOnError(int, []byte) {}
 func (m *mockRerankSpanTranslator) RecordResponse(_ *cohereschema.RerankV2Response) {
 	m.recordCalled = true
 }
+func (m *mockRerankSpanTranslator) RecordResponseChunk(*struct{}) {}
 
 func TestCohereToCohereTranslatorV2Rerank_ResponseBody_RecordsResponseInSpan(t *testing.T) {
 	mspan := &mockRerankSpanTranslator{}
-	tr := NewRerankCohereToCohereTranslator("v2", "", mspan)
+	tr := NewRerankCohereToCohereTranslator("v2", "")
 	tr.(*cohereToCohereTranslatorV2Rerank).requestModel = "rerank-english-v3"
 
 	body := `{"results":[{"index":0,"relevance_score":0.9}],"id":"rr-1"}`
@@ -247,7 +255,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseBody_RecordsResponseInSpan(t *
 		map[string]string{contentTypeHeaderName: jsonContentType},
 		strings.NewReader(body),
 		true,
-		nil,
+		mspan,
 	)
 	require.NoError(t, err)
 	require.True(t, mspan.recordCalled)
