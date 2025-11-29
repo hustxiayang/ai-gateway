@@ -210,31 +210,36 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 			usage := ptr.To(geminiUsageToOpenAIUsage(chunk.UsageMetadata))
 
 			usageChunk := openai.ChatCompletionResponseChunk{
+				ID:      chunk.ResponseID,
+				Created: openai.JSONUNIXTime(chunk.CreateTime),
 				Object:  "chat.completion.chunk",
 				Choices: []openai.ChatCompletionResponseChunkChoice{},
 				// usage is nil for all chunks other than the last chunk
 				Usage: usage,
+				Model: o.requestModel,
 			}
 
 			// Serialize to SSE format as expected by OpenAI API.
-			var chunkBytes []byte
-			chunkBytes, err = json.Marshal(usageChunk)
+			err := serializeOpenAIChatCompletionChunk(usageChunk, &newBody)
 			if err != nil {
-				return nil, nil, LLMTokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
+				return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
 			}
-			sseChunkBuf.WriteString("data: ")
-			sseChunkBuf.Write(chunkBytes)
-			sseChunkBuf.WriteString("\n\n")
 
 			if span != nil {
 				span.RecordResponseChunk(openAIChunk)
 			}
 
-			tokenUsage = LLMTokenUsage{
-				InputTokens:       uint32(chunk.UsageMetadata.PromptTokenCount),        //nolint:gosec
-				OutputTokens:      uint32(chunk.UsageMetadata.CandidatesTokenCount),    //nolint:gosec
-				TotalTokens:       uint32(chunk.UsageMetadata.TotalTokenCount),         //nolint:gosec
-				CachedInputTokens: uint32(chunk.UsageMetadata.CachedContentTokenCount), //nolint:gosec
+			if chunk.UsageMetadata.PromptTokenCount >= 0 {
+				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
+			}
+			if chunk.UsageMetadata.CandidatesTokenCount >= 0 {
+				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount)) //nolint:gosec
+			}
+			if chunk.UsageMetadata.TotalTokenCount >= 0 {
+				tokenUsage.SetTotalTokens(uint32(chunk.UsageMetadata.TotalTokenCount)) //nolint:gosec
+			}
+			if chunk.UsageMetadata.CachedContentTokenCount >= 0 {
+				tokenUsage.SetCachedInputTokens(uint32(chunk.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
 			}
 		}
 	}
@@ -400,6 +405,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) convertGCPChunkToOpenAI(
 		Choices: choices,
 		// usage is nil for all chunks other than the last chunk
 		Usage: nil,
+		Model: o.requestModel,
 	}
 }
 
