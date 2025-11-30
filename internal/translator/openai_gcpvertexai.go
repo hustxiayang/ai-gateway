@@ -475,6 +475,15 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) applyVendorSpecificField
 	}
 
 	gcpVendorFields := openAIReq.GCPVertexAIVendorFields
+	// Apply vendor-specific generation config if present.
+	if vendorGenConfig := gcpVendorFields.GenerationConfig; vendorGenConfig != nil {
+		if gcr.GenerationConfig == nil {
+			gcr.GenerationConfig = &genai.GenerationConfig{}
+		}
+		if vendorGenConfig.MediaResolution != "" && mediaResolutionAvailable(requestModel) {
+			gcr.GenerationConfig.MediaResolution = vendorGenConfig.MediaResolution
+		}
+	}
 	if gcpVendorFields.SafetySettings != nil {
 		gcr.SafetySettings = gcpVendorFields.SafetySettings
 	}

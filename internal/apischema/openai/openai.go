@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go/v2"
 	"github.com/tidwall/gjson"
 	"google.golang.org/genai"
@@ -1628,10 +1629,22 @@ func (t JSONUNIXTime) Equal(other JSONUNIXTime) bool {
 
 // GCPVertexAIVendorFields contains GCP Vertex AI (Gemini) vendor-specific fields.
 type GCPVertexAIVendorFields struct {
+	// GenerationConfig holds Gemini generation configuration options.
+	// Currently only a subset of the options are supported.
+	//
+	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/GenerationConfig
+	GenerationConfig *GCPVertexAIGenerationConfig `json:"generationConfig,omitzero"`
+
 	// SafetySettings: Safety settings in the request to block unsafe content in the response.
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
 	SafetySettings []*genai.SafetySetting `json:"safetySettings,omitzero"`
+}
+
+// GCPVertexAIGenerationConfig represents Gemini generation configuration options.
+type GCPVertexAIGenerationConfig struct {
+	// MediaResolution is to set global media resolution in gemini models: https://ai.google.dev/api/caching#MediaResolution
+	MediaResolution genai.MediaResolution `json:"media_resolution,omitempty"`
 }
 
 // ReasoningContentUnion content regarding the reasoning that is carried out by the model.

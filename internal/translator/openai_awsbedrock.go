@@ -71,29 +71,6 @@ func getAwsBedrockThinkingMap(tu *openai.ThinkingUnion) map[string]any {
 	return resultMap
 }
 
-func getAwsBedrockThinkingMap(tu *openai.ThinkingUnion) map[string]any {
-	if tu == nil {
-		return nil
-	}
-
-	resultMap := make(map[string]any)
-
-	if tu.OfEnabled != nil {
-		reasoningConfigMap := map[string]any{
-			"type":          "enabled",
-			"budget_tokens": tu.OfEnabled.BudgetTokens,
-		}
-		resultMap["thinking"] = reasoningConfigMap
-	} else if tu.OfDisabled != nil {
-		reasoningConfigMap := map[string]any{
-			"type": "disabled",
-		}
-		resultMap["thinking"] = reasoningConfigMap
-	}
-
-	return resultMap
-}
-
 // RequestBody implements [OpenAIChatCompletionTranslator.RequestBody].
 func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) RequestBody(_ []byte, openAIReq *openai.ChatCompletionRequest, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
