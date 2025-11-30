@@ -1133,16 +1133,10 @@ data: [DONE]
                     "thoughtsTokenCount": 10
 				}
 			}`,
-			endOfStream: true,
-			wantError:   false,
-			wantHeaderMut: &extprocv3.HeaderMutation{
-				SetHeaders: []*corev3.HeaderValueOption{{
-					Header: &corev3.HeaderValue{Key: "Content-Length", RawValue: []byte("450")},
-				}},
-			},
-			wantBodyMut: &extprocv3.BodyMutation{
-				Mutation: &extprocv3.BodyMutation_Body{
-					Body: []byte(`{
+			endOfStream:   true,
+			wantError:     false,
+			wantHeaderMut: []internalapi.Header{{contentLengthHeaderName, "450"}},
+			wantBodyMut: []byte(`{
     "choices": [
         {
             "finish_reason": "stop",
@@ -1167,13 +1161,8 @@ data: [DONE]
         "total_tokens": 25
     }
 }`),
-				},
-			},
-			wantTokenUsage: LLMTokenUsage{
-				InputTokens:  10,
-				OutputTokens: 15,
-				TotalTokens:  25,
-			},
+
+			wantTokenUsage: tokenUsageFrom(10, 10, 15, 25),
 		},
 		{
 			name: "stream chunks with thought summary",
@@ -1187,21 +1176,13 @@ data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}],"usageMetadata":{
 			endOfStream:   true,
 			wantError:     false,
 			wantHeaderMut: nil,
-			wantBodyMut: &extprocv3.BodyMutation{
-				Mutation: &extprocv3.BodyMutation_Body{
-					Body: []byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":{"text":"let me think step by step and reply you."}}}],"object":"chat.completion.chunk"}
+			wantBodyMut: []byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":{"text":"let me think step by step and reply you."}}}],"object":"chat.completion.chunk"}
 
 data: {"choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"}}],"object":"chat.completion.chunk","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"completion_tokens_details":{},"prompt_tokens_details":{}}}
 
 data: [DONE]
 `),
-				},
-			},
-			wantTokenUsage: LLMTokenUsage{
-				InputTokens:  5,
-				OutputTokens: 3,
-				TotalTokens:  8,
-			},
+			wantTokenUsage: tokenUsageFrom(5, 0, 3, 8),
 		},
 	}
 
