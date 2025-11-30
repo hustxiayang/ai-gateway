@@ -347,7 +347,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			// Extract thought summary and text from parts for streaming (delta).
 			thoughtSummary, content := extractTextAndThoughtSummaryFromGeminiParts(candidate.Content.Parts, responseMode)
 			if thoughtSummary != "" {
-				delta.ReasoningContent = &openai.AWSBedrockStreamReasoningContent{
+				delta.ReasoningContent = &openai.StreamReasoningContent{
 					Text: thoughtSummary,
 				}
 			}

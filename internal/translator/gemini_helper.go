@@ -645,7 +645,7 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			thoughtSummary, content := extractTextAndThoughtSummaryFromGeminiParts(candidate.Content.Parts, responseMode)
 			if thoughtSummary != "" {
 				message.ReasoningContent = &openai.ReasoningContentUnion{
-					Value: &openai.AWSBedrockReasoningContent{
+					Value: &openai.ReasoningContent{
 						ReasoningContent: &awsbedrock.ReasoningContentBlock{
 							ReasoningText: &awsbedrock.ReasoningTextBlock{
 								Text: thoughtSummary,
