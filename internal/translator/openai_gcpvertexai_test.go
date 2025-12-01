@@ -775,8 +775,10 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_RequestBody(t *testing.T)
 						},
 					},
 				},
-				GCPVertexAIVendorFields: &openai.GCPVertexAIVendorFields{
-					EnterpriseWebSearch: true,
+				Tools: []openai.Tool{
+					{
+						Type: "enterprise_search",
+					},
 				},
 			},
 			onRetry:   false,

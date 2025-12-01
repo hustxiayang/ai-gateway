@@ -1071,8 +1071,9 @@ type StreamOptions struct {
 type ToolType string
 
 const (
-	ToolTypeFunction        ToolType = "function"
-	ToolTypeImageGeneration ToolType = "image_generation"
+	ToolTypeFunction            ToolType = "function"
+	ToolTypeImageGeneration     ToolType = "image_generation"
+	ToolTypeEnterpriseWebSearch ToolType = "enterprise_search"
 )
 
 type Tool struct {
@@ -1642,10 +1643,6 @@ type GCPVertexAIVendorFields struct {
 	//
 	// https://cloud.google.com/vertex-ai/docs/reference/rest/v1/SafetySetting
 	SafetySettings []*genai.SafetySetting `json:"safetySettings,omitzero"`
-
-	// EnterpriseWebSearch controls whether to use Web Grounding for Enterprise
-	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/web-grounding-enterprise
-	EnterpriseWebSearch bool `json:"enterprise_search,omitzero"`
 }
 
 // GCPVertexAIGenerationConfig represents Gemini generation configuration options.
