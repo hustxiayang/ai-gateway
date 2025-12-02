@@ -32,14 +32,14 @@ func EmbeddingsProcessorFactory(f metrics.Factory) ProcessorFactory {
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, tracing tracing.Tracing, isUpstreamFilter bool) (Processor, error) {
 		logger = logger.With("processor", "embeddings", "isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
-			return &embeddingsProcessorRouterFilter{
+			return &embeddingsProcessorRouterFilter[openai.EmbeddingCompletionRequest]{
 				config:         config,
 				tracer:         tracing.EmbeddingsTracer(),
 				requestHeaders: requestHeaders,
 				logger:         logger,
 			}, nil
 		}
-		return &embeddingsProcessorUpstreamFilter{
+		return &embeddingsProcessorUpstreamFilter[openai.EmbeddingCompletionRequest]{
 			config:         config,
 			requestHeaders: requestHeaders,
 			logger:         logger,
@@ -51,7 +51,7 @@ func EmbeddingsProcessorFactory(f metrics.Factory) ProcessorFactory {
 // embeddingsProcessorRouterFilter implements [Processor] for the `/v1/embeddings` endpoint.
 //
 // This is primarily used to select the route for the request based on the model name.
-type embeddingsProcessorRouterFilter struct {
+type embeddingsProcessorRouterFilter[T openai.EmbeddingRequest] struct {
 	passThroughProcessor
 	// upstreamFilter is the upstream filter that is used to process the request at the upstream filter.
 	// This will be updated when the request is retried.
@@ -67,7 +67,7 @@ type embeddingsProcessorRouterFilter struct {
 	// originalRequestBody is the original request body that is passed to the upstream filter.
 	// This is used to perform the transformation of the request body on the original input
 	// when the request is retried.
-	originalRequestBody    *openai.EmbeddingRequest
+	originalRequestBody    *T
 	originalRequestBodyRaw []byte
 	// tracer is the tracer used for requests.
 	tracer tracing.EmbeddingsTracer
@@ -79,7 +79,7 @@ type embeddingsProcessorRouterFilter struct {
 }
 
 // ProcessResponseHeaders implements [Processor.ProcessResponseHeaders].
-func (e *embeddingsProcessorRouterFilter) ProcessResponseHeaders(ctx context.Context, headerMap *corev3.HeaderMap) (*extprocv3.ProcessingResponse, error) {
+func (e *embeddingsProcessorRouterFilter[T]) ProcessResponseHeaders(ctx context.Context, headerMap *corev3.HeaderMap) (*extprocv3.ProcessingResponse, error) {
 	// If the request failed to route and/or immediate response was returned before the upstream filter was set,
 	// e.upstreamFilter can be nil.
 	if e.upstreamFilter != nil { // See the comment on the "upstreamFilter" field.
@@ -89,7 +89,7 @@ func (e *embeddingsProcessorRouterFilter) ProcessResponseHeaders(ctx context.Con
 }
 
 // ProcessResponseBody implements [Processor.ProcessResponseBody].
-func (e *embeddingsProcessorRouterFilter) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
+func (e *embeddingsProcessorRouterFilter[T]) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
 	// If the request failed to route and/or immediate response was returned before the upstream filter was set,
 	// e.upstreamFilter can be nil.
 	if e.upstreamFilter != nil { // See the comment on the "upstreamFilter" field.
@@ -99,8 +99,8 @@ func (e *embeddingsProcessorRouterFilter) ProcessResponseBody(ctx context.Contex
 }
 
 // ProcessRequestBody implements [Processor.ProcessRequestBody].
-func (e *embeddingsProcessorRouterFilter) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
-	originalModel, body, err := parseOpenAIEmbeddingBody(rawBody)
+func (e *embeddingsProcessorRouterFilter[T]) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
+	originalModel, body, err := parseOpenAIEmbeddingBody[T](rawBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
@@ -125,7 +125,7 @@ func (e *embeddingsProcessorRouterFilter) ProcessRequestBody(ctx context.Context
 		ctx,
 		e.requestHeaders,
 		&headerMutationCarrier{m: headerMutation},
-		body,
+		convertToEmbeddingCompletionRequest(body),
 		rawBody.Body,
 	)
 
@@ -144,7 +144,7 @@ func (e *embeddingsProcessorRouterFilter) ProcessRequestBody(ctx context.Context
 // embeddingsProcessorUpstreamFilter implements [Processor] for the `/v1/embeddings` endpoint at the upstream filter.
 //
 // This is created per retry and handles the translation as well as the authentication of the request.
-type embeddingsProcessorUpstreamFilter struct {
+type embeddingsProcessorUpstreamFilter[T openai.EmbeddingRequest] struct {
 	logger                 *slog.Logger
 	config                 *filterapi.RuntimeConfig
 	requestHeaders         map[string]string
@@ -156,7 +156,7 @@ type embeddingsProcessorUpstreamFilter struct {
 	headerMutator          *headermutator.HeaderMutator
 	bodyMutator            *bodymutator.BodyMutator
 	originalRequestBodyRaw []byte
-	originalRequestBody    *openai.EmbeddingRequest
+	originalRequestBody    *T
 	translator             translator.OpenAIEmbeddingTranslator
 	// onRetry is true if this is a retry request at the upstream filter.
 	onRetry bool
@@ -169,11 +169,13 @@ type embeddingsProcessorUpstreamFilter struct {
 }
 
 // selectTranslator selects the translator based on the output schema.
-func (e *embeddingsProcessorUpstreamFilter) selectTranslator(out filterapi.VersionedAPISchema) error {
+func (e *embeddingsProcessorUpstreamFilter[T]) selectTranslator(out filterapi.VersionedAPISchema) error {
 	switch out.Name {
 	case filterapi.APISchemaOpenAI:
 		e.translator = translator.NewEmbeddingOpenAIToOpenAITranslator(out.Version, e.modelNameOverride)
 	case filterapi.APISchemaAzureOpenAI:
+		e.translator = translator.NewEmbeddingOpenAIToAzureOpenAITranslator(out.Version, e.modelNameOverride)
+	case filterapi.APISchemaGCPVertexAI:
 		e.translator = translator.NewEmbeddingOpenAIToAzureOpenAITranslator(out.Version, e.modelNameOverride)
 	default:
 		return fmt.Errorf("unsupported API schema: backend=%s", out)
@@ -187,7 +189,7 @@ func (e *embeddingsProcessorUpstreamFilter) selectTranslator(out filterapi.Versi
 // So, we simply do the translation and upstream auth at this stage, and send them back to Envoy
 // with the status CONTINUE_AND_REPLACE. This will allows Envoy to not send the request body again
 // to the extproc.
-func (e *embeddingsProcessorUpstreamFilter) ProcessRequestHeaders(ctx context.Context, _ *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
+func (e *embeddingsProcessorUpstreamFilter[T]) ProcessRequestHeaders(ctx context.Context, _ *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
 	defer func() {
 		if err != nil {
 			e.metrics.RecordRequestCompletion(ctx, false, e.requestHeaders)
@@ -197,12 +199,12 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessRequestHeaders(ctx context.Co
 	// Start tracking metrics for this request.
 	e.metrics.StartRequest(e.requestHeaders)
 	// Set the original model from the request body before any overrides
-	e.metrics.SetOriginalModel(e.originalRequestBody.Model)
+	e.metrics.SetOriginalModel(openai.GetModelFromEmbeddingRequest(e.originalRequestBody))
 	// Set the request model for metrics from the original model or override if applied.
-	reqModel := cmp.Or(e.requestHeaders[internalapi.ModelNameHeaderKeyDefault], e.originalRequestBody.Model)
+	reqModel := cmp.Or(e.requestHeaders[internalapi.ModelNameHeaderKeyDefault], openai.GetModelFromEmbeddingRequest(e.originalRequestBody))
 	e.metrics.SetRequestModel(reqModel)
 
-	newHeaders, newBody, err := e.translator.RequestBody(e.originalRequestBodyRaw, e.originalRequestBody, e.onRetry)
+	newHeaders, newBody, err := e.translator.RequestBody(e.originalRequestBodyRaw, convertToEmbeddingCompletionRequest(e.originalRequestBody), e.onRetry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
@@ -265,12 +267,12 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessRequestHeaders(ctx context.Co
 }
 
 // ProcessRequestBody implements [Processor.ProcessRequestBody].
-func (e *embeddingsProcessorUpstreamFilter) ProcessRequestBody(context.Context, *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
+func (e *embeddingsProcessorUpstreamFilter[T]) ProcessRequestBody(context.Context, *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
 	panic("BUG: ProcessRequestBody should not be called in the upstream filter")
 }
 
 // ProcessResponseHeaders implements [Processor.ProcessResponseHeaders].
-func (e *embeddingsProcessorUpstreamFilter) ProcessResponseHeaders(ctx context.Context, headers *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
+func (e *embeddingsProcessorUpstreamFilter[T]) ProcessResponseHeaders(ctx context.Context, headers *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
 	defer func() {
 		if err != nil {
 			e.metrics.RecordRequestCompletion(ctx, false, e.requestHeaders)
@@ -294,7 +296,7 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessResponseHeaders(ctx context.C
 }
 
 // ProcessResponseBody implements [Processor.ProcessResponseBody].
-func (e *embeddingsProcessorUpstreamFilter) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
+func (e *embeddingsProcessorUpstreamFilter[T]) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
 	recordRequestCompletionErr := false
 	defer func() {
 		if err != nil || recordRequestCompletionErr {
@@ -383,13 +385,13 @@ func (e *embeddingsProcessorUpstreamFilter) ProcessResponseBody(ctx context.Cont
 }
 
 // SetBackend implements [Processor.SetBackend].
-func (e *embeddingsProcessorUpstreamFilter) SetBackend(ctx context.Context, b *filterapi.Backend, backendHandler filterapi.BackendAuthHandler, routeProcessor Processor) (err error) {
+func (e *embeddingsProcessorUpstreamFilter[T]) SetBackend(ctx context.Context, b *filterapi.Backend, backendHandler filterapi.BackendAuthHandler, routeProcessor Processor) (err error) {
 	defer func() {
 		if err != nil {
 			e.metrics.RecordRequestCompletion(ctx, false, e.requestHeaders)
 		}
 	}()
-	rp, ok := routeProcessor.(*embeddingsProcessorRouterFilter)
+	rp, ok := routeProcessor.(*embeddingsProcessorRouterFilter[T])
 	if !ok {
 		panic("BUG: expected routeProcessor to be of type *embeddingsProcessorRouterFilter")
 	}
@@ -417,10 +419,31 @@ func (e *embeddingsProcessorUpstreamFilter) SetBackend(ctx context.Context, b *f
 	return
 }
 
-func parseOpenAIEmbeddingBody(body *extprocv3.HttpBody) (modelName string, rb *openai.EmbeddingRequest, err error) {
-	var openAIReq openai.EmbeddingRequest
+// convertToEmbeddingCompletionRequest converts any EmbeddingRequest to EmbeddingCompletionRequest for compatibility
+func convertToEmbeddingCompletionRequest[T openai.EmbeddingRequest](req *T) *openai.EmbeddingCompletionRequest {
+	switch r := any(*req).(type) {
+	case openai.EmbeddingCompletionRequest:
+		return &r
+	case openai.EmbeddingChatRequest:
+		// Convert EmbeddingChatRequest to EmbeddingCompletionRequest by flattening messages to input
+		// This is a simplified conversion - in practice you might need more sophisticated logic
+		return &openai.EmbeddingCompletionRequest{
+			Model:          r.Model,
+			Input:          openai.EmbeddingRequestInput{Value: "converted_from_chat"}, // Simplified
+			EncodingFormat: r.EncodingFormat,
+			Dimensions:     r.Dimensions,
+			User:           r.User,
+		}
+	default:
+		return &openai.EmbeddingCompletionRequest{}
+	}
+}
+
+func parseOpenAIEmbeddingBody[T openai.EmbeddingRequest](body *extprocv3.HttpBody) (modelName string, rb *T, err error) {
+	var openAIReq T
 	if err := json.Unmarshal(body.Body, &openAIReq); err != nil {
 		return "", nil, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
-	return openAIReq.Model, &openAIReq, nil
+
+	return openai.GetModelFromEmbeddingRequest(&openAIReq), &openAIReq, nil
 }

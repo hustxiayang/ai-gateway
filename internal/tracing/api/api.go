@@ -56,7 +56,7 @@ type (
 	// CompletionTracer creates spans for OpenAI completion requests.
 	CompletionTracer = RequestTracer[openai.CompletionRequest, CompletionSpan]
 	// EmbeddingsTracer creates spans for OpenAI embeddings requests.
-	EmbeddingsTracer = RequestTracer[openai.EmbeddingRequest, EmbeddingsSpan]
+	EmbeddingsTracer = RequestTracer[openai.EmbeddingCompletionRequest, EmbeddingsSpan]
 	// ImageGenerationTracer creates spans for OpenAI image generation requests.
 	ImageGenerationTracer = RequestTracer[openaisdk.ImageGenerateParams, ImageGenerationSpan]
 	// RerankTracer creates spans for rerank requests.
@@ -116,7 +116,7 @@ type (
 	// ImageGenerationRecorder records attributes to a span according to a semantic convention.
 	ImageGenerationRecorder = SpanRecorder[openaisdk.ImageGenerateParams, struct{}, openaisdk.ImagesResponse]
 	// EmbeddingsRecorder records attributes to a span according to a semantic convention.
-	EmbeddingsRecorder = SpanRecorder[openai.EmbeddingRequest, struct{}, openai.EmbeddingResponse]
+	EmbeddingsRecorder = SpanRecorder[openai.EmbeddingCompletionRequest, struct{}, openai.EmbeddingResponse]
 	// RerankRecorder records attributes to a span according to a semantic convention.
 	RerankRecorder = SpanRecorder[cohere.RerankV2Request, struct{}, cohere.RerankV2Response]
 )
@@ -146,7 +146,7 @@ func (NoopTracing) CompletionTracer() CompletionTracer {
 
 // EmbeddingsTracer implements Tracing.EmbeddingsTracer.
 func (NoopTracing) EmbeddingsTracer() EmbeddingsTracer {
-	return NoopTracer[openai.EmbeddingRequest, EmbeddingsSpan]{}
+	return NoopTracer[openai.EmbeddingCompletionRequest, EmbeddingsSpan]{}
 }
 
 // ImageGenerationTracer implements Tracing.ImageGenerationTracer.
