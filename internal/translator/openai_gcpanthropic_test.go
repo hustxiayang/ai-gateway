@@ -7,6 +7,7 @@ package translator
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -788,6 +789,147 @@ func TestMessageTranslation(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "assistant message with thinking content",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type:      openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+									Text:      ptr.To("Let me think about this step by step..."),
+									Signature: ptr.To("signature-123"),
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectedAnthropicMsgs: []anthropic.MessageParam{
+				{
+					Role: anthropic.MessageParamRoleAssistant,
+					Content: []anthropic.ContentBlockParamUnion{
+						anthropic.NewThinkingBlock("Let me think about this step by step...", "signature-123"),
+					},
+				},
+			},
+		},
+		{
+			name: "assistant message with thinking content missing signature",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type: openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+									Text: ptr.To("Let me think about this step by step..."),
+									// Missing signature - should not create thinking block
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectedAnthropicMsgs: []anthropic.MessageParam{
+				{
+					Role:    anthropic.MessageParamRoleAssistant,
+					Content: []anthropic.ContentBlockParamUnion{},
+				},
+			},
+		},
+		{
+			name: "assistant message with thinking content missing text",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type:      openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+									Signature: ptr.To("signature-123"),
+									// Missing text - should not create thinking block
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectedAnthropicMsgs: []anthropic.MessageParam{
+				{
+					Role:    anthropic.MessageParamRoleAssistant,
+					Content: []anthropic.ContentBlockParamUnion{},
+				},
+			},
+		},
+		{
+			name: "assistant message with redacted thinking content (string)",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type:            openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking,
+									RedactedContent: &openai.RedactedContentUnion{Value: "redacted content as string"},
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectedAnthropicMsgs: []anthropic.MessageParam{
+				{
+					Role: anthropic.MessageParamRoleAssistant,
+					Content: []anthropic.ContentBlockParamUnion{
+						anthropic.NewRedactedThinkingBlock("redacted content as string"),
+					},
+				},
+			},
+		},
+		{
+			name: "assistant message with redacted thinking content ([]byte) - should fail",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type:            openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking,
+									RedactedContent: &openai.RedactedContentUnion{Value: []byte("redacted content as bytes")},
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name: "assistant message with redacted thinking content (unsupported type) - should fail",
+			inputMessages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{
+									Type:            openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking,
+									RedactedContent: &openai.RedactedContentUnion{Value: 123},
+								},
+							},
+						},
+						Role: openai.ChatMessageRoleAssistant,
+					},
+				},
+			},
+			expectErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -848,7 +990,61 @@ func TestMessageTranslation(t *testing.T) {
 	}
 }
 
-func TestOpenAIToGCPAnthropicTranslator_ResponseError(t *testing.T) {
+// TestRedactedContentUnionSerialization tests the JSON marshaling/unmarshaling of RedactedContentUnion
+func TestRedactedContentUnionSerialization(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedValue any
+		expectError   bool
+	}{
+		{
+			name:          "string value",
+			input:         `"plain string"`,
+			expectedValue: "plain string",
+		},
+		{
+			name:          "base64 encoded bytes",
+			input:         `"aGVsbG8gd29ybGQ="`, // "hello world" in base64
+			expectedValue: []byte("hello world"),
+		},
+		{
+			name:        "invalid json",
+			input:       `{invalid}`,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var union openai.RedactedContentUnion
+			err := json.Unmarshal([]byte(tt.input), &union)
+
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedValue, union.Value)
+
+			// Test marshaling back
+			marshaled, err := json.Marshal(union)
+			require.NoError(t, err)
+
+			// For byte arrays, check they're base64 encoded
+			if bytes, ok := tt.expectedValue.([]byte); ok {
+				expected := base64.StdEncoding.EncodeToString(bytes)
+				require.Equal(t, `"`+expected+`"`, string(marshaled))
+			} else {
+				// For strings, check round-trip
+				require.Equal(t, tt.input, string(marshaled))
+			}
+		})
+	}
+}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseError(t *testing.T) {
 	tests := []struct {
 		name            string
 		responseHeaders map[string]string
