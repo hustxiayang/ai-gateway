@@ -22,6 +22,7 @@ import (
 	openAIconstant "github.com/openai/openai-go/shared/constant"
 	"github.com/tidwall/sjson"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -859,15 +860,43 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseBody(_ map[stri
 
 	for i := range anthropicResp.Content { // NOTE: Content structure is massive, do not range over values.
 		output := &anthropicResp.Content[i]
-		if output.Type == string(constant.ValueOf[constant.ToolUse]()) && output.ID != "" {
-			toolCalls, toolErr := anthropicToolUseToOpenAICalls(output)
-			if toolErr != nil {
-				return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("failed to convert anthropic tool use to openai tool call: %w", toolErr)
+		switch output.Type {
+		case string(constant.ValueOf[constant.ToolUse]()):
+			if output.ID != "" {
+				toolCalls, toolErr := anthropicToolUseToOpenAICalls(output)
+				if toolErr != nil {
+					return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("failed to convert anthropic tool use to openai tool call: %w", toolErr)
+				}
+				choice.Message.ToolCalls = append(choice.Message.ToolCalls, toolCalls...)
 			}
-			choice.Message.ToolCalls = append(choice.Message.ToolCalls, toolCalls...)
-		} else if output.Type == string(constant.ValueOf[constant.Text]()) && output.Text != "" {
-			if choice.Message.Content == nil {
-				choice.Message.Content = &output.Text
+		case string(constant.ValueOf[constant.Text]()):
+			if output.Text != "" {
+				if choice.Message.Content == nil {
+					choice.Message.Content = &output.Text
+				}
+			}
+		case string(constant.ValueOf[constant.Thinking]()):
+			if output.Thinking != "" {
+				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
+					Value: &openai.ReasoningContent{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							ReasoningText: &awsbedrock.ReasoningTextBlock{
+								Text:      output.Thinking,
+								Signature: output.Signature,
+							},
+						},
+					},
+				}
+			}
+		case string(constant.ValueOf[constant.RedactedThinking]()):
+			if output.Data != "" {
+				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
+					Value: &openai.ReasoningContent{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							RedactedContent: []byte(output.Data),
+						},
+					},
+				}
 			}
 		}
 	}

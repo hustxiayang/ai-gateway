@@ -26,6 +26,7 @@ import (
 	"github.com/tidwall/gjson"
 	"k8s.io/utils/ptr"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 )
 
@@ -480,6 +481,93 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					{
 						Index:        0,
 						Message:      openai.ChatCompletionResponseChoiceMessage{Role: "assistant", Content: ptr.To("Model field test response.")},
+						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
+					},
+				},
+			},
+		},
+		{
+			name: "response with thinking content",
+			inputResponse: &anthropic.Message{
+				ID:         "msg_01XYZ456",
+				Model:      "claude-3-5-sonnet-20241022",
+				Role:       constant.Assistant(anthropic.MessageParamRoleAssistant),
+				Content:    []anthropic.ContentBlockUnion{{Type: "thinking", Thinking: "Let me think about this...", Signature: "signature_123"}},
+				StopReason: anthropic.StopReasonEndTurn,
+				Usage:      anthropic.Usage{InputTokens: 15, OutputTokens: 25, CacheReadInputTokens: 3},
+			},
+			respHeaders: map[string]string{statusHeaderName: "200"},
+			expectedOpenAIResponse: openai.ChatCompletionResponse{
+				ID:      "msg_01XYZ456",
+				Model:   "claude-3-5-sonnet-20241022",
+				Created: openai.JSONUNIXTime(time.Unix(ReleaseDateUnix, 0)),
+				Object:  "chat.completion",
+				Usage: openai.Usage{
+					PromptTokens:     18,
+					CompletionTokens: 25,
+					TotalTokens:      43,
+					PromptTokensDetails: &openai.PromptTokensDetails{
+						CachedTokens: 3,
+					},
+				},
+				Choices: []openai.ChatCompletionResponseChoice{
+					{
+						Index: 0,
+						Message: openai.ChatCompletionResponseChoiceMessage{
+							Role: "assistant",
+							ReasoningContent: &openai.ReasoningContentUnion{
+								Value: &openai.ReasoningContent{
+									ReasoningContent: &awsbedrock.ReasoningContentBlock{
+										ReasoningText: &awsbedrock.ReasoningTextBlock{
+											Text:      "Let me think about this...",
+											Signature: "signature_123",
+										},
+									},
+								},
+							},
+						},
+						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
+					},
+				},
+			},
+		},
+		{
+			name: "response with redacted thinking content",
+			inputResponse: &anthropic.Message{
+				ID:         "msg_01XYZ789",
+				Model:      "claude-3-5-sonnet-20241022",
+				Role:       constant.Assistant(anthropic.MessageParamRoleAssistant),
+				Content:    []anthropic.ContentBlockUnion{{Type: "redacted_thinking", Data: "redacted_data_content"}},
+				StopReason: anthropic.StopReasonEndTurn,
+				Usage:      anthropic.Usage{InputTokens: 12, OutputTokens: 18, CacheReadInputTokens: 1},
+			},
+			respHeaders: map[string]string{statusHeaderName: "200"},
+			expectedOpenAIResponse: openai.ChatCompletionResponse{
+				ID:      "msg_01XYZ789",
+				Model:   "claude-3-5-sonnet-20241022",
+				Created: openai.JSONUNIXTime(time.Unix(ReleaseDateUnix, 0)),
+				Object:  "chat.completion",
+				Usage: openai.Usage{
+					PromptTokens:     13,
+					CompletionTokens: 18,
+					TotalTokens:      31,
+					PromptTokensDetails: &openai.PromptTokensDetails{
+						CachedTokens: 1,
+					},
+				},
+				Choices: []openai.ChatCompletionResponseChoice{
+					{
+						Index: 0,
+						Message: openai.ChatCompletionResponseChoiceMessage{
+							Role: "assistant",
+							ReasoningContent: &openai.ReasoningContentUnion{
+								Value: &openai.ReasoningContent{
+									ReasoningContent: &awsbedrock.ReasoningContentBlock{
+										RedactedContent: []byte("redacted_data_content"),
+									},
+								},
+							},
+						},
 						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
 					},
 				},
