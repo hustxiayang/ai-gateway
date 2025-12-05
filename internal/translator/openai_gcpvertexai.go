@@ -226,7 +226,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 			}
 
 			if span != nil {
-				span.RecordResponseChunk(openAIChunk)
+				span.RecordResponseChunk(&usageChunk)
 			}
 
 			if chunk.UsageMetadata.PromptTokenCount >= 0 {
