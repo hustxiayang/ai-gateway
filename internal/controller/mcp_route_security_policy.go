@@ -290,8 +290,11 @@ func buildWWWAuthenticateHeaderValue(metadata *aigv1a1.ProtectedResourceMetadata
 	// Extract base URL and path from resource identifier.
 	resourceURL := strings.TrimSuffix(metadata.Resource, "/")
 
-	var baseURL string
-	var prefixLen int
+	var (
+		baseURL       string
+		prefixLen     int
+		pathComponent string
+	)
 	switch {
 	case strings.HasPrefix(resourceURL, "https://"):
 		prefixLen = 8
@@ -303,19 +306,27 @@ func buildWWWAuthenticateHeaderValue(metadata *aigv1a1.ProtectedResourceMetadata
 
 	if idx := strings.Index(resourceURL[prefixLen:], "/"); idx != -1 {
 		baseURL = resourceURL[:prefixLen+idx]
+		pathComponent = resourceURL[prefixLen+idx:]
 	} else {
 		baseURL = resourceURL
 	}
 
-	// Some agents do not expect the path component to be included in the resource_metadata URL.
-	// TODO: test with different agents and see if this would cause issues.
-	// resourceMetadataURL := fmt.Sprintf("%s/.well-known/oauth-protected-resource%s", baseURL, pathComponent).
-	resourceMetadataURL := fmt.Sprintf("%s%s", baseURL, oauthWellKnownProtectedResourceMetadataPath)
+	// Some agents do not expect the path component to be included in the resource_metadata URL, but according to the
+	// spec https://mcp.mintlify.app/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements
+	// they should honor hte value returned here.
+	// We can't expose these resource at the root, because there may be multiple MCP routes with different OAuth settings, so we need
+	// to rely on clients properly implementing the spec and using this value returned in the header.
+	resourceMetadataURL := fmt.Sprintf("%s%s%s", baseURL, oauthWellKnownProtectedResourceMetadataPath, pathComponent)
 	// Build the basic Bearer challenge.
 	headerValue := `Bearer error="invalid_request", error_description="No access token was provided in this request"`
 
 	// Add resource_metadata as per RFC 9728 Section 5.1.
 	headerValue = fmt.Sprintf(`%s, resource_metadata="%s"`, headerValue, resourceMetadataURL)
+
+	if len(metadata.ScopesSupported) > 0 {
+		// Add scope as per RFC 6750 Section 3.
+		headerValue = fmt.Sprintf(`%s, scope="%s"`, headerValue, strings.Join(metadata.ScopesSupported, " "))
+	}
 
 	return headerValue
 }
