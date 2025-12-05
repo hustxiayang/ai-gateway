@@ -425,7 +425,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	}
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
-	// TODO: should it even return a NON-NIL error in the reasponse translation?
+	// it should not return a non-nil error in the response translation so just return nil
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
