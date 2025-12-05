@@ -19,6 +19,7 @@ import (
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
+	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
 // NewAnthropicToAnthropicTranslator creates a passthrough translator for Anthropic.
@@ -74,7 +75,7 @@ func (a *anthropicToAnthropicTranslator) ResponseHeaders(_ map[string]string) (
 }
 
 // ResponseBody implements [AnthropicMessagesTranslator.ResponseBody].
-func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ any) (
+func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ tracing.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if a.stream {
@@ -95,7 +96,13 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 	if err := json.NewDecoder(body).Decode(anthropicResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
-	tokenUsage = ExtractLLMTokenUsageFromUsage(anthropicResp.Usage)
+	tokenUsage = extractTokenUsageFromAnthropic(
+		anthropicResp.Usage.InputTokens,
+		anthropicResp.Usage.OutputTokens,
+		anthropicResp.Usage.CacheReadInputTokens,
+		anthropicResp.Usage.CacheCreationInputTokens,
+	)
+
 	responseModel = cmp.Or(internalapi.ResponseModel(anthropicResp.Model), a.requestModel)
 	return nil, nil, tokenUsage, responseModel, nil
 }
@@ -127,9 +134,21 @@ func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent() (tokenUsa
 				a.streamingResponseModel = internalapi.ResponseModel(eventUnion.Message.Model)
 			}
 			// Extract usage from message_start event
-			tokenUsage = ExtractLLMTokenUsageFromUsage(eventUnion.Message.Usage)
+			usage := eventUnion.Message.Usage
+			tokenUsage = extractTokenUsageFromAnthropic(
+				usage.InputTokens,
+				usage.OutputTokens,
+				usage.CacheReadInputTokens,
+				usage.CacheCreationInputTokens,
+			)
 		case "message_delta":
-			tokenUsage = ExtractLLMTokenUsageFromDeltaUsage(eventUnion.Usage)
+			usage := eventUnion.Usage
+			tokenUsage = extractTokenUsageFromAnthropic(
+				usage.InputTokens,
+				usage.OutputTokens,
+				usage.CacheReadInputTokens,
+				usage.CacheCreationInputTokens,
+			)
 		}
 	}
 }
