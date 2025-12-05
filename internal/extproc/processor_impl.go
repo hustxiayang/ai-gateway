@@ -167,22 +167,19 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespons
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
 	originalModel, body, stream, mutatedOriginalBody, err := r.eh.ParseBody(rawBody.Body, len(r.config.RequestCosts) > 0)
 	if err != nil {
-		// Check if this is a user-facing error that's safe to expose
-		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
-			// Safe to return to user as 400 - userFacingErr contains the full wrapped error with details
-			// e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
-			return &extprocv3.ProcessingResponse{
-				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-					ImmediateResponse: &extprocv3.ImmediateResponse{
-						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(400)},
-						Body:       []byte(userFacingErr.Error()),
-						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
-					},
+		// Return an immediate error response instead of nil
+		errorMsg := fmt.Sprintf("failed to parse request body: %v", err)
+
+		// 400 and 422 might be both reasonable here
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: &extprocv3.ImmediateResponse{
+					Status:     &typev3.HttpStatus{Code: typev3.StatusCode(400)},
+					Body:       []byte(errorMsg),
+					GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 				},
-			}, fmt.Errorf("failed to parse request body: %w", err)
-		}
-		// Unknown/internal error - don't expose details to user, use normal error path
-		return nil, fmt.Errorf("failed to parse request body: %w", err)
+			},
+		}, fmt.Errorf("failed to parse request body: %w", err)
 	}
 	if mutatedOriginalBody != nil {
 		r.originalRequestBodyRaw = mutatedOriginalBody
@@ -260,22 +257,17 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	forceBodyMutation := u.onRetry() || u.parent.forceBodyMutation
 	newHeaders, newBody, err := u.translator.RequestBody(u.parent.originalRequestBodyRaw, u.parent.originalRequestBody, forceBodyMutation)
 	if err != nil {
-		// Check if this is a user-facing error that's safe to expose
-		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
-			// Safe to return to user as 422 - userFacingErr contains the full wrapped error with details
-			// e.g., "invalid request body: tool_choice type not supported"
-			return &extprocv3.ProcessingResponse{
-				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-					ImmediateResponse: &extprocv3.ImmediateResponse{
-						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(422)},
-						Body:       []byte(userFacingErr.Error()),
-						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
-					},
+		// Return an immediate error response instead of nil
+		errorMsg := fmt.Sprintf("failed to transform request: %v", err)
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: &extprocv3.ImmediateResponse{
+					Status:     &typev3.HttpStatus{Code: typev3.StatusCode(422)},
+					Body:       []byte(errorMsg),
+					GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
 				},
-			}, fmt.Errorf("failed to transform request: %w", err)
-		}
-		// Unknown/internal error - don't expose details to user, use normal error path
-		return nil, fmt.Errorf("failed to transform request: %w", err)
+			},
+		}, fmt.Errorf("failed to transform request: %w", err)
 	}
 
 	headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
@@ -312,7 +304,17 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		var hdrs []internalapi.Header
 		hdrs, err = h.Do(ctx, u.requestHeaders, bodyMutation.GetBody())
 		if err != nil {
-			return nil, fmt.Errorf("failed to do auth request: %w", err)
+			// Return an immediate error response instead of nil
+			errorMsg := fmt.Sprintf("failed to do auth request: %v", err)
+			return &extprocv3.ProcessingResponse{
+				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+					ImmediateResponse: &extprocv3.ImmediateResponse{
+						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(401)},
+						Body:       []byte(errorMsg),
+						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.Unauthenticated)},
+					},
+				},
+			}, fmt.Errorf("failed to do auth request: %w", err)
 		}
 		for _, h := range hdrs {
 			headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
@@ -423,6 +425,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	}
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
+	// TODO: should it even return a NON-NIL error in the reasponse translation?
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}

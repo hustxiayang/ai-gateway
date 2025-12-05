@@ -8,7 +8,6 @@ package extproc
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -97,12 +96,11 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.Contains(t, err.Error(), "failed to parse request body")
 		require.NotNil(t, resp, "Response should not be nil")
 
-		// Verify it's an immediate response with the safe error message
+		// Verify it's an immediate response with the correct error message
 		immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 		require.True(t, ok, "Response should be an immediate response")
 		require.Equal(t, typev3.StatusCode(400), immediateResp.ImmediateResponse.Status.Code)
-		// The response body should contain the user-facing error message with details
-		require.Equal(t, "malformed request: failed to parse JSON for /v1/chat/completions", string(immediateResp.ImmediateResponse.Body))
+		require.Contains(t, string(immediateResp.ImmediateResponse.Body), "failed to parse request body")
 	})
 
 	t.Run("ok", func(t *testing.T) {
@@ -478,7 +476,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-// Return a safe user-facing error with details
+				// Return a safe user-facing error with details
 				tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody), expRequestBody: &body}
 				mm := &mockMetrics{}
 				p := &chatCompletionProcessorUpstreamFilter{
@@ -499,12 +497,12 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				require.Contains(t, err.Error(), "failed to transform request")
 				require.NotNil(t, resp, "Response should not be nil")
 
-				// Verify it's an immediate response with the safe error message
+				// Verify it's an immediate response with the correct error message
 				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 				require.True(t, ok, "Response should be an immediate response")
 				require.Equal(t, typev3.StatusCode(422), immediateResp.ImmediateResponse.Status.Code)
-				// The response body should only contain the safe error message, not internal details
-				require.Equal(t, "invalid request body: missing required field", string(immediateResp.ImmediateResponse.Body))
+				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "invalid request body")
+				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "missing required field")
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)
@@ -536,9 +534,16 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 					handler:        authHandler,
 				}
 				resp, err := p.ProcessRequestHeaders(t.Context(), nil)
-				require.Error(t, err, "Should return an error")
+				require.Error(t, err, "Should return an error along with immediate response")
 				require.Contains(t, err.Error(), "failed to do auth request: authentication failed")
-				require.Nil(t, resp, "Response should be nil when auth request fails")
+				require.NotNil(t, resp, "Response should not be nil")
+
+				// Verify it's an immediate response with the correct error message
+				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+				require.True(t, ok, "Response should be an immediate response")
+				require.Equal(t, typev3.StatusCode(401), immediateResp.ImmediateResponse.Status.Code)
+				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "failed to do auth request")
+				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "authentication failed")
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)
