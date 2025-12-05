@@ -500,16 +500,9 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 					handler:        authHandler,
 				}
 				resp, err := p.ProcessRequestHeaders(t.Context(), nil)
-				require.Error(t, err, "Should return an error along with immediate response")
+				require.Error(t, err, "Should return an error")
 				require.Contains(t, err.Error(), "failed to do auth request: authentication failed")
-				require.NotNil(t, resp, "Response should not be nil")
-
-				// Verify it's an immediate response with the correct error message
-				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
-				require.True(t, ok, "Response should be an immediate response")
-				require.Equal(t, typev3.StatusCode(401), immediateResp.ImmediateResponse.Status.Code)
-				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "failed to do auth request")
-				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "authentication failed")
+				require.Nil(t, resp, "Response should be nil when auth request fails")
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)
