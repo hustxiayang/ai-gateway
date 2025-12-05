@@ -1317,6 +1317,7 @@ type ChatCompletionResponseChoiceMessage struct {
 	SafetyRatings []*genai.SafetyRating `json:"safety_ratings,omitempty"`
 
 	// GroundingMetadata specifies sources used to ground generated content.
+	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1beta1/GroundingMetadata
 	GroundingMetadata *genai.GroundingMetadata `json:"grounding_metadata,omitempty"`
 }
 
