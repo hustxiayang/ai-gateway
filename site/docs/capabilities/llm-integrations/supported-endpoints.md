@@ -151,11 +151,48 @@ curl -H "Content-Type: application/json" \
 - ✅ Model selection via request body or `x-ai-eg-model` header
 - ✅ Token usage tracking and cost calculation
 - ✅ Provider fallback and load balancing
+- ✅ **NEW: Chat-style embedding requests** - Convert conversations to embeddings
+- ✅ **NEW: Advanced input format support** - String arrays and conversation messages
+
+**Request Formats:**
+
+**Traditional Input Format:**
+```json
+{
+  "model": "text-embedding-004",
+  "input": "The quick brown fox",
+  "encoding_format": "float"
+}
+```
+
+**NEW: Chat-style Format:**
+```json
+{
+  "model": "text-embedding-004",
+  "messages": [
+    {"role": "user", "content": "What is machine learning?"},
+    {"role": "assistant", "content": "Machine learning is..."}
+  ]
+}
+```
 
 **Supported Providers:**
 
 - OpenAI
-- Any OpenAI-compatible provider that supports embeddings, including Azure OpenAI.
+- **NEW: GCP VertexAI** - Full support with automatic translation
+- Azure OpenAI
+- Any OpenAI-compatible provider that supports embeddings
+
+**Example:**
+
+```bash
+curl -H "Content-Type: application/json" \
+  -d '{
+    "model": "text-embedding-004",
+    "input": "Hello world"
+  }' \
+  $GATEWAY_URL/v1/embeddings
+```
 
 ### Image Generation
 
@@ -330,7 +367,7 @@ The following table summarizes which providers support which endpoints:
 | [Hunyuan](https://cloud.tencent.com/document/product/1729/111007)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |   ❌   | Via OpenAI-compatible API                                                                                            |
 | [Tencent LLM Knowledge Engine](https://www.tencentcloud.com/document/product/1255/70381)              |        ⚠️        |     ❌      |     ❌     |        ❌        |         ❌         |   ❌   | Via OpenAI-compatible API                                                                                            |
 | [Tetrate Agent Router Service (TARS)](https://router.tetrate.ai/)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |   ❌   | Via OpenAI-compatible API                                                                                            |
-| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     🚧     |        ❌        |         ❌         |   ❌   | Via OpenAI-compatible API                                                                                            |
+| [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |   ❌   | Via API translation. **NEW: Full embedding support with chat-style requests**                           |
 | [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |   ❌   | Via OpenAI-compatible API and Native Anthropic API                                                                   |
 | [Anthropic on AWS Bedrock](https://aws.amazon.com/bedrock/anthropic/)                                 |        🚧        |     ❌      |     ❌     |        ❌        |         ✅         |   ❌   | Native Anthropic API                                                                                                 |
 | [SambaNova](https://docs.sambanova.ai/sambastudio/latest/open-ai-api.html)                            |        ✅        |     ⚠️      |     ✅     |        ❌        |         ❌         |   ❌   | Via OpenAI-compatible API                                                                                            |
