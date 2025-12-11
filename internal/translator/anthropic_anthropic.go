@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/tidwall/sjson"
-	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -100,11 +99,11 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 	usage := anthropicResp.Usage
-	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
+	tokenUsage = ExtractTokenUsageFromAnthropic(
 		int64(usage.InputTokens),
 		int64(usage.OutputTokens),
-		ptr.To(int64(usage.CacheReadInputTokens)),
-		ptr.To(int64(usage.CacheCreationInputTokens)),
+		int64(usage.CacheReadInputTokens),
+		int64(usage.CacheCreationInputTokens),
 	)
 	if span != nil {
 		span.RecordResponse(anthropicResp)
@@ -149,11 +148,11 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 		}
 		// Extract usage from message_start event - this sets the baseline input tokens
 		if u := message.Usage; u != nil {
-			messageStartUsage := metrics.ExtractTokenUsageFromExplicitCaching(
+			messageStartUsage := ExtractTokenUsageFromAnthropic(
 				int64(u.InputTokens),
 				int64(u.OutputTokens),
-				ptr.To(int64(u.CacheReadInputTokens)),
-				ptr.To(int64(u.CacheCreationInputTokens)),
+				int64(u.CacheReadInputTokens),
+				int64(u.CacheCreationInputTokens),
 			)
 			// Override with message_start usage (contains input tokens and initial state)
 			a.streamingTokenUsage.Override(messageStartUsage)
