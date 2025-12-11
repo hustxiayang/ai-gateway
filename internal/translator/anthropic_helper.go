@@ -1052,11 +1052,11 @@ func ExtractTokenUsageFromAnthropic(inputTokens, outputTokens, cacheReadTokens, 
 	totalCachedTokens := cacheReadTokens + cacheCreationTokens
 
 	var usage metrics.TokenUsage
-	usage.SetInputTokens(uint32(totalInputTokens))                   //nolint:gosec
-	usage.SetOutputTokens(uint32(outputTokens))                      //nolint:gosec
-	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens))    //nolint:gosec
-	usage.SetCachedInputTokens(uint32(totalCachedTokens))            //nolint:gosec
-	usage.SetCacheCreationInputTokens(uint32(cacheCreationTokens))   //nolint:gosec
+	usage.SetInputTokens(uint32(totalInputTokens))                 //nolint:gosec
+	usage.SetOutputTokens(uint32(outputTokens))                    //nolint:gosec
+	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens))  //nolint:gosec
+	usage.SetCachedInputTokens(uint32(totalCachedTokens))          //nolint:gosec
+	usage.SetCacheCreationInputTokens(uint32(cacheCreationTokens)) //nolint:gosec
 	return usage
 }
 

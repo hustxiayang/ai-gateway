@@ -211,11 +211,11 @@ func buildResponseAttributes(resp *anthropic.MessagesResponse, config *openinfer
 	u := resp.Usage
 	cacheReadTokens := int64(u.CacheReadInputTokens)
 	cacheCreationTokens := int64(u.CacheCreationInputTokens)
-	cost := metrics.ExtractTokenUsageFromExplicitCaching(
+	cost := translator.ExtractTokenUsageFromAnthropic(
 		int64(u.InputTokens),
 		int64(u.OutputTokens),
-		&cacheReadTokens,
-		&cacheCreationTokens,
+		cacheReadTokens,
+		cacheCreationTokens,
 	)
 	input, _ := cost.InputTokens()
 	cacheRead, _ := cost.CachedInputTokens()
