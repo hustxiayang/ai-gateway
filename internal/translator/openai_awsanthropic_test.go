@@ -7,16 +7,17 @@ package translator
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,82 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 )
+
+// wrapAnthropicSSEInEventStream wraps Anthropic SSE data in AWS EventStream format.
+// AWS Bedrock base64-encodes each event's JSON data (which includes the type field) and wraps it in EventStream messages.
+func wrapAnthropicSSEInEventStream(sseData string) ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	encoder := eventstream.NewEncoder()
+
+	// Parse SSE format to extract individual events
+	// SSE format: "event: TYPE\ndata: JSON\n\n"
+	events := bytes.Split([]byte(sseData), []byte("\n\n"))
+
+	for _, eventBlock := range events {
+		if len(bytes.TrimSpace(eventBlock)) == 0 {
+			continue
+		}
+
+		// Extract both event type and data from the SSE event
+		lines := bytes.Split(eventBlock, []byte("\n"))
+		var eventType string
+		var jsonData []byte
+		for _, line := range lines {
+			if bytes.HasPrefix(line, []byte("event: ")) {
+				eventType = string(bytes.TrimPrefix(line, []byte("event: ")))
+			} else if bytes.HasPrefix(line, []byte("data: ")) {
+				jsonData = bytes.TrimPrefix(line, []byte("data: "))
+			}
+		}
+
+		if len(jsonData) == 0 {
+			continue
+		}
+
+		// AWS Bedrock Anthropic format includes the type in the JSON data itself
+		// If the JSON doesn't already have a "type" field (like in malformed test cases),
+		// we need to add it to match real AWS Bedrock behavior
+		var finalJSON []byte
+		if eventType != "" && !bytes.Contains(jsonData, []byte(`"type"`)) {
+			// Prepend the type field to simulate real Anthropic event format
+			// For malformed JSON, this creates something like: {"type": "message_start", {invalid...}
+			// which is still malformed, but has the type field that can be extracted
+			finalJSON = []byte(fmt.Sprintf(`{"type": "%s", %s`, eventType, string(jsonData[1:])))
+			if jsonData[0] != '{' {
+				// If it doesn't even start with {, just wrap it
+				finalJSON = []byte(fmt.Sprintf(`{"type": "%s", "data": %s}`, eventType, string(jsonData)))
+			}
+		} else {
+			finalJSON = jsonData
+		}
+
+		// Base64 encode the JSON data (this is what AWS Bedrock does)
+		base64Data := base64.StdEncoding.EncodeToString(finalJSON)
+
+		// Create a payload with the base64-encoded data in the "bytes" field
+		payload := struct {
+			Bytes string `json:"bytes"`
+		}{
+			Bytes: base64Data,
+		}
+
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		// Encode as EventStream message
+		err = encoder.Encode(buf, eventstream.Message{
+			Headers: eventstream.Headers{{Name: ":event-type", Value: eventstream.StringValue("chunk")}},
+			Payload: payloadBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
 
 // TestResponseModel_AWSAnthropic tests that AWS Anthropic (non-streaming) returns the request model
 // AWS Anthropic uses deterministic model mapping without virtualization
@@ -456,6 +533,10 @@ event: message_stop
 data: {"type": "message_stop"}
 
 `
+	// Wrap SSE data in AWS EventStream format
+	eventStreamData, err := wrapAnthropicSSEInEventStream(sseStream)
+	require.NoError(t, err)
+
 	openAIReq := &openai.ChatCompletionRequest{
 		Stream:    true,
 		Model:     modelName,
@@ -463,11 +544,11 @@ data: {"type": "message_stop"}
 	}
 
 	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
-	_, _, err := translator.RequestBody(nil, openAIReq, false)
+	_, _, err = translator.RequestBody(nil, openAIReq, false)
 	require.NoError(t, err)
 
 	// Test streaming response - AWS Anthropic doesn't return model in response, uses request model
-	_, _, tokenUsage, responseModel, err := translator.ResponseBody(map[string]string{}, strings.NewReader(sseStream), true, nil)
+	_, _, tokenUsage, responseModel, err := translator.ResponseBody(map[string]string{}, bytes.NewReader(eventStreamData), true, nil)
 	require.NoError(t, err)
 	require.Equal(t, modelName, responseModel) // Returns the request model since no virtualization
 	inputTokens, ok := tokenUsage.InputTokens()
@@ -506,16 +587,20 @@ event: message_stop
 data: {"type": "message_stop"}
 
 `
+		// Wrap SSE data in AWS EventStream format
+		eventStreamData, err := wrapAnthropicSSEInEventStream(sseStream)
+		require.NoError(t, err)
+
 		openAIReq := &openai.ChatCompletionRequest{
 			Stream:    true,
 			Model:     "test-model",
 			MaxTokens: new(int64),
 		}
 		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
-		_, _, err := translator.RequestBody(nil, openAIReq, false)
+		_, _, err = translator.RequestBody(nil, openAIReq, false)
 		require.NoError(t, err)
 
-		_, bm, _, _, err := translator.ResponseBody(map[string]string{}, strings.NewReader(sseStream), true, nil)
+		_, bm, _, _, err := translator.ResponseBody(map[string]string{}, bytes.NewReader(eventStreamData), true, nil)
 		require.NoError(t, err)
 		require.NotNil(t, bm)
 
@@ -556,12 +641,16 @@ event: message_stop
 data: {"type":"message_stop"}
 `
 
-		openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
-		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
-		_, _, err := translator.RequestBody(nil, openAIReq, false)
+		// Wrap SSE data in AWS EventStream format
+		eventStreamData, err := wrapAnthropicSSEInEventStream(sseStream)
 		require.NoError(t, err)
 
-		_, bm, _, _, err := translator.ResponseBody(map[string]string{}, strings.NewReader(sseStream), true, nil)
+		openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
+		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
+		_, _, err = translator.RequestBody(nil, openAIReq, false)
+		require.NoError(t, err)
+
+		_, bm, _, _, err := translator.ResponseBody(map[string]string{}, bytes.NewReader(eventStreamData), true, nil)
 		require.NoError(t, err)
 		require.NotNil(t, bm)
 		bodyStr := string(bm)
@@ -575,12 +664,16 @@ data: {"type":"message_stop"}
 
 func TestAWSAnthropicStreamParser_ErrorHandling(t *testing.T) {
 	runStreamErrTest := func(t *testing.T, sseStream string, endOfStream bool) error {
-		openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
-		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
-		_, _, err := translator.RequestBody(nil, openAIReq, false)
+		// Wrap SSE data in AWS EventStream format
+		eventStreamData, err := wrapAnthropicSSEInEventStream(sseStream)
 		require.NoError(t, err)
 
-		_, _, _, _, err = translator.ResponseBody(map[string]string{}, strings.NewReader(sseStream), endOfStream, nil)
+		openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
+		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
+		_, _, err = translator.RequestBody(nil, openAIReq, false)
+		require.NoError(t, err)
+
+		_, _, _, _, err = translator.ResponseBody(map[string]string{}, bytes.NewReader(eventStreamData), endOfStream, nil)
 		return err
 	}
 
