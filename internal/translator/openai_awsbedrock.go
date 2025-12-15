@@ -371,7 +371,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 							CachePoint: cachePointBlock,
 						})
 					}
-
 				case string:
 					return nil, fmt.Errorf("AWS Bedrock does not support string format for RedactedContent, expected []byte")
 				default:

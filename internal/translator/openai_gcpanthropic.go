@@ -46,6 +46,7 @@ type openAIToGCPAnthropicTranslatorV1ChatCompletion struct {
 	requestModel      internalapi.RequestModel
 }
 
+
 // RequestBody implements [OpenAIChatCompletionTranslator.RequestBody] for GCP.
 func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, openAIReq *openai.ChatCompletionRequest, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
