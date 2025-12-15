@@ -376,7 +376,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 							CachePoint: cachePointBlock,
 						})
 					}
-
 				case string:
 					return nil, fmt.Errorf("%w: redacted_content must be a binary/bytes value in bedrock", internalapi.ErrInvalidRequestBody)
 				default:
