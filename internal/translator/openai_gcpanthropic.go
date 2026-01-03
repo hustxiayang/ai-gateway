@@ -182,7 +182,45 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseBody(_ map[stri
 		responseModel = string(anthropicResp.Model)
 	}
 
+<<<<<<< HEAD
 	openAIResp, tokenUsage, err := messageToChatCompleion(anthropicResp, responseModel)
+=======
+	openAIResp := &openai.ChatCompletionResponse{
+		ID:      anthropicResp.ID,
+		Model:   responseModel,
+		Object:  string(openAIconstant.ValueOf[openAIconstant.ChatCompletion]()),
+		Choices: make([]openai.ChatCompletionResponseChoice, 0),
+		Created: openai.JSONUNIXTime(time.Now()),
+	}
+	usage := anthropicResp.Usage
+	tokenUsage = metrics.ExtractTokenUsageFromAnthropic(
+		usage.InputTokens,
+		usage.OutputTokens,
+		usage.CacheReadInputTokens,
+		usage.CacheCreationInputTokens,
+	)
+	inputTokens, _ := tokenUsage.InputTokens()
+	outputTokens, _ := tokenUsage.OutputTokens()
+	totalTokens, _ := tokenUsage.TotalTokens()
+	cachedTokens, _ := tokenUsage.CachedInputTokens()
+	cacheWriteTokens, _ := tokenUsage.CacheCreationInputTokens()
+	openAIResp.Usage = openai.Usage{
+		CompletionTokens: int(outputTokens),
+		PromptTokens:     int(inputTokens),
+		TotalTokens:      int(totalTokens),
+		PromptTokensDetails: &openai.PromptTokensDetails{
+			CachedTokens:        int(cachedTokens),
+			CacheCreationTokens: int(cacheWriteTokens),
+		},
+	}
+
+	finishReason, err := anthropicToOpenAIFinishReason(anthropicResp.StopReason)
+	if err != nil {
+		return nil, nil, metrics.TokenUsage{}, "", err
+	}
+
+	role, err := anthropicRoleToOpenAIRole(anthropic.MessageParamRole(anthropicResp.Role))
+>>>>>>> f92f8f4 (extproc: add cache writes (#1719))
 	if err != nil {
 		return nil, nil, metrics.TokenUsage{}, "", err
 	}
