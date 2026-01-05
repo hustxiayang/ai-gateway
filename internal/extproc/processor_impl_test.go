@@ -96,11 +96,12 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.Contains(t, err.Error(), "failed to parse request body")
 		require.NotNil(t, resp, "Response should not be nil")
 
-		// Verify it's an immediate response with the correct error message
+		// Verify it's an immediate response with the safe error message
 		immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 		require.True(t, ok, "Response should be an immediate response")
 		require.Equal(t, typev3.StatusCode(400), immediateResp.ImmediateResponse.Status.Code)
-		require.Contains(t, string(immediateResp.ImmediateResponse.Body), "failed to parse request body")
+		// The response body should only contain the safe error message, not internal details
+		require.Equal(t, "invalid request body format", string(immediateResp.ImmediateResponse.Body))
 	})
 
 	t.Run("ok", func(t *testing.T) {
@@ -438,12 +439,46 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 		{name: "streaming with forced include usage", stream: true, forcedIncludeUsage: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Run("translator error", func(t *testing.T) {
+			t.Run("translator error - internal", func(t *testing.T) {
 				headers := map[string]string{":path": "/foo", internalapi.ModelNameHeaderKeyDefault: "some-model"}
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-				tr := &mockTranslator{t: t, retErr: errors.New("test error"), expRequestBody: &body}
+// Return an internal error that should not be exposed to users
+				tr := &mockTranslator{t: t, retErr: errors.New("internal database error with credentials"), expRequestBody: &body}
+				mm := &mockMetrics{}
+				p := &chatCompletionProcessorUpstreamFilter{
+					parent: &chatCompletionProcessorRouterFilter{
+						config:                 &filterapi.RuntimeConfig{},
+						logger:                 slog.Default(),
+						originalRequestBodyRaw: someBody,
+						originalRequestBody:    &body,
+						originalModel:          "some-model",
+						stream:                 tc.stream,
+					},
+					requestHeaders: headers,
+					metrics:        mm,
+					translator:     tr,
+				}
+				resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+				require.Error(t, err, "Should return an error")
+				require.Contains(t, err.Error(), "failed to transform request")
+				// Internal errors should use the normal error path (nil response)
+				require.Nil(t, resp, "Response should be nil for internal errors")
+
+				mm.RequireRequestFailure(t)
+				require.Zero(t, mm.inputTokenCount)
+				// Verify models were set even though processing failed
+				require.Equal(t, "some-model", mm.originalModel)
+				require.Equal(t, "some-model", mm.requestModel)
+			})
+			t.Run("translator error - user facing", func(t *testing.T) {
+				headers := map[string]string{":path": "/foo", internalapi.ModelNameHeaderKeyDefault: "some-model"}
+				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
+				var body openai.ChatCompletionRequest
+				require.NoError(t, json.Unmarshal(someBody, &body))
+				// Return a safe user-facing error directly (not wrapped)
+				tr := &mockTranslator{t: t, retErr: internalapi.ErrInvalidModelSchema, expRequestBody: &body}
 				mm := &mockMetrics{}
 				p := &chatCompletionProcessorUpstreamFilter{
 					parent: &chatCompletionProcessorRouterFilter{
@@ -460,15 +495,15 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				}
 				resp, err := p.ProcessRequestHeaders(t.Context(), nil)
 				require.Error(t, err, "Should return an error along with immediate response")
-				require.Contains(t, err.Error(), "failed to transform request: test error")
+				require.Contains(t, err.Error(), "failed to transform request")
 				require.NotNil(t, resp, "Response should not be nil")
 
-				// Verify it's an immediate response with the correct error message
+				// Verify it's an immediate response with the safe error message
 				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 				require.True(t, ok, "Response should be an immediate response")
 				require.Equal(t, typev3.StatusCode(422), immediateResp.ImmediateResponse.Status.Code)
-				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "failed to transform request")
-				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "test error")
+				// The response body should only contain the safe error message, not internal details
+				require.Equal(t, "request schema incompatible with target API", string(immediateResp.ImmediateResponse.Body))
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)

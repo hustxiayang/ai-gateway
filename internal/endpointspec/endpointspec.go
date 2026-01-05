@@ -84,7 +84,8 @@ func (ChatCompletionsEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.ChatCompletionRequest, bool, []byte, error) {
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal chat completion request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	var mutatedBody []byte
 	if req.Stream && costConfigured && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
@@ -101,7 +102,8 @@ func (ChatCompletionsEndpointSpec) ParseBody(
 			ReplaceInPlace: true,
 		})
 		if err != nil {
-			return "", nil, false, nil, fmt.Errorf("failed to set stream_options: %w", err)
+			// Return safe error type without exposing internal error details
+			return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 		}
 	}
 	return req.Model, &req, req.Stream, mutatedBody, nil
@@ -132,7 +134,8 @@ func (CompletionsEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.CompletionRequest, bool, []byte, error) {
 	var openAIReq openai.CompletionRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal completion request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	return openAIReq.Model, &openAIReq, openAIReq.Stream, nil, nil
 }
@@ -154,7 +157,8 @@ func (EmbeddingsEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.EmbeddingRequest, bool, []byte, error) {
 	var openAIReq openai.EmbeddingRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal embedding request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	return openAIReq.Model, &openAIReq, false, nil, nil
 }
@@ -177,7 +181,8 @@ func (ImageGenerationEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.ImageGenerationRequest, bool, []byte, error) {
 	var openAIReq openai.ImageGenerationRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal image generation request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	return openAIReq.Model, &openAIReq, false, nil, nil
 }
@@ -199,7 +204,8 @@ func (ResponsesEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.ResponseRequest, bool, []byte, error) {
 	var openAIReq openai.ResponseRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal responses request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	return openAIReq.Model, &openAIReq, openAIReq.Stream, nil, nil
 }
@@ -221,12 +227,14 @@ func (MessagesEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *anthropic.MessagesRequest, bool, []byte, error) {
 	var anthropicReq anthropic.MessagesRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal Anthropic Messages body: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 
 	model := anthropicReq.Model
 	if model == "" {
-		return "", nil, false, nil, fmt.Errorf("model field is required in Anthropic request")
+		// Return safe error type for missing required field
+		return "", nil, false, nil, internalapi.ErrMissingRequiredField
 	}
 
 	stream := anthropicReq.Stream
@@ -255,7 +263,8 @@ func (RerankEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *cohereschema.RerankV2Request, bool, []byte, error) {
 	var req cohereschema.RerankV2Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal rerank request: %w", err)
+		// Return safe error type without exposing internal error details
+		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
 	}
 	return req.Model, &req, false, nil, nil
 }
