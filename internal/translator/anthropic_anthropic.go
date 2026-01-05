@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/tidwall/sjson"
+	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
