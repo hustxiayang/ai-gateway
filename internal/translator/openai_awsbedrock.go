@@ -143,6 +143,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) RequestBody(_ []byte, ope
 
 	newBody, err = json.Marshal(bedrockReq)
 	if err != nil {
+		// Internal marshaling error - keep as internal (shouldn't happen in practice)
 		return nil, nil, fmt.Errorf("failed to marshal body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
@@ -213,7 +214,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIToolsToBedrockToolC
 				},
 			}
 		} else {
-			return fmt.Errorf("unexpected type: %T", openAIReq.ToolChoice.Value)
+			return internalapi.ErrUnsupportedToolFormat
 		}
 	}
 	return nil
@@ -251,7 +252,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 				imageContentPart := contentPart.OfImageURL
 				contentType, b, err := parseDataURI(imageContentPart.ImageURL.URL)
 				if err != nil {
-					return nil, fmt.Errorf("failed to parse image URL: %s %w", imageContentPart.ImageURL.URL, err)
+					return nil, internalapi.ErrUnsupportedMessageFormat
 				}
 				var format string
 				switch contentType {
@@ -264,8 +265,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 				case mimeTypeImageWEBP:
 					format = "webp"
 				default:
-					return nil, fmt.Errorf("unsupported image type: %s please use one of [png, jpeg, gif, webp]",
-						contentType)
+					return nil, internalapi.ErrUnsupportedMessageFormat
 				}
 
 				block := &awsbedrock.ContentBlock{

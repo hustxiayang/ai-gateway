@@ -27,6 +27,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -267,8 +268,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, invalidTempReq, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), fmt.Sprintf(tempNotSupportedError, *invalidTempReq.Temperature))
+		require.ErrorIs(t, err, internalapi.ErrInvalidParameterValue)
 	})
 
 	t.Run("Invalid Temperature (below bound)", func(t *testing.T) {
@@ -280,8 +280,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, invalidTempReq, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), fmt.Sprintf(tempNotSupportedError, *invalidTempReq.Temperature))
+		require.ErrorIs(t, err, internalapi.ErrInvalidParameterValue)
 	})
 
 	// Test for missing required parameter.
@@ -293,7 +292,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, missingTokensReq, false)
-		require.ErrorContains(t, err, "the maximum number of tokens must be set for Anthropic, got nil instead")
+		require.ErrorIs(t, err, internalapi.ErrMissingRequiredField)
 	})
 	t.Run("API Version Override", func(t *testing.T) {
 		customAPIVersion := "bedrock-2023-05-31"
@@ -1628,7 +1627,6 @@ func TestToolParameterDereferencing(t *testing.T) {
 		expectedTools      []anthropic.ToolUnionParam
 		expectedToolChoice anthropic.ToolChoiceUnionParam
 		expectErr          bool
-		expectedErrMsg     string
 	}{
 		{
 			name: "tool with complex nested $ref - successful dereferencing",
@@ -1729,8 +1727,7 @@ func TestToolParameterDereferencing(t *testing.T) {
 					},
 				},
 			},
-			expectErr:      true,
-			expectedErrMsg: "failed to dereference tool parameters",
+			expectErr: true,
 		},
 		{
 			name: "tool with circular $ref - dereferencing error",
@@ -1771,8 +1768,7 @@ func TestToolParameterDereferencing(t *testing.T) {
 					},
 				},
 			},
-			expectErr:      true,
-			expectedErrMsg: "failed to dereference tool parameters",
+			expectErr: true,
 		},
 		{
 			name: "tool without $ref - no dereferencing needed",
@@ -1835,8 +1831,7 @@ func TestToolParameterDereferencing(t *testing.T) {
 					},
 				},
 			},
-			expectErr:      true,
-			expectedErrMsg: "failed to cast dereferenced tool parameters",
+			expectErr: true,
 		},
 	}
 
@@ -1846,9 +1841,7 @@ func TestToolParameterDereferencing(t *testing.T) {
 
 			if tt.expectErr {
 				require.Error(t, err)
-				if tt.expectedErrMsg != "" {
-					require.Contains(t, err.Error(), tt.expectedErrMsg)
-				}
+				require.ErrorIs(t, err, internalapi.ErrUnsupportedToolFormat)
 				return
 			}
 
