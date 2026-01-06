@@ -8,7 +8,6 @@ package translator
 import (
 	"cmp"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -22,8 +21,10 @@ import (
 	openAIconstant "github.com/openai/openai-go/shared/constant"
 	"github.com/tidwall/sjson"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
@@ -388,6 +389,46 @@ func anthropicRoleToOpenAIRole(role anthropic.MessageParamRole) (string, error) 
 	}
 }
 
+// processAssistantContent processes a single ChatCompletionAssistantMessageParamContent and returns the corresponding Anthropic content block.
+func processAssistantContent(content openai.ChatCompletionAssistantMessageParamContent) (*anthropic.ContentBlockParamUnion, error) {
+	switch content.Type {
+	case openai.ChatCompletionAssistantMessageParamContentTypeRefusal:
+		if content.Refusal != nil {
+			block := anthropic.NewTextBlock(*content.Refusal)
+			return &block, nil
+		}
+	case openai.ChatCompletionAssistantMessageParamContentTypeText:
+		if content.Text != nil {
+			textBlock := anthropic.NewTextBlock(*content.Text)
+			if isCacheEnabled(content.AnthropicContentFields) {
+				textBlock.OfText.CacheControl = content.CacheControl
+			}
+			return &textBlock, nil
+		}
+	case openai.ChatCompletionAssistantMessageParamContentTypeThinking:
+		// thinking can not be cached: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+		if content.Text != nil && content.Signature != nil {
+			thinkBlock := anthropic.NewThinkingBlock(*content.Text, *content.Signature)
+			return &thinkBlock, nil
+		}
+	case openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking:
+		if content.RedactedContent != nil {
+			switch v := content.RedactedContent.Value.(type) {
+			case string:
+				redactedThinkingBlock := anthropic.NewRedactedThinkingBlock(v)
+				return &redactedThinkingBlock, nil
+			case []byte:
+				return nil, fmt.Errorf("GCP Anthropic does not support []byte format for RedactedContent, expected string")
+			default:
+				return nil, fmt.Errorf("unsupported RedactedContent type: %T, expected string", v)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("content type not supported: %v", content.Type)
+	}
+	return nil, nil
+}
+
 // openAIMessageToAnthropicMessageRoleAssistant converts an OpenAI assistant message to Anthropic content blocks.
 // The tool_use content is appended to the Anthropic message content list if tool_calls are present.
 func openAIMessageToAnthropicMessageRoleAssistant(openAiMessage *openai.ChatCompletionAssistantMessageParam) (anthropicMsg anthropic.MessageParam, err error) {
@@ -395,22 +436,24 @@ func openAIMessageToAnthropicMessageRoleAssistant(openAiMessage *openai.ChatComp
 	if v, ok := openAiMessage.Content.Value.(string); ok && len(v) > 0 {
 		contentBlocks = append(contentBlocks, anthropic.NewTextBlock(v))
 	} else if content, ok := openAiMessage.Content.Value.(openai.ChatCompletionAssistantMessageParamContent); ok {
-		switch content.Type {
-		case openai.ChatCompletionAssistantMessageParamContentTypeRefusal:
-			if content.Refusal != nil {
-				contentBlocks = append(contentBlocks, anthropic.NewTextBlock(*content.Refusal))
+		// Handle single content object
+		var block *anthropic.ContentBlockParamUnion
+		block, err = processAssistantContent(content)
+		if err != nil {
+			return anthropicMsg, err
+		} else if block != nil {
+			contentBlocks = append(contentBlocks, *block)
+		}
+	} else if contents, ok := openAiMessage.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent); ok {
+		// Handle array of content objects
+		for _, content := range contents {
+			var block *anthropic.ContentBlockParamUnion
+			block, err = processAssistantContent(content)
+			if err != nil {
+				return anthropicMsg, err
+			} else if block != nil {
+				contentBlocks = append(contentBlocks, *block)
 			}
-		case openai.ChatCompletionAssistantMessageParamContentTypeText:
-			if content.Text != nil {
-				textBlock := anthropic.NewTextBlock(*content.Text)
-				if isCacheEnabled(content.AnthropicContentFields) {
-					textBlock.OfText.CacheControl = content.CacheControl
-				}
-				contentBlocks = append(contentBlocks, textBlock)
-			}
-		default:
-			err = fmt.Errorf("content type not supported: %v", content.Type)
-			return
 		}
 	}
 
@@ -799,22 +842,24 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseBody(_ map[stri
 		Created: openai.JSONUNIXTime(time.Now()),
 	}
 	usage := anthropicResp.Usage
-	tokenUsage = extractTokenUsageFromAnthropic(
+	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 		usage.InputTokens,
 		usage.OutputTokens,
-		usage.CacheReadInputTokens,
-		usage.CacheCreationInputTokens,
+		&usage.CacheReadInputTokens,
+		&usage.CacheCreationInputTokens,
 	)
 	inputTokens, _ := tokenUsage.InputTokens()
 	outputTokens, _ := tokenUsage.OutputTokens()
 	totalTokens, _ := tokenUsage.TotalTokens()
 	cachedTokens, _ := tokenUsage.CachedInputTokens()
+	cacheWriteTokens, _ := tokenUsage.CacheCreationInputTokens()
 	openAIResp.Usage = openai.Usage{
 		CompletionTokens: int(outputTokens),
 		PromptTokens:     int(inputTokens),
 		TotalTokens:      int(totalTokens),
 		PromptTokensDetails: &openai.PromptTokensDetails{
-			CachedTokens: int(cachedTokens),
+			CachedTokens:        int(cachedTokens),
+			CacheCreationTokens: int(cacheWriteTokens),
 		},
 	}
 
@@ -836,15 +881,43 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseBody(_ map[stri
 
 	for i := range anthropicResp.Content { // NOTE: Content structure is massive, do not range over values.
 		output := &anthropicResp.Content[i]
-		if output.Type == string(constant.ValueOf[constant.ToolUse]()) && output.ID != "" {
-			toolCalls, toolErr := anthropicToolUseToOpenAICalls(output)
-			if toolErr != nil {
-				return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("failed to convert anthropic tool use to openai tool call: %w", toolErr)
+		switch output.Type {
+		case string(constant.ValueOf[constant.ToolUse]()):
+			if output.ID != "" {
+				toolCalls, toolErr := anthropicToolUseToOpenAICalls(output)
+				if toolErr != nil {
+					return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("failed to convert anthropic tool use to openai tool call: %w", toolErr)
+				}
+				choice.Message.ToolCalls = append(choice.Message.ToolCalls, toolCalls...)
 			}
-			choice.Message.ToolCalls = append(choice.Message.ToolCalls, toolCalls...)
-		} else if output.Type == string(constant.ValueOf[constant.Text]()) && output.Text != "" {
-			if choice.Message.Content == nil {
-				choice.Message.Content = &output.Text
+		case string(constant.ValueOf[constant.Text]()):
+			if output.Text != "" {
+				if choice.Message.Content == nil {
+					choice.Message.Content = &output.Text
+				}
+			}
+		case string(constant.ValueOf[constant.Thinking]()):
+			if output.Thinking != "" {
+				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
+					Value: &openai.ReasoningContent{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							ReasoningText: &awsbedrock.ReasoningTextBlock{
+								Text:      output.Thinking,
+								Signature: output.Signature,
+							},
+						},
+					},
+				}
+			}
+		case string(constant.ValueOf[constant.RedactedThinking]()):
+			if output.Data != "" {
+				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
+					Value: &openai.ReasoningContent{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							RedactedContent: []byte(output.Data),
+						},
+					},
+				}
 			}
 		}
 	}

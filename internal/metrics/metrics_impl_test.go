@@ -71,9 +71,10 @@ func TestRecordTokenUsage(t *testing.T) {
 			attribute.Key(genaiAttributeResponseModel).String("test-model"),
 		}
 		// gen_ai.token.type values - https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/#common-attributes
-		inputAttrs       = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeInput))...)
-		outputAttrs      = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeOutput))...)
-		cachedInputAttrs = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeCachedInput))...)
+		inputAttrs              = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeInput))...)
+		outputAttrs             = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeOutput))...)
+		cachedInputAttrs        = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeCachedInput))...)
+		cacheCreationInputAttrs = attribute.NewSet(append(attrs, attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeCacheCreationInput))...)
 	)
 
 	pm.SetOriginalModel("test-model")
@@ -81,8 +82,8 @@ func TestRecordTokenUsage(t *testing.T) {
 	pm.SetResponseModel("test-model")
 	pm.SetBackend(&filterapi.Backend{Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}})
 	pm.RecordTokenUsage(t.Context(), TokenUsage{
-		inputTokens: 10, cachedInputTokens: 8, outputTokens: 5,
-		inputTokenSet: true, cachedInputTokenSet: true, outputTokenSet: true,
+		inputTokens: 10, cachedInputTokens: 8, cacheCreationInputTokens: 2, outputTokens: 5,
+		inputTokenSet: true, cachedInputTokenSet: true, cacheCreationInputTokenSet: true, outputTokenSet: true,
 	}, nil)
 
 	count, sum := testotel.GetHistogramValues(t, mr, genaiMetricClientTokenUsage, inputAttrs)
@@ -92,6 +93,10 @@ func TestRecordTokenUsage(t *testing.T) {
 	count, sum = testotel.GetHistogramValues(t, mr, genaiMetricClientTokenUsage, cachedInputAttrs)
 	assert.Equal(t, uint64(1), count)
 	assert.Equal(t, 8.0, sum)
+
+	count, sum = testotel.GetHistogramValues(t, mr, genaiMetricClientTokenUsage, cacheCreationInputAttrs)
+	assert.Equal(t, uint64(1), count)
+	assert.Equal(t, 2.0, sum)
 
 	count, sum = testotel.GetHistogramValues(t, mr, genaiMetricClientTokenUsage, outputAttrs)
 	assert.Equal(t, uint64(1), count)
@@ -187,7 +192,7 @@ func testRecordRequestCompletion(t *testing.T) {
 
 func TestGetTimeToFirstTokenMsAndGetInterTokenLatencyMs(t *testing.T) {
 	t.Parallel()
-	c := metricsImpl{timeToFirstToken: 1 * time.Second, interTokenLatency: 2 * time.Second}
+	c := metricsImpl{timeToFirstToken: 1 * time.Second, interTokenLatencySec: 2}
 	assert.Equal(t, 1000.0, c.GetTimeToFirstTokenMs())
 	assert.Equal(t, 2000.0, c.GetInterTokenLatencyMs())
 }
@@ -295,8 +300,8 @@ func TestLabels_SetModel_RequestAndResponseDiffer(t *testing.T) {
 	pm.SetRequestModel("req-model")
 	pm.SetResponseModel("res-model")
 	pm.RecordTokenUsage(t.Context(), TokenUsage{
-		inputTokens: 2, cachedInputTokens: 1, outputTokens: 3,
-		inputTokenSet: true, cachedInputTokenSet: true, outputTokenSet: true,
+		inputTokens: 2, cachedInputTokens: 1, cacheCreationInputTokens: 6, outputTokens: 3,
+		inputTokenSet: true, cachedInputTokenSet: true, cacheCreationInputTokenSet: true, outputTokenSet: true,
 	}, nil)
 
 	inputAttrs := attribute.NewSet(
@@ -322,6 +327,18 @@ func TestLabels_SetModel_RequestAndResponseDiffer(t *testing.T) {
 	count, sum = getHistogramValues(t, mr, genaiMetricClientTokenUsage, cachedInputAttrs)
 	assert.Equal(t, uint64(1), count)
 	assert.Equal(t, 1.0, sum)
+
+	cacheCreationInputAttrs := attribute.NewSet(
+		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
+		attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
+		attribute.Key(genaiAttributeOriginalModel).String("orig-model"),
+		attribute.Key(genaiAttributeRequestModel).String("req-model"),
+		attribute.Key(genaiAttributeResponseModel).String("res-model"),
+		attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeCacheCreationInput),
+	)
+	count, sum = getHistogramValues(t, mr, genaiMetricClientTokenUsage, cacheCreationInputAttrs)
+	assert.Equal(t, uint64(1), count)
+	assert.Equal(t, 6.0, sum)
 
 	outputAttrs := attribute.NewSet(
 		attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
@@ -435,9 +452,8 @@ func TestRecordTokenLatency_OnlyFinalUsage(t *testing.T) {
 
 		count, sum := getHistogramValues(t, mr, genaiMetricServerTimePerOutputToken, attrs)
 		assert.Equal(t, uint64(1), count)
-		expectedDuration := 10 * time.Millisecond / 6
-		expectedSeconds := expectedDuration.Seconds()
-		assert.Equal(t, expectedSeconds, sum)
+		expected := (10 * time.Millisecond).Seconds() / 6
+		assert.Equal(t, expected, sum)
 	})
 }
 
@@ -483,6 +499,42 @@ func TestRecordTokenLatency_ZeroTokensFirst(t *testing.T) {
 		count, sum = getHistogramValues(t, mr, genaiMetricServerTimePerOutputToken, attrs)
 		assert.Equal(t, uint64(1), count)
 		assert.Equal(t, (10*time.Millisecond).Seconds()/4, sum)
+	})
+}
+
+// TestRecordTokenLatency_IntegerTruncation tests that time_per_output_token
+// does not truncate to zero due to integer division.
+func TestRecordTokenLatency_IntegerTruncation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mr := metric.NewManualReader()
+		meter := metric.NewMeterProvider(metric.WithReader(mr)).Meter("test")
+		pm := NewMetricsFactory(meter, nil, GenAIOperationCompletion).NewMetrics().(*metricsImpl)
+
+		attrs := attribute.NewSet(
+			attribute.Key(genaiAttributeOperationName).String(string(GenAIOperationCompletion)),
+			attribute.Key(genaiAttributeProviderName).String(genaiProviderOpenAI),
+			attribute.Key(genaiAttributeOriginalModel).String("test-model"),
+			attribute.Key(genaiAttributeRequestModel).String("test-model"),
+			attribute.Key(genaiAttributeResponseModel).String("test-model"),
+		)
+
+		pm.StartRequest(nil)
+		pm.SetOriginalModel("test-model")
+		pm.SetRequestModel("test-model")
+		pm.SetResponseModel("test-model")
+		pm.SetBackend(&filterapi.Backend{Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}})
+
+		// First call records TTFT.
+		time.Sleep(1 * time.Millisecond)
+		pm.RecordTokenLatency(t.Context(), 1, false, nil)
+
+		// 50ns / (100-1) = 0.5ns TPOT; integer division would truncate to 0.
+		time.Sleep(50 * time.Nanosecond)
+		pm.RecordTokenLatency(t.Context(), 100, true, nil)
+
+		count, sum := getHistogramValues(t, mr, genaiMetricServerTimePerOutputToken, attrs)
+		require.Equal(t, uint64(1), count)
+		require.Greater(t, sum, 0.0)
 	})
 }
 

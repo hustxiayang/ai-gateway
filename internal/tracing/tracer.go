@@ -8,7 +8,6 @@ package tracing
 import (
 	"context"
 
-	openaisdk "github.com/openai/openai-go/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -36,6 +35,7 @@ var (
 	_ tracing.EmbeddingsTracer      = (*embeddingsTracer)(nil)
 	_ tracing.CompletionTracer      = (*completionTracer)(nil)
 	_ tracing.ImageGenerationTracer = (*imageGenerationTracer)(nil)
+	_ tracing.ResponsesTracer       = (*responsesTracer)(nil)
 	_ tracing.RerankTracer          = (*rerankTracer)(nil)
 )
 
@@ -43,7 +43,8 @@ type (
 	chatCompletionTracer  = requestTracerImpl[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]
 	embeddingsTracer      = requestTracerImpl[openai.EmbeddingRequest, openai.EmbeddingResponse, struct{}]
 	completionTracer      = requestTracerImpl[openai.CompletionRequest, openai.CompletionResponse, openai.CompletionResponse]
-	imageGenerationTracer = requestTracerImpl[openaisdk.ImageGenerateParams, openaisdk.ImagesResponse, struct{}]
+	imageGenerationTracer = requestTracerImpl[openai.ImageGenerationRequest, openai.ImageGenerationResponse, struct{}]
+	responsesTracer       = requestTracerImpl[openai.ResponseRequest, openai.Response, openai.ResponseStreamEventUnion]
 	rerankTracer          = requestTracerImpl[cohereschema.RerankV2Request, cohereschema.RerankV2Response, struct{}]
 )
 
@@ -149,6 +150,18 @@ func newImageGenerationTracer(tracer trace.Tracer, propagator propagation.TextMa
 	)
 }
 
+func newResponsesTracer(tracer trace.Tracer, propagator propagation.TextMapPropagator, recorder tracing.ResponsesRecorder, headerAttributes map[string]string) tracing.ResponsesTracer {
+	return newRequestTracer(
+		tracer,
+		propagator,
+		recorder,
+		headerAttributes,
+		func(span trace.Span, recorder tracing.ResponsesRecorder) tracing.ResponsesSpan {
+			return &responsesSpan{span: span, recorder: recorder}
+		},
+	)
+}
+
 func newRerankTracer(tracer trace.Tracer, propagator propagation.TextMapPropagator, recorder tracing.RerankRecorder, headerAttributes map[string]string) tracing.RerankTracer {
 	return newRequestTracer(
 		tracer,
@@ -157,6 +170,18 @@ func newRerankTracer(tracer trace.Tracer, propagator propagation.TextMapPropagat
 		headerAttributes,
 		func(span trace.Span, recorder tracing.RerankRecorder) tracing.RerankSpan {
 			return &rerankSpan{span: span, recorder: recorder}
+		},
+	)
+}
+
+func newMessageTracer(tracer trace.Tracer, propagator propagation.TextMapPropagator, recorder tracing.MessageRecorder, headerAttributes map[string]string) tracing.MessageTracer {
+	return newRequestTracer(
+		tracer,
+		propagator,
+		recorder,
+		headerAttributes,
+		func(span trace.Span, recorder tracing.MessageRecorder) tracing.MessageSpan {
+			return &messageSpan{span: span, recorder: recorder}
 		},
 	)
 }

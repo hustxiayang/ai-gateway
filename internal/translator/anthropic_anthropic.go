@@ -8,16 +8,17 @@ package translator
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/tidwall/sjson"
+	"k8s.io/utils/ptr"
 
-	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
@@ -37,15 +38,16 @@ type anthropicToAnthropicTranslator struct {
 	stream                 bool
 	buffered               []byte
 	streamingResponseModel internalapi.ResponseModel
+	streamingTokenUsage    metrics.TokenUsage
 }
 
 // RequestBody implements [AnthropicMessagesTranslator.RequestBody].
-func (a *anthropicToAnthropicTranslator) RequestBody(original []byte, body *anthropicschema.MessagesRequest, forceBodyMutation bool) (
+func (a *anthropicToAnthropicTranslator) RequestBody(original []byte, body *anthropic.MessagesRequest, forceBodyMutation bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
-	a.stream = body.GetStream()
+	a.stream = body.Stream
 	// Store the request model to use as fallback for response model
-	a.requestModel = body.GetModel()
+	a.requestModel = body.Model
 	if a.modelNameOverride != "" {
 		// If modelName is set we override the model to be used for the request.
 		newBody, err = sjson.SetBytesOptions(original, "model", a.modelNameOverride, sjsonOptions)
@@ -75,7 +77,7 @@ func (a *anthropicToAnthropicTranslator) ResponseHeaders(_ map[string]string) (
 }
 
 // ResponseBody implements [AnthropicMessagesTranslator.ResponseBody].
-func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, _ tracing.MessageSpan) (
+func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracing.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if a.stream {
@@ -84,35 +86,41 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		if err != nil {
 			return nil, nil, tokenUsage, a.requestModel, fmt.Errorf("failed to read body: %w", err)
 		}
+
 		a.buffered = append(a.buffered, buf...)
-		tokenUsage = a.extractUsageFromBufferEvent()
+		a.extractUsageFromBufferEvent(span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(a.streamingResponseModel, a.requestModel)
-		return
+		return nil, nil, a.streamingTokenUsage, responseModel, nil
 	}
 
 	// Parse the Anthropic response to extract token usage.
-	anthropicResp := &anthropic.Message{}
+	anthropicResp := &anthropic.MessagesResponse{}
 	if err := json.NewDecoder(body).Decode(anthropicResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
-	tokenUsage = extractTokenUsageFromAnthropic(
-		anthropicResp.Usage.InputTokens,
-		anthropicResp.Usage.OutputTokens,
-		anthropicResp.Usage.CacheReadInputTokens,
-		anthropicResp.Usage.CacheCreationInputTokens,
+	usage := anthropicResp.Usage
+	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
+		int64(usage.InputTokens),
+		int64(usage.OutputTokens),
+		ptr.To(int64(usage.CacheReadInputTokens)),
+		ptr.To(int64(usage.CacheCreationInputTokens)),
 	)
-
-	responseModel = cmp.Or(internalapi.ResponseModel(anthropicResp.Model), a.requestModel)
+	if span != nil {
+		span.RecordResponse(anthropicResp)
+	}
+	responseModel = cmp.Or(anthropicResp.Model, a.requestModel)
 	return nil, nil, tokenUsage, responseModel, nil
 }
 
 // extractUsageFromBufferEvent extracts the token usage from the buffered event.
-// It scans complete lines and returns the latest usage found in this batch.
-func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent() (tokenUsage metrics.TokenUsage) {
+// It scans complete lines and accumulates usage from all events in this batch.
+func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(s tracing.MessageSpan) {
 	for {
 		i := bytes.IndexByte(a.buffered, '\n')
 		if i == -1 {
+			// Recalculate total tokens before returning
+			a.updateTotalTokens()
 			return
 		}
 		line := a.buffered[:i]
@@ -120,46 +128,117 @@ func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent() (tokenUsa
 		if !bytes.HasPrefix(line, dataPrefix) {
 			continue
 		}
-		eventUnion := &anthropic.MessageStreamEventUnion{}
+		eventUnion := &anthropic.MessagesStreamChunk{}
 		if err := json.Unmarshal(bytes.TrimPrefix(line, dataPrefix), eventUnion); err != nil {
 			continue
 		}
+		if s != nil {
+			s.RecordResponseChunk(eventUnion)
+		}
 
-		// See the code in MessageStreamEventUnion.AsAny for reference.
-		switch eventUnion.Type {
-		case "message_start":
-			// Message only valid in message_start events.
-			if eventUnion.Message.Model != "" {
-				// Store the response model for future batches
-				a.streamingResponseModel = internalapi.ResponseModel(eventUnion.Message.Model)
+		switch {
+		case eventUnion.MessageStart != nil:
+			message := eventUnion.MessageStart
+			// Store the response model for future batches
+			if message.Model != "" {
+				a.streamingResponseModel = message.Model
 			}
-			// Extract usage from message_start event
-			usage := eventUnion.Message.Usage
-			tokenUsage = extractTokenUsageFromAnthropic(
-				usage.InputTokens,
-				usage.OutputTokens,
-				usage.CacheReadInputTokens,
-				usage.CacheCreationInputTokens,
-			)
-		case "message_delta":
-			usage := eventUnion.Usage
-			tokenUsage = extractTokenUsageFromAnthropic(
-				usage.InputTokens,
-				usage.OutputTokens,
-				usage.CacheReadInputTokens,
-				usage.CacheCreationInputTokens,
-			)
+			// Extract usage from message_start event - this sets the baseline input tokens
+			if u := message.Usage; u != nil {
+				messageStartUsage := metrics.ExtractTokenUsageFromExplicitCaching(
+					int64(u.InputTokens),
+					int64(u.OutputTokens),
+					ptr.To(int64(u.CacheReadInputTokens)),
+					ptr.To(int64(u.CacheCreationInputTokens)),
+				)
+				// Override with message_start usage (contains input tokens and initial state)
+				a.streamingTokenUsage.Override(messageStartUsage)
+			}
+		case eventUnion.MessageDelta != nil:
+			u := eventUnion.MessageDelta.Usage
+			// message_delta events provide final counts for specific token types
+			// Update output tokens from message_delta (final count)
+			if u.OutputTokens >= 0 {
+				a.streamingTokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
+			}
 		}
 	}
 }
 
+// updateTotalTokens recalculates and sets the total token count
+func (a *anthropicToAnthropicTranslator) updateTotalTokens() {
+	inputTokens, inputSet := a.streamingTokenUsage.InputTokens()
+	outputTokens, outputSet := a.streamingTokenUsage.OutputTokens()
+
+	// Initialize missing values to 0 if we have any token data
+	if outputSet && !inputSet {
+		a.streamingTokenUsage.SetInputTokens(0)
+		inputTokens = 0
+		inputSet = true
+	}
+
+	// Set cached tokens to 0 if not set but we have other token data
+	if outputSet {
+		if _, cachedSet := a.streamingTokenUsage.CachedInputTokens(); !cachedSet {
+			a.streamingTokenUsage.SetCachedInputTokens(0)
+		}
+		if _, cachedSet := a.streamingTokenUsage.CacheCreationInputTokens(); !cachedSet {
+			a.streamingTokenUsage.SetCacheCreationInputTokens(0)
+		}
+	}
+
+	if inputSet && outputSet {
+		a.streamingTokenUsage.SetTotalTokens(inputTokens + outputTokens)
+	}
+}
+
 // ResponseError implements [AnthropicMessagesTranslator] for Anthropic to AWS Bedrock Anthropic translation.
-func (a *anthropicToAnthropicTranslator) ResponseError(map[string]string, io.Reader) (
+func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]string, r io.Reader) (
 	newHeaders []internalapi.Header,
 	mutatedBody []byte,
 	err error,
 ) {
-	// TODO: implement the non-anthropic error conversion logic here. For now, we just return the original error
-	// 	from the upstream as-is.
+	statusCode := respHeaders[statusHeaderName]
+	if !strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
+		buf, err := io.ReadAll(r)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+		}
+		var typ string
+		switch statusCode {
+		case "400":
+			typ = "invalid_request_error"
+		case "401":
+			typ = "authentication_error"
+		case "403":
+			typ = "permission_error"
+		case "404":
+			typ = "not_found_error"
+		case "413":
+			typ = "request_too_large"
+		case "429":
+			typ = "rate_limit_error"
+		case "500":
+			typ = "internal_server_error"
+		case "503":
+			typ = "service_unavailable_error"
+		case "529":
+			typ = "overloaded_error"
+		default:
+			typ = "internal_server_error"
+		}
+		anthropicError := anthropic.ErrorResponse{
+			Type:  "error", // Always "error" at the top level.
+			Error: anthropic.ErrorResponseMessage{Type: typ, Message: string(buf)},
+		}
+		mutatedBody, err = json.Marshal(anthropicError)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+		}
+		newHeaders = append(newHeaders,
+			internalapi.Header{contentTypeHeaderName, jsonContentType},
+			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(mutatedBody))},
+		)
+	}
 	return
 }

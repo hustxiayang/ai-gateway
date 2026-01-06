@@ -7,25 +7,21 @@ package translator
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
-	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
-var (
-	sseEventPrefix = []byte("event:")
-	emptyStrPtr    = ptr.To("")
-)
+var sseEventPrefix = []byte("event:")
 
 // streamingToolCall holds the state for a single tool call that is being streamed.
 type streamingToolCall struct {
@@ -114,6 +110,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		p.tokenUsage.SetTotalTokens(inputTokens + outputTokens)
 		totalTokens, _ := p.tokenUsage.TotalTokens()
 		cachedTokens, _ := p.tokenUsage.CachedInputTokens()
+		cacheCreationTokens, _ := p.tokenUsage.CacheCreationInputTokens()
 		finalChunk := openai.ChatCompletionResponseChunk{
 			ID:      p.activeMessageID,
 			Created: p.created,
@@ -124,7 +121,8 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 				CompletionTokens: int(outputTokens),
 				TotalTokens:      int(totalTokens),
 				PromptTokensDetails: &openai.PromptTokensDetails{
-					CachedTokens: int(cachedTokens),
+					CachedTokens:        int(cachedTokens),
+					CacheCreationTokens: int(cacheCreationTokens),
 				},
 			},
 			Model: p.requestModel,
@@ -201,11 +199,11 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		p.activeMessageID = event.Message.ID
 		p.created = openai.JSONUNIXTime(time.Now())
 		u := event.Message.Usage
-		usage := extractTokenUsageFromAnthropic(
+		usage := metrics.ExtractTokenUsageFromExplicitCaching(
 			u.InputTokens,
 			u.OutputTokens,
-			u.CacheReadInputTokens,
-			u.CacheCreationInputTokens,
+			&u.CacheReadInputTokens,
+			&u.CacheCreationInputTokens,
 		)
 		// For message_start, we store the initial usage but don't add to the accumulated
 		// The message_delta event will contain the final totals
@@ -214,6 +212,9 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		}
 		if cached, ok := usage.CachedInputTokens(); ok {
 			p.tokenUsage.SetCachedInputTokens(cached)
+		}
+		if cacheCreation, ok := usage.CacheCreationInputTokens(); ok {
+			p.tokenUsage.SetCacheCreationInputTokens(cacheCreation)
 		}
 
 		// reset the toolIndex for each message
@@ -271,16 +272,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			}
 			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
 		}
-		if event.ContentBlock.Type == string(constant.ValueOf[constant.Thinking]()) {
-			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: emptyStrPtr}
-			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
-		}
-
-		if event.ContentBlock.Type == string(constant.ValueOf[constant.RedactedThinking]()) {
-			// This is a latency-hiding event, ignore it.
-			return nil, nil
-		}
-
+		// do not need to return an empty str for thinking start block
 		return nil, nil
 
 	case string(constant.ValueOf[constant.MessageDelta]()):
@@ -289,21 +281,27 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			return nil, fmt.Errorf("unmarshal message_delta: %w", err)
 		}
 		u := event.Usage
-		usage := extractTokenUsageFromAnthropic(
+		usage := metrics.ExtractTokenUsageFromExplicitCaching(
 			u.InputTokens,
 			u.OutputTokens,
-			u.CacheReadInputTokens,
-			u.CacheCreationInputTokens,
+			&u.CacheReadInputTokens,
+			&u.CacheCreationInputTokens,
 		)
 		// For message_delta, accumulate the incremental output tokens
 		if output, ok := usage.OutputTokens(); ok {
 			p.tokenUsage.AddOutputTokens(output)
 		}
-		// Update input tokens to include any cache tokens from delta
+		// Update input tokens to include read cache tokens from delta
 		if cached, ok := usage.CachedInputTokens(); ok {
 			p.tokenUsage.AddInputTokens(cached)
 			// Accumulate any additional cache tokens from delta
 			p.tokenUsage.AddCachedInputTokens(cached)
+		}
+		// Update input tokens to include write cache tokens from delta
+		if cached, ok := usage.CacheCreationInputTokens(); ok {
+			p.tokenUsage.AddInputTokens(cached)
+			// Accumulate any additional cache tokens from delta
+			p.tokenUsage.AddCacheCreationInputTokens(cached)
 		}
 		if event.Delta.StopReason != "" {
 			p.stopReason = event.Delta.StopReason
@@ -316,10 +314,28 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			return nil, fmt.Errorf("unmarshal content_block_delta: %w", err)
 		}
 		switch event.Delta.Type {
-		case string(constant.ValueOf[constant.TextDelta]()), string(constant.ValueOf[constant.ThinkingDelta]()):
-			// Treat thinking_delta just like a text_delta.
+		case string(constant.ValueOf[constant.TextDelta]()):
 			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: &event.Delta.Text}
 			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+
+		case string(constant.ValueOf[constant.ThinkingDelta]()):
+			// this should already include the case for redacted thinking: https://platform.claude.com/docs/en/build-with-claude/streaming#content-block-delta-types
+
+			reasoningDelta := &openai.StreamReasoningContent{}
+
+			// Map all relevant fields from the Bedrock delta to our flattened OpenAI delta struct.
+			if event.Delta.Thinking != "" {
+				reasoningDelta.Text = event.Delta.Thinking
+			}
+			if event.Delta.Signature != "" {
+				reasoningDelta.Signature = event.Delta.Signature
+			}
+
+			delta := openai.ChatCompletionResponseChunkChoiceDelta{
+				ReasoningContent: reasoningDelta,
+			}
+			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+
 		case string(constant.ValueOf[constant.InputJSONDelta]()):
 			tool, ok := p.activeToolCalls[p.toolIndex]
 			if !ok {
@@ -338,6 +354,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			tool.inputJSON += event.Delta.PartialJSON
 			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
 		}
+		// Do not process redacted thinking stream? Did not find the source
 
 	case string(constant.ValueOf[constant.ContentBlockStop]()):
 		// This event is for state cleanup, no chunk is sent.

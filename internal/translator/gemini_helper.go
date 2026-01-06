@@ -6,7 +6,7 @@
 package translator
 
 import (
-	"encoding/json"
+	"cmp"
 	"fmt"
 	"maps"
 	"mime"
@@ -21,6 +21,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 const (
@@ -364,6 +365,9 @@ func openAIToolsToGeminiTools(openaiTools []openai.Tool, parametersJSONSchemaAva
 	if len(openaiTools) == 0 {
 		return nil, nil
 	}
+
+	var genaiTools []genai.Tool
+
 	var functionDecls []*genai.FunctionDeclaration
 
 	for _, tool := range openaiTools {
@@ -395,14 +399,27 @@ func openAIToolsToGeminiTools(openaiTools []openai.Tool, parametersJSONSchemaAva
 			}
 		case openai.ToolTypeImageGeneration:
 			return nil, fmt.Errorf("tool-type image generation not supported yet when translating OpenAI req to Gemini")
+		case openai.ToolTypeEnterpriseWebSearch:
+			genaiTools = append(genaiTools, genai.Tool{
+				EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
+			})
 		default:
 			return nil, fmt.Errorf("unsupported tool type: %s", tool.Type)
 		}
 	}
-	if len(functionDecls) == 0 {
+	// Only return nil if there are no tools at all (neither function declarations nor other tools)
+	if len(functionDecls) == 0 && len(genaiTools) == 0 {
 		return nil, nil
 	}
-	return []genai.Tool{{FunctionDeclarations: functionDecls}}, nil
+
+	// Only append function declarations if there are any
+	if len(functionDecls) > 0 {
+		genaiTools = append(genaiTools, genai.Tool{
+			FunctionDeclarations: functionDecls,
+		})
+	}
+
+	return genaiTools, nil
 }
 
 // openAIToolChoiceToGeminiToolConfig converts OpenAI tool_choice to Gemini ToolConfig.
@@ -605,9 +622,12 @@ func openAIReqToGeminiGenerationConfig(openAIReq *openai.ChatCompletionRequest, 
 	if openAIReq.N != nil {
 		gc.CandidateCount = int32(*openAIReq.N) // nolint:gosec
 	}
-	if openAIReq.MaxTokens != nil {
-		gc.MaxOutputTokens = int32(*openAIReq.MaxTokens) // nolint:gosec
+
+	maxTokens := cmp.Or(openAIReq.MaxCompletionTokens, openAIReq.MaxTokens)
+	if maxTokens != nil {
+		gc.MaxOutputTokens = int32(*maxTokens) // nolint:gosec
 	}
+
 	if openAIReq.PresencePenalty != nil {
 		gc.PresencePenalty = openAIReq.PresencePenalty
 	}
@@ -665,7 +685,7 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			}
 
 			// Extract tool calls if any.
-			toolCalls, err = extractToolCallsFromGeminiParts(toolCalls, candidate.Content.Parts)
+			toolCalls, err = extractToolCallsFromGeminiParts(toolCalls, candidate.Content.Parts, json.Marshal)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}
@@ -686,6 +706,14 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			}
 
 			choice.Message.SafetyRatings = candidate.SafetyRatings
+		}
+
+		if candidate.GroundingMetadata != nil {
+			if choice.Message.Role == "" {
+				choice.Message.Role = openai.ChatMessageRoleAssistant
+			}
+
+			choice.Message.GroundingMetadata = candidate.GroundingMetadata
 		}
 
 		// Handle logprobs if available.
@@ -727,12 +755,13 @@ func geminiFinishReasonToOpenAI[T toolCallSlice](reason genai.FinishReason, tool
 
 // extractTextAndThoughtSummaryFromGeminiParts extracts thought summary and text from Gemini parts.
 func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMode geminiResponseMode) (string, string) {
-	text := ""
-	thoughtSummary := ""
+	var textBuilder strings.Builder
+	var thoughtBuilder strings.Builder
+
 	for _, part := range parts {
 		if part != nil && part.Text != "" {
 			if part.Thought {
-				thoughtSummary += part.Text
+				thoughtBuilder.WriteString(part.Text)
 			} else {
 				if responseMode == responseModeRegex {
 					// GCP doesn't natively support REGEX response modes, so we instead express them as json schema.
@@ -742,22 +771,23 @@ func extractTextAndThoughtSummaryFromGeminiParts(parts []*genai.Part, responseMo
 					part.Text = strings.TrimPrefix(part.Text, "\"")
 					part.Text = strings.TrimSuffix(part.Text, "\"")
 				}
-				text += part.Text
+				textBuilder.WriteString(part.Text)
 			}
 		}
 	}
-	return thoughtSummary, text
+	return thoughtBuilder.String(), textBuilder.String()
 }
 
 // extractToolCallsFromGeminiParts extracts tool calls from Gemini parts.
-func extractToolCallsFromGeminiParts(toolCalls []openai.ChatCompletionMessageToolCallParam, parts []*genai.Part) ([]openai.ChatCompletionMessageToolCallParam, error) {
+func extractToolCallsFromGeminiParts(toolCalls []openai.ChatCompletionMessageToolCallParam, parts []*genai.Part, argsMarshaler json.Marshaler,
+) ([]openai.ChatCompletionMessageToolCallParam, error) {
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
 		}
 
 		// Convert function call arguments to JSON string.
-		args, err := json.Marshal(part.FunctionCall.Args)
+		args, err := argsMarshaler(part.FunctionCall.Args)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal function arguments: %w", err)
 		}

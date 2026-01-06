@@ -7,7 +7,6 @@ package translator
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
@@ -170,6 +170,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseBody(_ map[strin
 		tokenUsage.SetOutputTokens(uint32(gcpResp.UsageMetadata.CandidatesTokenCount))         //nolint:gosec
 		tokenUsage.SetTotalTokens(uint32(gcpResp.UsageMetadata.TotalTokenCount))               //nolint:gosec
 		tokenUsage.SetCachedInputTokens(uint32(gcpResp.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
+		// Gemini does not return cache creation input tokens; Skipping setCacheCreationInputTokens.
 	}
 
 	if span != nil {
@@ -194,8 +195,41 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		// Convert GCP chunk to OpenAI chunk.
 		openAIChunk := o.convertGCPChunkToOpenAI(chunk)
 
-		// Extract token usage if present in this chunk (typically in the last chunk).
-		if chunk.UsageMetadata != nil {
+		// Serialize to SSE format as expected by OpenAI API.
+		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &newBody)
+		if err != nil {
+			return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
+		}
+
+		if span != nil {
+			span.RecordResponseChunk(openAIChunk)
+		}
+
+		// Extract token usage only in the last chunk.
+		if chunk.UsageMetadata != nil && chunk.UsageMetadata.PromptTokenCount > 0 {
+			// Convert usage to pointer if available.
+			usage := ptr.To(geminiUsageToOpenAIUsage(chunk.UsageMetadata))
+
+			usageChunk := openai.ChatCompletionResponseChunk{
+				ID:      chunk.ResponseID,
+				Created: openai.JSONUNIXTime(chunk.CreateTime),
+				Object:  "chat.completion.chunk",
+				Choices: []openai.ChatCompletionResponseChunkChoice{},
+				// usage is nil for all chunks other than the last chunk
+				Usage: usage,
+				Model: o.requestModel,
+			}
+
+			// Serialize to SSE format as expected by OpenAI API.
+			err := serializeOpenAIChatCompletionChunk(usageChunk, &newBody)
+			if err != nil {
+				return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
+			}
+
+			if span != nil {
+				span.RecordResponseChunk(&usageChunk)
+			}
+
 			if chunk.UsageMetadata.PromptTokenCount >= 0 {
 				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
 			}
@@ -208,16 +242,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 			if chunk.UsageMetadata.CachedContentTokenCount >= 0 {
 				tokenUsage.SetCachedInputTokens(uint32(chunk.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
 			}
-		}
-
-		// Serialize to SSE format as expected by OpenAI API.
-		err := serializeOpenAIChatCompletionChunk(*openAIChunk, &newBody)
-		if err != nil {
-			return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error marshaling OpenAI chunk: %w", err)
-		}
-
-		if span != nil {
-			span.RecordResponseChunk(openAIChunk)
 		}
 	}
 
@@ -285,14 +309,17 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) parseGCPStreamingChunks(
 // extractToolCallsFromGeminiPartsStream extracts tool calls from Gemini parts for streaming responses.
 // Each tool call is assigned an incremental index starting from 0, matching OpenAI's streaming protocol.
 // Returns ChatCompletionChunkChoiceDeltaToolCall types suitable for streaming responses, or nil if no tool calls are found.
-func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGeminiPartsStream(toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall, parts []*genai.Part) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGeminiPartsStream(
+	toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall, parts []*genai.Part,
+	argsMarshaller json.Marshaler,
+) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
 		}
 
 		// Convert function call arguments to JSON string.
-		args, err := json.Marshal(part.FunctionCall.Args)
+		args, err := argsMarshaller(part.FunctionCall.Args)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal function arguments: %w", err)
 		}
@@ -357,7 +384,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			}
 
 			// Extract tool calls if any.
-			toolCalls, err = o.extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts)
+			toolCalls, err = o.extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts, json.Marshal)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}
@@ -381,19 +408,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) convertGCPChunkToOpenAI(
 		choices = []openai.ChatCompletionResponseChunkChoice{}
 	}
 
-	// Convert usage to pointer if available.
-	var usage *openai.Usage
-	if chunk.UsageMetadata != nil {
-		usage = ptr.To(geminiUsageToOpenAIUsage(chunk.UsageMetadata))
-	}
-
 	return &openai.ChatCompletionResponseChunk{
 		ID:      chunk.ResponseID,
 		Created: openai.JSONUNIXTime(chunk.CreateTime),
 		Object:  "chat.completion.chunk",
 		Choices: choices,
-		Usage:   usage,
-		Model:   o.requestModel,
+		// usage is nil for all chunks other than the last chunk
+		Usage: nil,
+		Model: o.requestModel,
 	}
 }
 

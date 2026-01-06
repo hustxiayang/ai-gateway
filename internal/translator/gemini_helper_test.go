@@ -6,7 +6,6 @@
 package translator
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -20,6 +19,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 func TestOpenAIMessagesToGeminiContents(t *testing.T) {
@@ -1028,6 +1028,51 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			expectedResponseMode:     responseModeNone,
 		},
 		{
+			name: "only MaxTokens set",
+			input: &openai.ChatCompletionRequest{
+				MaxTokens: ptr.To(int64(100)),
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				MaxOutputTokens: 100,
+			},
+			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
+			name: "only MaxCompletionTokens set",
+			input: &openai.ChatCompletionRequest{
+				MaxCompletionTokens: ptr.To(int64(200)),
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				MaxOutputTokens: 200,
+			},
+			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
+			name: "both MaxCompletionTokens and MaxTokens set - MaxCompletionTokens takes precedence",
+			input: &openai.ChatCompletionRequest{
+				MaxCompletionTokens: ptr.To(int64(300)),
+				MaxTokens:           ptr.To(int64(100)),
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				MaxOutputTokens: 300,
+			},
+			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
+			name: "neither MaxCompletionTokens nor MaxTokens set",
+			input: &openai.ChatCompletionRequest{
+				Temperature: ptr.To(0.5),
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				Temperature: ptr.To(float32(0.5)),
+			},
+			expectedResponseMode: responseModeNone,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
 			name: "stop sequences",
 			input: &openai.ChatCompletionRequest{
 				Stop: openaigo.ChatCompletionNewParamsStopUnion{
@@ -1540,6 +1585,58 @@ func TestOpenAIToolsToGeminiTools(t *testing.T) {
 			parametersJSONSchemaAvailable: false,
 			expected:                      nil,
 		},
+		{
+			name: "enterprise search tool only",
+			openaiTools: []openai.Tool{
+				{
+					Type: openai.ToolTypeEnterpriseWebSearch,
+				},
+			},
+			parametersJSONSchemaAvailable: false,
+			expected: []genai.Tool{
+				{
+					EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
+				},
+			},
+		},
+		{
+			name: "mixed function and enterprise search tools",
+			openaiTools: []openai.Tool{
+				{
+					Type: openai.ToolTypeFunction,
+					Function: &openai.FunctionDefinition{
+						Name:        "get_weather",
+						Description: "Get current weather",
+						Parameters:  funcParams,
+					},
+				},
+				{
+					Type: openai.ToolTypeEnterpriseWebSearch,
+				},
+			},
+			parametersJSONSchemaAvailable: false,
+			expected: []genai.Tool{
+				{
+					EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
+				},
+				{
+					FunctionDeclarations: []*genai.FunctionDeclaration{
+						{
+							Name:        "get_weather",
+							Description: "Get current weather",
+							Parameters: &genai.Schema{
+								Type: "object",
+								Properties: map[string]*genai.Schema{
+									"a": {Type: "integer"},
+									"b": {Type: "integer"},
+								},
+								Required: []string{"a", "b"},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1856,7 +1953,7 @@ func TestExtractToolCallsFromGeminiParts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			calls, err := extractToolCallsFromGeminiParts(toolCalls, tt.input)
+			calls, err := extractToolCallsFromGeminiParts(toolCalls, tt.input, json.MarshalForDeterministicTesting)
 
 			if tt.wantErr {
 				require.Error(t, err)

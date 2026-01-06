@@ -11,7 +11,6 @@
 package bench
 
 import (
-	"context"
 	_ "embed"
 	"fmt"
 	"net"
@@ -49,7 +48,7 @@ func setupBenchmark(b *testing.B) []MCPBenchCase {
 	b.Helper() // Treat this as a helper function
 
 	// setup MCP server
-	mcpServer := testmcp.NewServer(&testmcp.Options{
+	mcpServer, _ := testmcp.NewServer(&testmcp.Options{
 		Port:              mcpServerPort,
 		ForceJSONResponse: false,
 		DumbEchoServer:    true,
@@ -122,12 +121,10 @@ func BenchmarkMCP(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				ctx, cancel := context.WithTimeout(b.Context(), 5*time.Second)
-				res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+				res, err := cs.CallTool(b.Context(), &mcp.CallToolParams{
 					Name:      toolName,
 					Arguments: testmcp.ToolEchoArgs{Text: "hello MCP"},
 				})
-				cancel()
 				if err != nil {
 					b.Fatalf("MCP Tool call name %s failed at iteration %d: %v", toolName, i, err)
 				}
