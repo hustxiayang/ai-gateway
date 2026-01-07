@@ -169,7 +169,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 	if err != nil {
 		// Check if this is a user-facing error that's safe to expose
 		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
-			// Safe to return to user as 400 - use the error's message directly
+			// Safe to return to user as 400 - userFacingErr contains the full wrapped error with details
+			// e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
 			return &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &extprocv3.ImmediateResponse{
@@ -261,7 +262,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	if err != nil {
 		// Check if this is a user-facing error that's safe to expose
 		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
-			// Safe to return to user as 422 - use the error's message directly
+			// Safe to return to user as 422 - userFacingErr contains the full wrapped error with details
+			// e.g., "invalid request body: tool_choice type not supported"
 			return &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &extprocv3.ImmediateResponse{

@@ -287,14 +287,14 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 		}
 		return chatMessage, nil
 	}
-	return nil, fmt.Errorf("unexpected content type")
+	return nil, fmt.Errorf("%w: unexpected content type for user message", internalapi.ErrInvalidRequestBody)
 }
 
 // unmarshalToolCallArguments is a helper method to unmarshal tool call arguments.
 func unmarshalToolCallArguments(arguments string) (map[string]any, error) {
 	var input map[string]any
 	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tool call arguments: %w", err)
+		return nil, fmt.Errorf("%w: failed to unmarshal tool call arguments", internalapi.ErrInvalidRequestBody)
 	}
 	return input, nil
 }
@@ -373,9 +373,9 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 					}
 
 				case string:
-					return nil, fmt.Errorf("AWS Bedrock does not support string format for RedactedContent, expected []byte")
+					return nil, fmt.Errorf("%w: AWS Bedrock does not support string format for RedactedContent, expected []byte", internalapi.ErrInvalidRequestBody)
 				default:
-					return nil, fmt.Errorf("unsupported RedactedContent type: %T, expected []byte", v)
+					return nil, fmt.Errorf("%w: unsupported RedactedContent type %T, expected []byte", internalapi.ErrInvalidRequestBody, v)
 				}
 			}
 		case openai.ChatCompletionAssistantMessageParamContentTypeRefusal:
@@ -438,7 +438,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 			}
 		}
 	} else {
-		return fmt.Errorf("unexpected content type for system message")
+		return fmt.Errorf("%w: unexpected content type for system message", internalapi.ErrInvalidRequestBody)
 	}
 	return nil
 }
@@ -465,7 +465,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 		}
 
 	default:
-		return nil, fmt.Errorf("unexpected content type for tool message: %T", openAiMessage.Content.Value)
+		return nil, fmt.Errorf("%w: unexpected content type for tool message: %T", internalapi.ErrInvalidRequestBody, openAiMessage.Content.Value)
 	}
 
 	return &awsbedrock.Message{
@@ -542,7 +542,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 						}
 					}
 				} else {
-					return fmt.Errorf("unexpected content type for developer message")
+					return fmt.Errorf("%w: unexpected content type for developer message", internalapi.ErrInvalidRequestBody)
 				}
 			}
 		case msg.OfTool != nil:
@@ -572,7 +572,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 
 			bedrockReq.Messages = append(bedrockReq.Messages, bedrockMessage)
 		default:
-			return fmt.Errorf("unexpected role: %s", msg.ExtractMessgaeRole())
+			return fmt.Errorf("%w: unexpected role: %s", internalapi.ErrInvalidRequestBody, msg.ExtractMessgaeRole())
 		}
 
 		i++

@@ -13,17 +13,26 @@ import (
 // These errors contain no sensitive information and can be directly
 // exposed to clients with appropriate HTTP status codes.
 //
-// Usage: Use fmt.Errorf("%w: %s", ErrInvalidRequestBody, "specific details")
+// Usage: Use fmt.Errorf("%w: %s", ErrMalformedRequest, "specific details")
 // to wrap these errors with additional context.
 var (
-	// ErrInvalidRequestBody indicates the request body is malformed JSON,
-	// doesn't match the expected schema, or contains invalid values.
+	// ErrMalformedRequest indicates the request cannot be parsed (malformed JSON, etc.)
+	// Should return HTTP 400 Bad Request.
+	ErrMalformedRequest = errors.New("malformed request")
+
+	// ErrInvalidRequestBody indicates the request was parsed but contains invalid values,
+	// unsupported features, or doesn't match the expected schema for the target API.
+	// Should return HTTP 422 Unprocessable Entity.
 	ErrInvalidRequestBody = errors.New("invalid request body")
 )
 
 // GetUserFacingError checks if an error is a known user-facing error that's safe to expose.
-// Returns the unwrapped user-facing error if it's safe, or nil if it should not be exposed to users.
+// Returns the full error (with details) if it's safe, or nil if it should not be exposed to users.
+// This preserves the detailed message from wrapped errors like fmt.Errorf("%w: details", ErrInvalidRequestBody).
 func GetUserFacingError(err error) error {
+	if errors.Is(err, ErrMalformedRequest) {
+		return err
+	}
 	if errors.Is(err, ErrInvalidRequestBody) {
 		return err
 	}

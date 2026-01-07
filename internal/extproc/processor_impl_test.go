@@ -101,8 +101,8 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 		require.True(t, ok, "Response should be an immediate response")
 		require.Equal(t, typev3.StatusCode(400), immediateResp.ImmediateResponse.Status.Code)
-		// The response body should only contain the safe error message, not internal details
-		require.Equal(t, "invalid request body", string(immediateResp.ImmediateResponse.Body))
+		// The response body should contain the user-facing error message with details
+		require.Equal(t, "malformed request: failed to parse JSON for /v1/chat/completions", string(immediateResp.ImmediateResponse.Body))
 	})
 
 	t.Run("ok", func(t *testing.T) {
