@@ -214,7 +214,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIToolsToBedrockToolC
 				},
 			}
 		} else {
-			return internalapi.ErrUnsupportedToolFormat
+			return fmt.Errorf("%w: tool_choice type not supported", internalapi.ErrInvalidRequestBody)
 		}
 	}
 	return nil
@@ -252,7 +252,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 				imageContentPart := contentPart.OfImageURL
 				contentType, b, err := parseDataURI(imageContentPart.ImageURL.URL)
 				if err != nil {
-					return nil, internalapi.ErrUnsupportedMessageFormat
+					return nil, fmt.Errorf("%w: invalid image data URI", internalapi.ErrInvalidRequestBody)
 				}
 				var format string
 				switch contentType {
@@ -265,7 +265,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 				case mimeTypeImageWEBP:
 					format = "webp"
 				default:
-					return nil, internalapi.ErrUnsupportedMessageFormat
+					return nil, fmt.Errorf("%w: unsupported image format %s", internalapi.ErrInvalidRequestBody, contentType)
 				}
 
 				block := &awsbedrock.ContentBlock{

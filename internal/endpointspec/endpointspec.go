@@ -234,7 +234,7 @@ func (MessagesEndpointSpec) ParseBody(
 	model := anthropicReq.Model
 	if model == "" {
 		// Return safe error type for missing required field
-		return "", nil, false, nil, internalapi.ErrMissingRequiredField
+		return "", nil, false, nil, fmt.Errorf("%w: model field is required", internalapi.ErrInvalidRequestBody)
 	}
 
 	stream := anthropicReq.Stream

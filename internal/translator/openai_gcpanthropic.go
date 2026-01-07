@@ -79,7 +79,7 @@ func anthropicToOpenAIFinishReason(stopReason anthropic.StopReason) (openai.Chat
 // Returns an error if the value is greater than 1.0.
 func validateTemperatureForAnthropic(temp *float64) error {
 	if temp != nil && (*temp < 0.0 || *temp > 1.0) {
-		return internalapi.ErrInvalidParameterValue
+		return fmt.Errorf("%w: temperature must be between 0.0 and 1.0", internalapi.ErrInvalidRequestBody)
 	}
 	return nil
 }
@@ -121,7 +121,7 @@ func translateAnthropicToolChoice(openAIToolChoice *openai.ChatCompletionToolCho
 			toolChoice = anthropic.ToolChoiceUnionParam{OfTool: &anthropic.ToolChoiceToolParam{Name: choice}}
 			toolChoice.OfTool.DisableParallelToolUse = disableParallelToolUse
 		default:
-			return anthropic.ToolChoiceUnionParam{}, internalapi.ErrUnsupportedToolFormat
+			return anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: unsupported tool_choice value '%s'", internalapi.ErrInvalidRequestBody, choice)
 		}
 	case openai.ChatCompletionNamedToolChoice:
 		if choice.Type == openai.ToolTypeFunction && choice.Function.Name != "" {
@@ -134,7 +134,7 @@ func translateAnthropicToolChoice(openAIToolChoice *openai.ChatCompletionToolCho
 			}
 		}
 	default:
-		return anthropic.ToolChoiceUnionParam{}, internalapi.ErrUnsupportedToolFormat
+		return anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: tool_choice type not supported", internalapi.ErrInvalidRequestBody)
 	}
 	return toolChoice, nil
 }
@@ -163,7 +163,7 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 			if openAITool.Function.Parameters != nil {
 				paramsMap, ok := openAITool.Function.Parameters.(map[string]any)
 				if !ok {
-					err = internalapi.ErrUnsupportedToolFormat
+					err = fmt.Errorf("%w: tool parameters must be a JSON object", internalapi.ErrInvalidRequestBody)
 					return
 				}
 
@@ -173,10 +173,10 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 				// If the paramsMap contains $refs we need to dereference them
 				var dereferencedParamsMap any
 				if dereferencedParamsMap, err = jsonSchemaDereference(paramsMap); err != nil {
-					return nil, anthropic.ToolChoiceUnionParam{}, internalapi.ErrUnsupportedToolFormat
+					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: failed to dereference JSON schema in tool parameters", internalapi.ErrInvalidRequestBody)
 				}
 				if paramsMap, ok = dereferencedParamsMap.(map[string]any); !ok {
-					return nil, anthropic.ToolChoiceUnionParam{}, internalapi.ErrUnsupportedToolFormat
+					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: dereferenced tool parameters must be a JSON object", internalapi.ErrInvalidRequestBody)
 				}
 
 				var typeVal string
@@ -617,7 +617,7 @@ func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest) (params *anth
 	// 1. Handle simple parameters and defaults.
 	maxTokens := cmp.Or(openAIReq.MaxCompletionTokens, openAIReq.MaxTokens)
 	if maxTokens == nil {
-		err = internalapi.ErrMissingRequiredField
+		err = fmt.Errorf("%w: max_tokens or max_completion_tokens is required", internalapi.ErrInvalidRequestBody)
 		return
 	}
 

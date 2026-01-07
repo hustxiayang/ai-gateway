@@ -268,7 +268,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, invalidTempReq, false)
-		require.ErrorIs(t, err, internalapi.ErrInvalidParameterValue)
+		require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 	})
 
 	t.Run("Invalid Temperature (below bound)", func(t *testing.T) {
@@ -280,7 +280,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, invalidTempReq, false)
-		require.ErrorIs(t, err, internalapi.ErrInvalidParameterValue)
+		require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 	})
 
 	// Test for missing required parameter.
@@ -292,7 +292,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, missingTokensReq, false)
-		require.ErrorIs(t, err, internalapi.ErrMissingRequiredField)
+		require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 	})
 	t.Run("API Version Override", func(t *testing.T) {
 		customAPIVersion := "bedrock-2023-05-31"
@@ -1841,7 +1841,7 @@ func TestToolParameterDereferencing(t *testing.T) {
 
 			if tt.expectErr {
 				require.Error(t, err)
-				require.ErrorIs(t, err, internalapi.ErrUnsupportedToolFormat)
+				require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
 				return
 			}
 

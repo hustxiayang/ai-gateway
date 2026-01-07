@@ -1840,7 +1840,7 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBodyErr(t *testing.
 				},
 				ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: 123},
 			},
-			err: internalapi.ErrUnsupportedToolFormat,
+			err: internalapi.ErrInvalidRequestBody,
 		},
 	}
 	for _, tt := range tests {

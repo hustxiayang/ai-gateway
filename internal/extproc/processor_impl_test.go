@@ -8,6 +8,7 @@ package extproc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -101,7 +102,7 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.True(t, ok, "Response should be an immediate response")
 		require.Equal(t, typev3.StatusCode(400), immediateResp.ImmediateResponse.Status.Code)
 		// The response body should only contain the safe error message, not internal details
-		require.Equal(t, "invalid request body format", string(immediateResp.ImmediateResponse.Body))
+		require.Equal(t, "invalid request body", string(immediateResp.ImmediateResponse.Body))
 	})
 
 	t.Run("ok", func(t *testing.T) {
@@ -477,8 +478,8 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-				// Return a safe user-facing error directly (not wrapped)
-				tr := &mockTranslator{t: t, retErr: internalapi.ErrInvalidModelSchema, expRequestBody: &body}
+// Return a safe user-facing error with details
+				tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody), expRequestBody: &body}
 				mm := &mockMetrics{}
 				p := &chatCompletionProcessorUpstreamFilter{
 					parent: &chatCompletionProcessorRouterFilter{
@@ -503,7 +504,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				require.True(t, ok, "Response should be an immediate response")
 				require.Equal(t, typev3.StatusCode(422), immediateResp.ImmediateResponse.Status.Code)
 				// The response body should only contain the safe error message, not internal details
-				require.Equal(t, "request schema incompatible with target API", string(immediateResp.ImmediateResponse.Body))
+				require.Equal(t, "invalid request body: missing required field", string(immediateResp.ImmediateResponse.Body))
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)
