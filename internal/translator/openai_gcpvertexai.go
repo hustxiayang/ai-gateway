@@ -108,7 +108,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) RequestBody(_ []byte, op
 	}
 	newBody, err = json.Marshal(gcpReq)
 	if err != nil {
-		// Internal marshaling error - keep as internal (shouldn't happen in practice)
 		return nil, nil, fmt.Errorf("error marshaling Gemini request: %w", err)
 	}
 	newHeaders = []internalapi.Header{

@@ -143,7 +143,6 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) RequestBody(_ []byte, ope
 
 	newBody, err = json.Marshal(bedrockReq)
 	if err != nil {
-		// Internal marshaling error - keep as internal (shouldn't happen in practice)
 		return nil, nil, fmt.Errorf("failed to marshal body: %w", err)
 	}
 	newHeaders = []internalapi.Header{

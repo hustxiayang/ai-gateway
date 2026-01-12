@@ -700,7 +700,6 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, o
 
 	body, err := json.Marshal(params)
 	if err != nil {
-		// Internal marshaling error - keep as internal (shouldn't happen in practice)
 		return nil, nil, fmt.Errorf("failed to marshal params: %w", err)
 	}
 
