@@ -1622,11 +1622,12 @@ func TestFinishReasonTranslation(t *testing.T) {
 // for tool parameters when translating from OpenAI to GCP Anthropic.
 func TestToolParameterDereferencing(t *testing.T) {
 	tests := []struct {
-		name               string
-		openAIReq          *openai.ChatCompletionRequest
-		expectedTools      []anthropic.ToolUnionParam
-		expectedToolChoice anthropic.ToolChoiceUnionParam
-		expectErr          bool
+		name                string
+		openAIReq           *openai.ChatCompletionRequest
+		expectedTools       []anthropic.ToolUnionParam
+		expectedToolChoice  anthropic.ToolChoiceUnionParam
+		expectErr           bool
+		expectUserFacingErr bool
 	}{
 		{
 			name: "tool with complex nested $ref - successful dereferencing",
@@ -1841,7 +1842,9 @@ func TestToolParameterDereferencing(t *testing.T) {
 
 			if tt.expectErr {
 				require.Error(t, err)
-				require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+				if tt.expectUserFacingErr {
+					require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+				}
 				return
 			}
 

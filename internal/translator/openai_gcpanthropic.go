@@ -173,10 +173,10 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 				// If the paramsMap contains $refs we need to dereference them
 				var dereferencedParamsMap any
 				if dereferencedParamsMap, err = jsonSchemaDereference(paramsMap); err != nil {
-					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: failed to dereference JSON schema in tool parameters", internalapi.ErrInvalidRequestBody)
+					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("invalid JSON schema in tool parameters: %w", err)
 				}
 				if paramsMap, ok = dereferencedParamsMap.(map[string]any); !ok {
-					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: dereferenced tool parameters must be a JSON object", internalapi.ErrInvalidRequestBody)
+					return nil, anthropic.ToolChoiceUnionParam{}, fmt.Errorf("%w: tool parameters must be a JSON object", internalapi.ErrInvalidRequestBody)
 				}
 
 				var typeVal string
@@ -240,7 +240,7 @@ func convertImageContentToAnthropic(imageURL string, fields *openai.AnthropicCon
 	case strings.HasPrefix(imageURL, "data:"):
 		contentType, data, err := parseDataURI(imageURL)
 		if err != nil {
-			return anthropic.ContentBlockParamUnion{}, fmt.Errorf("%w: failed to parse image URL", internalapi.ErrInvalidRequestBody)
+			return anthropic.ContentBlockParamUnion{}, fmt.Errorf("%w: invalid image data URI", internalapi.ErrInvalidRequestBody)
 		}
 		base64Data := base64.StdEncoding.EncodeToString(data)
 		if contentType == string(constant.ValueOf[constant.ApplicationPDF]()) {
@@ -334,10 +334,10 @@ func openAIToAnthropicContent(content any) ([]anthropic.ContentBlockParamUnion, 
 			}
 			return contentBlocks, nil
 		default:
-			return nil, fmt.Errorf("%w: unsupported ContentUnion value type: %T", internalapi.ErrInvalidRequestBody, val)
+			return nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
 		}
 	}
-	return nil, fmt.Errorf("%w: unsupported OpenAI content type: %T", internalapi.ErrInvalidRequestBody, content)
+	return nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
 }
 
 // extractSystemPromptFromDeveloperMsg flattens content and checks for cache flags.
@@ -405,13 +405,13 @@ func processAssistantContent(content openai.ChatCompletionAssistantMessageParamC
 				redactedThinkingBlock := anthropic.NewRedactedThinkingBlock(v)
 				return &redactedThinkingBlock, nil
 			case []byte:
-				return nil, fmt.Errorf("%w: GCP Anthropic does not support []byte format for RedactedContent, expected string", internalapi.ErrInvalidRequestBody)
+				return nil, fmt.Errorf("%w: redacted_content must be a string in GCP", internalapi.ErrInvalidRequestBody)
 			default:
-				return nil, fmt.Errorf("%w: unsupported RedactedContent type: %T, expected string", internalapi.ErrInvalidRequestBody, v)
+				return nil, fmt.Errorf("%w: redacted_content must be a string in GCP", internalapi.ErrInvalidRequestBody)
 			}
 		}
 	default:
-		return nil, fmt.Errorf("%w: content type not supported: %v", internalapi.ErrInvalidRequestBody, content.Type)
+		return nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
 	}
 	return nil, nil
 }
@@ -449,7 +449,7 @@ func openAIMessageToAnthropicMessageRoleAssistant(openAiMessage *openai.ChatComp
 		toolCall := &openAiMessage.ToolCalls[i]
 		var input map[string]any
 		if err = json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
-			err = fmt.Errorf("%w: failed to unmarshal tool call arguments", internalapi.ErrInvalidRequestBody)
+			err = fmt.Errorf("failed to unmarshal tool call arguments: %w", err)
 			return
 		}
 		toolUse := anthropic.ToolUseBlockParam{
@@ -582,7 +582,7 @@ func openAIToAnthropicMessages(openAIMsgs []openai.ChatCompletionMessageParamUni
 			}
 			anthropicMessages = append(anthropicMessages, anthropicMsg)
 		default:
-			err = fmt.Errorf("%w: unsupported OpenAI role type: %s", internalapi.ErrInvalidRequestBody, msg.ExtractMessgaeRole())
+			err = fmt.Errorf("%w: unsupported role type: %s", internalapi.ErrInvalidRequestBody, msg.ExtractMessgaeRole())
 			return
 		}
 	}

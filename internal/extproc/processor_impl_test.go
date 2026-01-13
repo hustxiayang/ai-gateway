@@ -8,6 +8,7 @@ package extproc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -514,7 +515,7 @@ require.Contains(t, string(immediateResp.ImmediateResponse.Body), "invalid reque
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-				tr := mockTranslator{t: t, expRequestBody: &body}
+				tr := &mockTranslator{t: t, expRequestBody: &body}
 				mm := &mockMetrics{}
 				// Create a mock auth handler that returns an error
 				authHandler := &mockBackendAuthHandlerError{err: errors.New("authentication failed")}

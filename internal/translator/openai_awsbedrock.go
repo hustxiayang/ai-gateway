@@ -293,7 +293,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 func unmarshalToolCallArguments(arguments string) (map[string]any, error) {
 	var input map[string]any
 	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
-		return nil, fmt.Errorf("%w: failed to unmarshal tool call arguments", internalapi.ErrInvalidRequestBody)
+		return nil, fmt.Errorf("failed to unmarshal tool call arguments: %w", err)
 	}
 	return input, nil
 }
@@ -372,9 +372,9 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 					}
 
 				case string:
-					return nil, fmt.Errorf("%w: AWS Bedrock does not support string format for RedactedContent, expected []byte", internalapi.ErrInvalidRequestBody)
+					return nil, fmt.Errorf("%w: redacted_content must be a binary/bytes value in bedrock", internalapi.ErrInvalidRequestBody)
 				default:
-					return nil, fmt.Errorf("%w: unsupported RedactedContent type %T, expected []byte", internalapi.ErrInvalidRequestBody, v)
+					return nil, fmt.Errorf("%w: redacted_content must be a binary/bytes value in bedrock", internalapi.ErrInvalidRequestBody)
 				}
 			}
 		case openai.ChatCompletionAssistantMessageParamContentTypeRefusal:
@@ -464,7 +464,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 		}
 
 	default:
-		return nil, fmt.Errorf("%w: unexpected content type for tool message: %T", internalapi.ErrInvalidRequestBody, openAiMessage.Content.Value)
+		return nil, fmt.Errorf("%w: message 'content' must be a string or an array", internalapi.ErrInvalidRequestBody)
 	}
 
 	return &awsbedrock.Message{
