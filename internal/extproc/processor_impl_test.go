@@ -443,7 +443,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessRequestHeaders(t *testing
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-tr := &mockTranslator{t: t, retErr: errors.New("internal database error with credentials"), expRequestBody: &body}
+				tr := &mockTranslator{t: t, retErr: errors.New("internal database error with credentials"), expRequestBody: &body}
 				mm := &mockMetrics{}
 				p := &chatCompletionProcessorUpstreamFilter{
 					parent: &chatCompletionProcessorRouterFilter{
@@ -475,7 +475,7 @@ tr := &mockTranslator{t: t, retErr: errors.New("internal database error with cre
 				someBody := bodyFromModel(t, "some-model", tc.stream, nil)
 				var body openai.ChatCompletionRequest
 				require.NoError(t, json.Unmarshal(someBody, &body))
-tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody), expRequestBody: &body}
+				tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody), expRequestBody: &body}
 				mm := &mockMetrics{}
 				p := &chatCompletionProcessorUpstreamFilter{
 					parent: &chatCompletionProcessorRouterFilter{
@@ -498,7 +498,7 @@ tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", int
 				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 				require.True(t, ok, "Response should be an immediate response")
 				require.Equal(t, typev3.StatusCode(422), immediateResp.ImmediateResponse.Status.Code)
-require.Equal(t, "invalid request body: missing required field", string(immediateResp.ImmediateResponse.Body))
+				require.Equal(t, "invalid request body: missing required field", string(immediateResp.ImmediateResponse.Body))
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)

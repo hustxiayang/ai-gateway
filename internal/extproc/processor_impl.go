@@ -306,7 +306,6 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		var hdrs []internalapi.Header
 		hdrs, err = h.Do(ctx, u.requestHeaders, bodyMutation.GetBody())
 		if err != nil {
-			// Return an immediate error response instead of nil
 			errorMsg := fmt.Sprintf("failed to do auth request: %v", err)
 			return &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
@@ -427,7 +426,6 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	}
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
-	// TODO: should it even return a NON-NIL error in the reasponse translation?
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
