@@ -306,16 +306,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		var hdrs []internalapi.Header
 		hdrs, err = h.Do(ctx, u.requestHeaders, bodyMutation.GetBody())
 		if err != nil {
-			errorMsg := fmt.Sprintf("failed to do auth request: %v", err)
-			return &extprocv3.ProcessingResponse{
-				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-					ImmediateResponse: &extprocv3.ImmediateResponse{
-						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(401)},
-						Body:       []byte(errorMsg),
-						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.Unauthenticated)},
-					},
-				},
-			}, fmt.Errorf("failed to do auth request: %w", err)
+			return nil, fmt.Errorf("failed to do auth request: %w", err)
 		}
 		for _, h := range hdrs {
 			headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
