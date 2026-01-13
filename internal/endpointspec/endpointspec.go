@@ -84,8 +84,7 @@ func (ChatCompletionsEndpointSpec) ParseBody(
 ) (internalapi.OriginalModel, *openai.ChatCompletionRequest, bool, []byte, error) {
 	var req openai.ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		// Return safe error type without exposing internal error details
-		return "", nil, false, nil, internalapi.ErrInvalidRequestBody
+		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /v1/chat/completions", internalapi.ErrMalformedRequest)
 	}
 	var mutatedBody []byte
 	if req.Stream && costConfigured && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {

@@ -97,12 +97,10 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.Contains(t, err.Error(), "failed to parse request body")
 		require.NotNil(t, resp, "Response should not be nil")
 
-		// Verify it's an immediate response with the safe error message
 		immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 		require.True(t, ok, "Response should be an immediate response")
 		require.Equal(t, typev3.StatusCode(400), immediateResp.ImmediateResponse.Status.Code)
-		// The response body should only contain the safe error message, not internal details
-		require.Equal(t, "invalid request body format", string(immediateResp.ImmediateResponse.Body))
+		require.Equal(t, "malformed request: failed to parse JSON for /v1/chat/completions", string(immediateResp.ImmediateResponse.Body))
 	})
 
 	t.Run("ok", func(t *testing.T) {
@@ -497,12 +495,10 @@ tr := &mockTranslator{t: t, retErr: fmt.Errorf("%w: missing required field", int
 				require.Contains(t, err.Error(), "failed to transform request")
 				require.NotNil(t, resp, "Response should not be nil")
 
-				// Verify it's an immediate response with the safe error message
 				immediateResp, ok := resp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
 				require.True(t, ok, "Response should be an immediate response")
 				require.Equal(t, typev3.StatusCode(422), immediateResp.ImmediateResponse.Status.Code)
-require.Contains(t, string(immediateResp.ImmediateResponse.Body), "invalid request body")
-				require.Contains(t, string(immediateResp.ImmediateResponse.Body), "missing required field")
+require.Equal(t, "invalid request body: missing required field", string(immediateResp.ImmediateResponse.Body))
 
 				mm.RequireRequestFailure(t)
 				require.Zero(t, mm.inputTokenCount)

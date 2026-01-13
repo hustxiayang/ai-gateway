@@ -8,7 +8,6 @@ package extproc
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -168,30 +167,19 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespons
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
 	originalModel, body, stream, mutatedOriginalBody, err := r.eh.ParseBody(rawBody.Body, len(r.config.RequestCosts) > 0)
 	if err != nil {
-		// Check if this is a user-facing error that's safe to expose
-		var safeErr error
-		switch {
-		case errors.Is(err, internalapi.ErrInvalidRequestBody):
-			safeErr = internalapi.ErrInvalidRequestBody
-		case errors.Is(err, internalapi.ErrMissingRequiredField):
-			safeErr = internalapi.ErrMissingRequiredField
-		case errors.Is(err, internalapi.ErrInvalidModelSchema):
-			safeErr = internalapi.ErrInvalidModelSchema
-		default:
-			// Unknown/internal error - don't expose details to user, use normal error path
-			return nil, fmt.Errorf("failed to parse request body: %w", err)
-		}
-
-		// Safe to return to user as 400 - use the error's message directly
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-				ImmediateResponse: &extprocv3.ImmediateResponse{
-					Status:     &typev3.HttpStatus{Code: typev3.StatusCode(400)},
-					Body:       []byte(safeErr.Error()),
-					GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
+		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
+			// return to user as 400 -  e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
+			return &extprocv3.ProcessingResponse{
+				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+					ImmediateResponse: &extprocv3.ImmediateResponse{
+						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(400)},
+						Body:       []byte(userFacingErr.Error()),
+						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
+					},
 				},
-			},
-		}, fmt.Errorf("failed to parse request body: %w", err)
+			}, fmt.Errorf("failed to parse request body: %w", err)
+		}
+		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 	if mutatedOriginalBody != nil {
 		r.originalRequestBodyRaw = mutatedOriginalBody
@@ -269,30 +257,19 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	forceBodyMutation := u.onRetry() || u.parent.forceBodyMutation
 	newHeaders, newBody, err := u.translator.RequestBody(u.parent.originalRequestBodyRaw, u.parent.originalRequestBody, forceBodyMutation)
 	if err != nil {
-		// Check if this is a user-facing error that's safe to expose
-		var safeErr error
-		switch {
-		case errors.Is(err, internalapi.ErrInvalidRequestBody):
-			safeErr = internalapi.ErrInvalidRequestBody
-		case errors.Is(err, internalapi.ErrMissingRequiredField):
-			safeErr = internalapi.ErrMissingRequiredField
-		case errors.Is(err, internalapi.ErrInvalidModelSchema):
-			safeErr = internalapi.ErrInvalidModelSchema
-		default:
-			// Unknown/internal error - don't expose details to user, use normal error path
-			return nil, fmt.Errorf("failed to transform request: %w", err)
-		}
-
-		// Safe to return to user as 422 - use the error's message directly
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-				ImmediateResponse: &extprocv3.ImmediateResponse{
-					Status:     &typev3.HttpStatus{Code: typev3.StatusCode(422)},
-					Body:       []byte(safeErr.Error()),
-					GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
+		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
+			// return to user as 422 -  e.g., "invalid request body: tool_choice type not supported"
+			return &extprocv3.ProcessingResponse{
+				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+					ImmediateResponse: &extprocv3.ImmediateResponse{
+						Status:     &typev3.HttpStatus{Code: typev3.StatusCode(422)},
+						Body:       []byte(userFacingErr.Error()),
+						GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
+					},
 				},
-			},
-		}, fmt.Errorf("failed to transform request: %w", err)
+			}, fmt.Errorf("failed to transform request: %w", err)
+		}
+		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
 
 	headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
