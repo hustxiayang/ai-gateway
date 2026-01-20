@@ -203,7 +203,7 @@ func TestUnmarshalJSONNestedUnion_Errors(t *testing.T) {
 		{
 			name:        "mixed array with empty element",
 			data:        []byte(`["text",   ,"more"]`),
-			expectedErr: "invalid chars",
+			expectedErr: "invalid char", // sonic error message varies by platform (char vs chars)
 		},
 		{
 			name:        "mixed array with invalid object",
