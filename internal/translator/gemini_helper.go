@@ -287,7 +287,7 @@ func assistantMsgToGeminiParts(msg *openai.ChatCompletionAssistantMessageParam) 
 
 		funcCallPart := genai.NewPartFromFunctionCall(toolCall.Function.Name, parsedArgs)
 
-		// Attach signature to FIRST tool call if signature exists
+		// According to https://ai.google.dev/gemini-api/docs/thought-signatures, if the model generates parallel function calls in a response, the thought_signature is attached only to the first functionCall part. Subsequent  functionCall parts in the same response will not contain a signature.
 		if i == 0 && thoughtSignature != nil {
 			funcCallPart.ThoughtSignature = thoughtSignature
 		}
