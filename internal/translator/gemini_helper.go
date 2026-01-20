@@ -779,7 +779,7 @@ func geminiCandidatesToOpenAIChoices(candidates []*genai.Candidate, responseMode
 			}
 			message.ToolCalls = toolCalls
 
-			// // when the model responds with tool calls, it should not respond with a text at the same time. Thus, we do not need to merge them together
+			// when the model responds with tool calls, it should not respond with a text at the same time. Thus, we do not need to merge them together
 			if toolCallSignature != "" {
 				signature = toolCallSignature
 				if message.ReasoningContent != nil {
