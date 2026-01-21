@@ -39,24 +39,42 @@ type openAIToGCPVertexAITranslatorV1Embedding struct {
 	modelNameOverride internalapi.ModelNameOverride
 }
 
-// createInstanceFromEmbeddingInputItem converts an EmbeddingInputItem to a GCP Instance.
+// createInstancesFromEmbeddingInputItem converts an EmbeddingInputItem to GCP Instance(s).
 // This handles the mapping of OpenAI's extended embedding input format to GCP's instance format,
 // including task_type and title metadata for optimized embedding generation.
-func createInstanceFromEmbeddingInputItem(item openai.EmbeddingInputItem) *gcp.Instance {
-	instance := &gcp.Instance{Content: item.Content}
-	if item.TaskType != "" {
-		instance.TaskType = item.TaskType
+// When content is an array of strings, each string becomes a separate instance with the same task_type.
+func createInstancesFromEmbeddingInputItem(item openai.EmbeddingInputItem, instances []*gcp.Instance) []*gcp.Instance {
+	switch v := item.Content.Value.(type) {
+	case string:
+		instance := &gcp.Instance{Content: v}
+		if item.TaskType != "" {
+			instance.TaskType = item.TaskType
+		}
+		// Title is only valid with task_type=RETRIEVAL_DOCUMENT.
+		// See: https://cloud.google.com/vertex-ai/generative-ai/docs/embeddings/task-types
+		if item.TaskType == openai.EmbeddingTaskTypeRetrievalDocument && item.Title != "" {
+			instance.Title = item.Title
+		}
+		instances = append(instances, instance)
+	case []string:
+		// Multiple strings with the same task_type - each becomes a separate instance
+		for _, text := range v {
+			instance := &gcp.Instance{Content: text}
+			if item.TaskType != "" {
+				instance.TaskType = item.TaskType
+			}
+			// Title is only valid with task_type=RETRIEVAL_DOCUMENT.
+			if item.TaskType == openai.EmbeddingTaskTypeRetrievalDocument && item.Title != "" {
+				instance.Title = item.Title
+			}
+			instances = append(instances, instance)
+		}
 	}
-	// Title is only valid with task_type=RETRIEVAL_DOCUMENT.
-	// See: https://cloud.google.com/vertex-ai/generative-ai/docs/embeddings/task-types
-	if item.TaskType == openai.EmbeddingTaskTypeRetrievalDocument && item.Title != "" {
-		instance.Title = item.Title
-	}
-	return instance
+	return instances
 }
 
 // setInstances converts OpenAI embedding input to GCP instances.
-// It handles multiple input formats: string, []string, EmbeddingInputItem, []EmbeddingInputItem, and mixed arrays.
+// It handles multiple input formats: string, []string, EmbeddingInputItem, []EmbeddingInputItem.
 // Each input element is converted to a separate GCP Instance for batch embedding generation.
 func setInstances(input openai.EmbeddingRequestInput, instances []*gcp.Instance) ([]*gcp.Instance, error) {
 	switch v := input.Value.(type) {
@@ -71,29 +89,17 @@ func setInstances(input openai.EmbeddingRequestInput, instances []*gcp.Instance)
 		return instances, nil
 	case openai.EmbeddingInputItem:
 		// Single EmbeddingInputItem with enhanced metadata.
-		instances = append(instances, createInstanceFromEmbeddingInputItem(v))
+		// Content can be string or []string.
+		instances = createInstancesFromEmbeddingInputItem(v, instances)
 		return instances, nil
 	case []openai.EmbeddingInputItem:
 		// Array of EmbeddingInputItem objects with metadata support.
 		for _, item := range v {
-			instances = append(instances, createInstanceFromEmbeddingInputItem(item))
-		}
-		return instances, nil
-	case []interface{}:
-		// Mixed array of strings and EmbeddingInputItem objects.
-		for _, item := range v {
-			switch typedItem := item.(type) {
-			case string:
-				instances = append(instances, &gcp.Instance{Content: typedItem})
-			case openai.EmbeddingInputItem:
-				instances = append(instances, createInstanceFromEmbeddingInputItem(typedItem))
-			default:
-				return nil, fmt.Errorf("unsupported item type in mixed array: %T", typedItem)
-			}
+			instances = createInstancesFromEmbeddingInputItem(item, instances)
 		}
 		return instances, nil
 	default:
-		return nil, fmt.Errorf("unsupported input type for embedding: %T (supported: string, []string, EmbeddingInputItem, []EmbeddingInputItem, mixed array)", v)
+		return nil, fmt.Errorf("unsupported input type for embedding: %T (supported: string, []string, EmbeddingInputItem, []EmbeddingInputItem)", v)
 	}
 }
 
@@ -229,7 +235,7 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseBody(_ map[string]str
 				// Extract token count from statistics if available.
 				if prediction.Embeddings.Statistics != nil {
 					// Accumulate token counts across all predictions.
-					promptTokens += int(prediction.Embeddings.Statistics.TokenCount)
+					promptTokens += prediction.Embeddings.Statistics.TokenCount
 					// Propagate truncation information to the response.
 					openaiResp.Data[i].Truncated = prediction.Embeddings.Statistics.Truncated
 				}

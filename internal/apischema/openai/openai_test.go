@@ -1705,7 +1705,7 @@ func TestEmbeddingRequestInputRoundTrip(t *testing.T) {
 		{
 			name: "EmbeddingInputItem",
 			input: EmbeddingRequestInput{Value: EmbeddingInputItem{
-				Content:  "test content",
+				Content:  EmbeddingContent{Value: "test content"},
 				TaskType: "RETRIEVAL_QUERY",
 				Title:    "Test Title",
 			}},
@@ -1713,15 +1713,8 @@ func TestEmbeddingRequestInputRoundTrip(t *testing.T) {
 		{
 			name: "array of EmbeddingInputItem",
 			input: EmbeddingRequestInput{Value: []EmbeddingInputItem{
-				{Content: "first", TaskType: "RETRIEVAL_QUERY"},
-				{Content: "second", TaskType: "RETRIEVAL_DOCUMENT", Title: "Doc"},
-			}},
-		},
-		{
-			name: "mixed array",
-			input: EmbeddingRequestInput{Value: []any{
-				"plain text",
-				EmbeddingInputItem{Content: "structured", TaskType: "RETRIEVAL_QUERY"},
+				{Content: EmbeddingContent{Value: "first"}, TaskType: "RETRIEVAL_QUERY"},
+				{Content: EmbeddingContent{Value: "second"}, TaskType: "RETRIEVAL_DOCUMENT", Title: "Doc"},
 			}},
 		},
 	}

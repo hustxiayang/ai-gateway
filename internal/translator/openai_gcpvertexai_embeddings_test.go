@@ -67,7 +67,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 				Model: "text-embedding-004",
 				Input: openai.EmbeddingRequestInput{
 					Value: openai.EmbeddingInputItem{
-						Content:  "This is a document for retrieval",
+						Content:  openai.EmbeddingContent{Value: "This is a document for retrieval"},
 						TaskType: "RETRIEVAL_DOCUMENT",
 						Title:    "Document Title",
 					},
@@ -89,11 +89,11 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 				Input: openai.EmbeddingRequestInput{
 					Value: []openai.EmbeddingInputItem{
 						{
-							Content:  "Query about cats",
+							Content:  openai.EmbeddingContent{Value: "Query about cats"},
 							TaskType: "RETRIEVAL_QUERY",
 						},
 						{
-							Content:  "Document about dogs",
+							Content:  openai.EmbeddingContent{Value: "Document about dogs"},
 							TaskType: "RETRIEVAL_DOCUMENT",
 							Title:    "Dog Info",
 						},
@@ -112,31 +112,6 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 			},
 		},
 		{
-			name: "embedding request with mixed array (strings and objects)",
-			input: openai.EmbeddingRequest{
-				Model: "text-embedding-004",
-				Input: openai.EmbeddingRequestInput{
-					Value: []interface{}{
-						"Simple string text",
-						openai.EmbeddingInputItem{
-							Content:  "Enhanced text with metadata",
-							TaskType: "RETRIEVAL_DOCUMENT",
-							Title:    "Similarity Test",
-						},
-					},
-				},
-			},
-			wantPath: "publishers/google/models/text-embedding-004:predict",
-			wantBodyContains: []string{
-				`"instances"`,
-				`"content":"Simple string text"`,
-				`"content":"Enhanced text with metadata"`,
-				`"task_type":"RETRIEVAL_DOCUMENT"`,
-				`"title":"Similarity Test"`,
-				`"parameters"`,
-			},
-		},
-		{
 			name: "embedding request with dimensions parameter",
 			input: openai.EmbeddingRequest{
 				Model: "text-embedding-004",
@@ -150,7 +125,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 				`"instances"`,
 				`"content":"Text for dimension testing"`,
 				`"parameters"`,
-				`"out_dimensionality":256`,
+				`"outputDimensionality":256`,
 			},
 		},
 		{
@@ -159,7 +134,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 				Model: "text-embedding-004",
 				Input: openai.EmbeddingRequestInput{
 					Value: openai.EmbeddingInputItem{
-						Content:  "Text for similarity check",
+						Content:  openai.EmbeddingContent{Value: "Text for similarity check"},
 						TaskType: "SEMANTIC_SIMILARITY",
 						Title:    "This title should not appear",
 					},
@@ -199,11 +174,11 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 				Input: openai.EmbeddingRequestInput{
 					Value: []openai.EmbeddingInputItem{
 						{
-							Content:  "Query text",
+							Content:  openai.EmbeddingContent{Value: "Query text"},
 							TaskType: "RETRIEVAL_DOCUMENT", // This should be overridden
 						},
 						{
-							Content: "Another text",
+							Content: openai.EmbeddingContent{Value: "Another text"},
 							// No task type specified
 						},
 					},
@@ -300,7 +275,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [0.1, 0.2, 0.3, 0.4, 0.5],
 							"statistics": {
-								"tokenCount": 5,
+								"token_count": 5,
 								"truncated": false
 							}
 						}
@@ -349,7 +324,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [],
 							"statistics": {
-								"tokenCount": 3,
+								"token_count": 3,
 								"truncated": false
 							}
 						}
@@ -389,7 +364,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [0.1, 0.2, 0.3],
 							"statistics": {
-								"tokenCount": 3,
+								"token_count": 3,
 								"truncated": false
 							}
 						}
@@ -398,7 +373,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [0.4, 0.5, 0.6],
 							"statistics": {
-								"tokenCount": 4,
+								"token_count": 4,
 								"truncated": false
 							}
 						}
@@ -407,7 +382,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [0.7, 0.8, 0.9],
 							"statistics": {
-								"tokenCount": 5,
+								"token_count": 5,
 								"truncated": true
 							}
 						}
@@ -452,7 +427,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseBody(t *testing.T) {
 						"embeddings": {
 							"values": [0.1, 0.2],
 							"statistics": {
-								"tokenCount": 10,
+								"token_count": 10,
 								"truncated": true
 							}
 						}
@@ -599,8 +574,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseError(t *testing.T) {
 		{
 			name: "plain text error response",
 			headers: map[string]string{
-				statusHeaderName:      "503",
-				contentTypeHeaderName: "text/plain",
+				statusHeaderName: "503",
 			},
 			body: "Service temporarily unavailable",
 			wantError: openai.Error{
@@ -683,7 +657,7 @@ func TestResponseModel_GCPVertexAIEmbeddings(t *testing.T) {
 				"embeddings": {
 					"values": [0.1, 0.2, 0.3],
 					"statistics": {
-						"tokenCount": 3,
+						"token_count": 3,
 						"truncated": false
 					}
 				}

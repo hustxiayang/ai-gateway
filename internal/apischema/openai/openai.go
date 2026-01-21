@@ -312,9 +312,47 @@ func (c ContentUnion) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.Value)
 }
 
+// EmbeddingContent represents content that can be either a string or an array of strings.
+// This allows embedding inputs to specify multiple texts with a shared task_type.
+type EmbeddingContent struct {
+	Value any // string or []string
+}
+
+func (c *EmbeddingContent) UnmarshalJSON(data []byte) error {
+	// Try string first
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		c.Value = str
+		return nil
+	}
+	// Try array of strings
+	var strs []string
+	if err := json.Unmarshal(data, &strs); err == nil {
+		c.Value = strs
+		return nil
+	}
+	return fmt.Errorf("content must be string or array of strings")
+}
+
+func (c EmbeddingContent) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.Value)
+}
+
+// IsEmpty returns true if the content is empty (no string or empty string, no array or empty array)
+func (c EmbeddingContent) IsEmpty() bool {
+	switch v := c.Value.(type) {
+	case string:
+		return v == ""
+	case []string:
+		return len(v) == 0
+	default:
+		return true
+	}
+}
+
 // EmbeddingInputItem represents a single embedding input with optional metadata
 type EmbeddingInputItem struct {
-	Content  string            `json:"content"`             // The actual text content
+	Content  EmbeddingContent  `json:"content"`             // The actual text content (string or []string)
 	TaskType EmbeddingTaskType `json:"task_type,omitempty"` // Optional task type
 	Title    string            `json:"title,omitempty"`     // Optional title
 }
@@ -325,8 +363,8 @@ type EmbeddingRequestInput struct {
 }
 
 func (s *EmbeddingRequestInput) UnmarshalJSON(data []byte) (err error) {
-	// reuse the nested union implementation vs creating a new one.
-	s.Value, err = unmarshalJSONNestedUnion("input", data)
+	// Use embedding-specific parser that supports objects with content/task_type/title
+	s.Value, err = unmarshalJSONEmbeddingInput("input", data)
 	if err != nil {
 		return
 	}
