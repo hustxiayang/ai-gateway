@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -18,30 +17,32 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
-	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
+	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
-// NewChatCompletionOpenAIToAwsOpenAITranslator implements [Factory] for OpenAI to Aws OpenAI translations.
-func NewChatCompletionOpenAIToAwsOpenAITranslator(modelNameOverride internalapi.ModelNameOverride) OpenAIChatCompletionTranslator {
-	return &openAIToAwsOpenAITranslatorV1ChatCompletion{
+// NewChatCompletionOpenAIToAWSInvokeOpenAITranslator implements [Factory] for OpenAI to AWS InvokeModel OpenAI translations.
+func NewChatCompletionOpenAIToAWSInvokeOpenAITranslator(modelNameOverride internalapi.ModelNameOverride) OpenAIChatCompletionTranslator {
+	return &openAIToAWSInvokeOpenAITranslatorV1ChatCompletion{
 		openAIToOpenAITranslatorV1ChatCompletion: openAIToOpenAITranslatorV1ChatCompletion{
 			modelNameOverride: modelNameOverride,
 		},
 	}
 }
 
-// openAIToAwsOpenAITranslatorV1ChatCompletion adapts OpenAI requests for AWS Bedrock InvokeModel API.
+// openAIToAWSInvokeOpenAITranslatorV1ChatCompletion adapts OpenAI requests for AWS Bedrock InvokeModel API.
 // This uses the InvokeModel API which accepts model-specific request/response formats.
 // For OpenAI models, this preserves the OpenAI format but uses AWS Bedrock endpoints.
-type openAIToAwsOpenAITranslatorV1ChatCompletion struct {
+type openAIToAWSInvokeOpenAITranslatorV1ChatCompletion struct {
 	openAIToOpenAITranslatorV1ChatCompletion
 	responseID string
 }
 
-func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) RequestBody(raw []byte, req *openai.ChatCompletionRequest, _ bool) (
+func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) RequestBody(raw []byte, req *openai.ChatCompletionRequest, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
 	// Store request model and streaming state
@@ -91,7 +92,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) RequestBody(raw []byte, re
 }
 
 // ResponseHeaders implements [OpenAIChatCompletionTranslator.ResponseHeaders].
-func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseHeaders(headers map[string]string) (
+func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) ResponseHeaders(headers map[string]string) (
 	newHeaders []internalapi.Header, err error,
 ) {
 	// Store the response ID for tracking
@@ -112,7 +113,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseHeaders(headers ma
 // ResponseBody implements [OpenAIChatCompletionTranslator.ResponseBody].
 // For streaming responses, AWS returns binary EventStream format with base64-encoded OpenAI JSON.
 // This method decodes the EventStream and converts it to OpenAI SSE format to send to the client.
-func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracing.ChatCompletionSpan) (
+func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.ChatCompletionSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if o.stream {
@@ -175,7 +176,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]
 // convertEventStreamToSSE decodes AWS EventStream binary format and converts to OpenAI SSE format.
 // AWS EventStream contains base64-encoded OpenAI JSON in a "bytes" field.
 // Returns the SSE data and extracted token usage.
-func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) convertEventStreamToSSE(data []byte, span tracing.ChatCompletionSpan) ([]byte, metrics.TokenUsage, error) {
+func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) convertEventStreamToSSE(data []byte, span tracingapi.ChatCompletionSpan) ([]byte, metrics.TokenUsage, error) {
 	var tokenUsage metrics.TokenUsage
 
 	if len(data) == 0 {
@@ -244,7 +245,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) convertEventStreamToSSE(da
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
 // Translates AWS Bedrock InvokeModel exceptions to OpenAI error format.
 // The error type is typically stored in the "x-amzn-errortype" HTTP header for AWS error responses.
-func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
+func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
@@ -266,17 +267,13 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders 
 			newBody = buf
 		} else {
 			// Try to parse as AWS error and convert to OpenAI format
-			var awsError struct {
-				Type    string `json:"__type,omitempty"`
-				Message string `json:"message"`
-				Code    string `json:"code,omitempty"`
-			}
-			if json.Unmarshal(buf, &awsError) == nil && awsError.Message != "" {
+			var bedrockError awsbedrock.BedrockException
+			if json.Unmarshal(buf, &bedrockError) == nil && bedrockError.Message != "" {
 				openaiError = openai.Error{
 					Type: "error",
 					Error: openai.ErrorType{
 						Type:    respHeaders[awsErrorTypeHeaderName],
-						Message: awsError.Message,
+						Message: bedrockError.Message,
 						Code:    &statusCode,
 					},
 				}
@@ -285,7 +282,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders 
 				openaiError = openai.Error{
 					Type: "error",
 					Error: openai.ErrorType{
-						Type:    awsInvokeModelBackendError,
+						Type:    awsBedrockBackendError,
 						Message: string(buf),
 						Code:    &statusCode,
 					},
@@ -306,7 +303,7 @@ func (o *openAIToAwsOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders 
 		openaiError = openai.Error{
 			Type: "error",
 			Error: openai.ErrorType{
-				Type:    awsInvokeModelBackendError,
+				Type:    awsBedrockBackendError,
 				Message: string(buf),
 				Code:    &statusCode,
 			},

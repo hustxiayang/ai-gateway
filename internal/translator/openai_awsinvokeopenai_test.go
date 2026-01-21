@@ -8,7 +8,6 @@ package translator
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -22,9 +21,10 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_RequestBody(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_RequestBody(t *testing.T) {
 	tests := []struct {
 		name              string
 		input             openai.ChatCompletionRequest
@@ -221,7 +221,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_RequestBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			translator := NewChatCompletionOpenAIToAwsOpenAITranslator(tt.modelNameOverride)
+			translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator(tt.modelNameOverride)
 
 			// Marshal input to JSON
 			rawBody, err := json.Marshal(tt.input)
@@ -275,7 +275,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_RequestBody(t *testing.T) {
 	}
 }
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseHeaders(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_ResponseHeaders(t *testing.T) {
 	tests := []struct {
 		name            string
 		inputHeaders    map[string]string
@@ -315,7 +315,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseHeaders(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			translator := NewChatCompletionOpenAIToAwsOpenAITranslator("").(*openAIToAwsOpenAITranslatorV1ChatCompletion)
+			translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator("").(*openAIToAWSInvokeOpenAITranslatorV1ChatCompletion)
 			translator.stream = tt.isStreaming
 
 			headers, err := translator.ResponseHeaders(tt.inputHeaders)
@@ -332,7 +332,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseHeaders(t *testing.
 }
 
 // Helper function to create AWS EventStream binary data
-func createEventStreamMessage(t *testing.T, chunk openai.ChatCompletionResponseChunk) []byte {
+func createEventStreamMessage(t *testing.T, chunk *openai.ChatCompletionResponseChunk) []byte {
 	t.Helper()
 
 	// Marshal the chunk to JSON
@@ -368,7 +368,7 @@ func createEventStreamMessage(t *testing.T, chunk openai.ChatCompletionResponseC
 	return buf.Bytes()
 }
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_ResponseBody(t *testing.T) {
 	tests := []struct {
 		name                   string
 		isStreaming            bool
@@ -435,7 +435,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			translator := NewChatCompletionOpenAIToAwsOpenAITranslator("").(*openAIToAwsOpenAITranslatorV1ChatCompletion)
+			translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator("").(*openAIToAWSInvokeOpenAITranslatorV1ChatCompletion)
 			translator.stream = tt.isStreaming
 			translator.requestModel = "gpt-4"
 			translator.responseID = "test-request-id"
@@ -491,9 +491,9 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody(t *testing.T) 
 	}
 }
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody_EventStream(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_ResponseBody_EventStream(t *testing.T) {
 	t.Run("streaming response with EventStream format", func(t *testing.T) {
-		translator := NewChatCompletionOpenAIToAwsOpenAITranslator("").(*openAIToAwsOpenAITranslatorV1ChatCompletion)
+		translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator("").(*openAIToAWSInvokeOpenAITranslatorV1ChatCompletion)
 		translator.stream = true
 		translator.requestModel = "gpt-4"
 		translator.responseID = "test-request-id"
@@ -556,9 +556,9 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody_EventStream(t 
 
 		// Create EventStream messages
 		eventStreamData := bytes.NewBuffer(nil)
-		eventStreamData.Write(createEventStreamMessage(t, chunk1))
-		eventStreamData.Write(createEventStreamMessage(t, chunk2))
-		eventStreamData.Write(createEventStreamMessage(t, chunk3))
+		eventStreamData.Write(createEventStreamMessage(t, &chunk1))
+		eventStreamData.Write(createEventStreamMessage(t, &chunk2))
+		eventStreamData.Write(createEventStreamMessage(t, &chunk3))
 
 		// Call ResponseBody
 		headers := map[string]string{}
@@ -627,7 +627,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody_EventStream(t 
 	})
 
 	t.Run("streaming with empty EventStream", func(t *testing.T) {
-		translator := NewChatCompletionOpenAIToAwsOpenAITranslator("").(*openAIToAwsOpenAITranslatorV1ChatCompletion)
+		translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator("").(*openAIToAWSInvokeOpenAITranslatorV1ChatCompletion)
 		translator.stream = true
 		translator.requestModel = "gpt-4"
 
@@ -652,7 +652,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseBody_EventStream(t 
 	})
 }
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseError(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_ResponseError(t *testing.T) {
 	tests := []struct {
 		name            string
 		inputHeaders    map[string]string
@@ -729,7 +729,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseError(t *testing.T)
 			expectedError: openai.Error{
 				Type: "error",
 				Error: openai.ErrorType{
-					Type:    awsInvokeModelBackendError,
+					Type:    awsBedrockBackendError,
 					Message: "Service Unavailable",
 					Code:    ptr.To("503"),
 				},
@@ -739,7 +739,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseError(t *testing.T)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			translator := NewChatCompletionOpenAIToAwsOpenAITranslator("").(*openAIToAwsOpenAITranslatorV1ChatCompletion)
+			translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator("").(*openAIToAWSInvokeOpenAITranslatorV1ChatCompletion)
 
 			body := strings.NewReader(tt.inputBody)
 
@@ -765,7 +765,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ResponseError(t *testing.T)
 	}
 }
 
-func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ModelNameEncoding(t *testing.T) {
+func TestOpenAIToAWSInvokeOpenAITranslatorV1ChatCompletion_ModelNameEncoding(t *testing.T) {
 	tests := []struct {
 		name         string
 		modelName    string
@@ -790,7 +790,7 @@ func TestOpenAIToAwsOpenAITranslatorV1ChatCompletion_ModelNameEncoding(t *testin
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			translator := NewChatCompletionOpenAIToAwsOpenAITranslator(tt.modelName)
+			translator := NewChatCompletionOpenAIToAWSInvokeOpenAITranslator(tt.modelName)
 
 			input := openai.ChatCompletionRequest{
 				Stream: false,
