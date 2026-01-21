@@ -81,7 +81,7 @@ func TestChatCompletionsEndpointSpec_GetTranslator(t *testing.T) {
 	supported := []filterapi.VersionedAPISchema{
 		{Name: filterapi.APISchemaOpenAI, Prefix: "v1"},
 		{Name: filterapi.APISchemaAWSBedrock},
-		{Name: filterapi.APISchemaAWSOpenAI, Version: "v1"},
+		{Name: filterapi.APISchemaAWSInvokeOpenAI, Version: "v1"},
 		{Name: filterapi.APISchemaAzureOpenAI, Version: "2024-02-01"},
 		{Name: filterapi.APISchemaGCPVertexAI},
 		{Name: filterapi.APISchemaGCPAnthropic, Version: "2024-05-01"},
@@ -809,9 +809,9 @@ func TestRedactString(t *testing.T) {
 	})
 }
 
-func TestAWSOpenAIAPISchemaIntegration(t *testing.T) {
+func TestAWSInvokeOpenAIAPISchemaIntegration(t *testing.T) {
 	schema := filterapi.VersionedAPISchema{
-		Name:    filterapi.APISchemaAWSOpenAI,
+		Name:    filterapi.APISchemaAWSInvokeOpenAI,
 		Version: "v1",
 	}
 
@@ -823,9 +823,9 @@ func TestAWSOpenAIAPISchemaIntegration(t *testing.T) {
 	})
 }
 
-func TestAWSOpenAIAPISchemaWithModelOverride(t *testing.T) {
+func TestAWSInvokeOpenAIAPISchemaWithModelOverride(t *testing.T) {
 	schema := filterapi.VersionedAPISchema{
-		Name:    filterapi.APISchemaAWSOpenAI,
+		Name:    filterapi.APISchemaAWSInvokeOpenAI,
 		Version: "v1",
 	}
 

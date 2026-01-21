@@ -279,9 +279,9 @@ AWS Bedrock supports multiple API formats:
 
 The default `AWSBedrock` schema uses AWS Bedrock's Converse API format. This works with all Bedrock models.
 
-### 2. AWSOpenAI Schema (OpenAI-Compatible Models)
+### 2. AWSInvokeOpenAI Schema (OpenAI-Compatible Models)
 
-For OpenAI-compatible models on AWS Bedrock (like certain foundation models that accept OpenAI format), use the `AWSOpenAI` schema. This uses AWS Bedrock's InvokeModel API with OpenAI-formatted requests.
+For OpenAI-compatible models on AWS Bedrock (like certain foundation models that accept OpenAI format), use the `AWSInvokeOpenAI` schema. This uses AWS Bedrock's InvokeModel API with OpenAI-formatted requests.
 
 Example configuration:
 
@@ -293,7 +293,7 @@ metadata:
   namespace: default
 spec:
   schema:
-    name: AWSOpenAI
+    name: AWSInvokeOpenAI
   backendRef:
     name: envoy-ai-gateway-basic-aws-openai
     kind: Backend

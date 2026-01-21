@@ -30,7 +30,7 @@ metadata:
   namespace: default
 spec:
   schema:
-    name: AWSOpenAI
+    name: AWSInvokeOpenAI
   backendRef:
     name: envoy-ai-gateway-basic-aws-openai
     kind: Backend
