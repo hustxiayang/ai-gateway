@@ -258,3 +258,22 @@ func (u *TokenUsage) Override(other TokenUsage) {
 		u.cacheCreationInputTokenSet = true
 	}
 }
+
+// ExtractTokenUsageFromExplicitCaching extracts token usage from AWS Bedrock responses
+// with explicit caching support. This handles the optional cache token fields properly.
+func ExtractTokenUsageFromExplicitCaching(inputTokens, outputTokens int64, cacheReadInputTokens, cacheWriteInputTokens *int64) TokenUsage {
+	var usage TokenUsage
+	totalInputTokens := inputTokens
+	if cacheWriteInputTokens != nil && *cacheWriteInputTokens > 0 {
+		totalInputTokens += *cacheWriteInputTokens
+		usage.SetCacheCreationInputTokens(uint32(*cacheWriteInputTokens)) //nolint:gosec
+	}
+	if cacheReadInputTokens != nil && *cacheReadInputTokens > 0 {
+		totalInputTokens += *cacheReadInputTokens
+		usage.SetCachedInputTokens(uint32(*cacheReadInputTokens)) //nolint:gosec
+	}
+	usage.SetInputTokens(uint32(totalInputTokens))                //nolint:gosec
+	usage.SetOutputTokens(uint32(outputTokens))                   //nolint:gosec
+	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens)) //nolint:gosec
+	return usage
+}

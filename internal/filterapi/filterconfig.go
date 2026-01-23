@@ -129,9 +129,9 @@ const (
 	// APISchemaAWSAnthropic represents the AWS Bedrock Anthropic API schema.
 	// Used for Claude models hosted on AWS Bedrock using the native Anthropic Messages API.
 	APISchemaAWSAnthropic APISchemaName = "AWSAnthropic"
-	// APISchemaOpenAIAWSAnthropic represents the schema translation from OpenAI API to Anthropic API
+	// APISchemaAWSInvokeAnthropic represents the schema translation from OpenAI API to Anthropic API
 	// Used for Claude models hosted on AWS Bedrock via InvokeModel API
-	APISchemaOpenAIAWSAnthropic APISchemaName = "OpenAIAWSAnthropic"
+	APISchemaAWSInvokeAnthropic APISchemaName = "AWSInvokeAnthropic"
 )
 
 // RouteRuleName is the name of the route rule.

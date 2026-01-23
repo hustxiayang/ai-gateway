@@ -147,6 +147,7 @@ func (a *anthropicToAWSAnthropicTranslator) convertMessagesEventWrappedInAmazonE
 
 		a.reflectStreamingEvent(&event)
 		*out = append(*out, sseEventPrefix...)
+		*out = append(*out, ' ')
 		*out = append(*out, event.Type...)
 		*out = append(*out, '\n')
 		*out = append(*out, sseDataPrefix...)
