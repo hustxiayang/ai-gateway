@@ -3,14 +3,14 @@
 # The full text of the Apache license is available in the LICENSE file at
 # the root of the repo.
 
-# This example demonstrates using the OpenAIAWSAnthropic schema to access
+# This example demonstrates using the AWSInvokeAnthropic schema to access
 # Claude models on AWS Bedrock via the InvokeModel API with OpenAI-compatible requests.
 #
-# The OpenAIAWSAnthropic schema translates OpenAI ChatCompletion requests to
+# The AWSInvokeAnthropic schema translates OpenAI ChatCompletion requests to
 # Anthropic Messages API format for AWS Bedrock's InvokeModel endpoint.
 #
 # Key differences from AWSAnthropic schema:
-# - OpenAIAWSAnthropic: Accepts OpenAI format, translates to Anthropic for Bedrock InvokeModel API
+# - AWSInvokeAnthropic: Accepts OpenAI format, translates to Anthropic for Bedrock InvokeModel API
 # - AWSAnthropic: Accepts Anthropic Messages API format directly (passthrough to Bedrock)
 #
 # Use cases:
@@ -43,10 +43,10 @@ metadata:
   name: envoy-ai-gateway-aws-bedrock-claude-openai
   namespace: default
 spec:
-  # OpenAIAWSAnthropic schema accepts OpenAI format and translates to
+  # AWSInvokeAnthropic schema accepts OpenAI format and translates to
   # Anthropic Messages API for AWS Bedrock InvokeModel endpoint
   schema:
-    name: OpenAIAWSAnthropic
+    name: AWSInvokeAnthropic
     # Optional: Specify Anthropic API version for Bedrock
     # Default: bedrock-2023-05-31
     version: bedrock-2023-05-31
