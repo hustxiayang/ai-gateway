@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
@@ -1044,6 +1044,8 @@ func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta openai.
 //
 // This function works for both streaming and non-streaming responses by accepting
 // the common usage fields that exist in all Anthropic usage structures.
+// Note: For Anthropic API responses which use int64 values (not pointers), we can only
+// distinguish "not provided" from "zero" by checking if the value is non-zero.
 func ExtractTokenUsageFromAnthropic(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64) metrics.TokenUsage {
 	// Calculate total input tokens as per Anthropic API documentation
 	totalInputTokens := inputTokens + cacheCreationTokens + cacheReadTokens
@@ -1052,17 +1054,25 @@ func ExtractTokenUsageFromAnthropic(inputTokens, outputTokens, cacheReadTokens, 
 	totalCachedTokens := cacheReadTokens + cacheCreationTokens
 
 	var usage metrics.TokenUsage
-	usage.SetInputTokens(uint32(totalInputTokens))                 //nolint:gosec
-	usage.SetOutputTokens(uint32(outputTokens))                    //nolint:gosec
-	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens))  //nolint:gosec
-	usage.SetCachedInputTokens(uint32(totalCachedTokens))          //nolint:gosec
-	usage.SetCacheCreationInputTokens(uint32(cacheCreationTokens)) //nolint:gosec
+	usage.SetInputTokens(uint32(totalInputTokens))                //nolint:gosec
+	usage.SetOutputTokens(uint32(outputTokens))                   //nolint:gosec
+	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens)) //nolint:gosec
+
+	// Only set cache-related fields if there are any cached tokens
+	if totalCachedTokens > 0 {
+		usage.SetCachedInputTokens(uint32(totalCachedTokens)) //nolint:gosec
+	}
+	if cacheCreationTokens > 0 {
+		usage.SetCacheCreationInputTokens(uint32(cacheCreationTokens)) //nolint:gosec
+	}
 	return usage
 }
 
 // ExtractTokenUsageFromExplicitCaching extracts token usage from explicit caching fields.
 // This is used for AWS Bedrock responses which have pointer types for cache fields.
+// When cache pointers are nil, the corresponding cached token fields are not set.
 func ExtractTokenUsageFromExplicitCaching(inputTokens, outputTokens int64, cacheReadTokens, cacheWriteTokens *int64) metrics.TokenUsage {
+	var usage metrics.TokenUsage
 	var cacheRead, cacheWrite int64
 	if cacheReadTokens != nil {
 		cacheRead = *cacheReadTokens
@@ -1070,11 +1080,27 @@ func ExtractTokenUsageFromExplicitCaching(inputTokens, outputTokens int64, cache
 	if cacheWriteTokens != nil {
 		cacheWrite = *cacheWriteTokens
 	}
-	return ExtractTokenUsageFromAnthropic(inputTokens, outputTokens, cacheRead, cacheWrite)
+
+	// Calculate total input tokens - only include cache tokens if provided
+	totalInputTokens := inputTokens + cacheWrite + cacheRead
+
+	usage.SetInputTokens(uint32(totalInputTokens))                //nolint:gosec
+	usage.SetOutputTokens(uint32(outputTokens))                   //nolint:gosec
+	usage.SetTotalTokens(uint32(totalInputTokens + outputTokens)) //nolint:gosec
+
+	// Only set cache fields if the original pointers were not nil
+	if cacheReadTokens != nil || cacheWriteTokens != nil {
+		totalCachedTokens := cacheRead + cacheWrite
+		usage.SetCachedInputTokens(uint32(totalCachedTokens)) //nolint:gosec
+	}
+	if cacheWriteTokens != nil {
+		usage.SetCacheCreationInputTokens(uint32(cacheWrite)) //nolint:gosec
+	}
+	return usage
 }
 
 // messageToChatCompleion is to translate from anthropic API's response Message into OpenAI API's response ChatCompletion
-func messageToChatCompleion(anthropicResp anthropic.Message, responseModel internalapi.RequestModel) (openAIResp *openai.ChatCompletionResponse, tokenUsage metrics.TokenUsage, err error) {
+func messageToChatCompleion(anthropicResp *anthropic.Message, responseModel internalapi.RequestModel) (openAIResp *openai.ChatCompletionResponse, tokenUsage metrics.TokenUsage, err error) {
 	openAIResp = &openai.ChatCompletionResponse{
 		ID:      anthropicResp.ID,
 		Model:   responseModel,
