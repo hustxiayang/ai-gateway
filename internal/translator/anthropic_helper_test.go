@@ -29,7 +29,6 @@ func (r *mockErrorReader) Read(_ []byte) (n int, err error) {
 	return 0, fmt.Errorf("mock reader error")
 }
 
-
 // New test function for helper coverage.
 func TestHelperFunctions(t *testing.T) {
 	t.Run("anthropicToOpenAIFinishReason invalid reason", func(t *testing.T) {
@@ -988,14 +987,21 @@ func TestExtractLLMTokenUsage(t *testing.T) {
 				tt.cacheCreationTokens,
 			)
 
+			// Pass -1 when cacheCreationTokens is 0 to not set the flag
+			cacheCreationParam := int32(-1)
+			if tt.cacheCreationTokens > 0 {
+				cacheCreationParam = int32(tt.cacheCreationTokens) // nolint:gosec
+			}
 			expected := tokenUsageFrom(
-				int32(tt.expectedInputTokens),     // nolint:gosec
+				int32(tt.expectedInputTokens), // nolint:gosec
 				-1,
-				int32(tt.cacheCreationTokens),     // nolint:gosec
-				int32(tt.expectedOutputTokens),    // nolint:gosec
-				int32(tt.expectedTotalTokens),     // nolint:gosec
+				cacheCreationParam,
+				int32(tt.expectedOutputTokens), // nolint:gosec
+				int32(tt.expectedTotalTokens),  // nolint:gosec
 			)
-			expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			if tt.expectedCachedTokens > 0 {
+				expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			}
 			assert.Equal(t, expected, result)
 		})
 	}
@@ -1058,8 +1064,16 @@ func TestExtractLLMTokenUsageFromUsage(t *testing.T) {
 				tt.usage.CacheReadInputTokens,
 				tt.usage.CacheCreationInputTokens,
 			)
-			expected := tokenUsageFrom(tt.expectedInputTokens, 0, int32(tt.usage.CacheCreationInputTokens), tt.expectedOutputTokens, tt.expectedTotalTokens)
-			expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			// Pass -1 when cacheCreationInputTokens is 0 to not set the flag
+			cacheCreationParam := int32(-1)
+			if tt.usage.CacheCreationInputTokens > 0 {
+				cacheCreationParam = int32(tt.usage.CacheCreationInputTokens) // nolint:gosec
+			}
+			// Pass -1 for cachedInput since we set it explicitly below only when > 0
+			expected := tokenUsageFrom(tt.expectedInputTokens, -1, cacheCreationParam, tt.expectedOutputTokens, tt.expectedTotalTokens) // nolint:gosec // G115: test values are small and safe
+			if tt.expectedCachedTokens > 0 {
+				expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			}
 			assert.Equal(t, expected, result)
 		})
 	}
@@ -1122,8 +1136,16 @@ func TestExtractLLMTokenUsageFromDeltaUsage(t *testing.T) {
 				tt.usage.CacheReadInputTokens,
 				tt.usage.CacheCreationInputTokens,
 			)
-			expected := tokenUsageFrom(tt.expectedInputTokens, 0, int32(tt.usage.CacheCreationInputTokens), tt.expectedOutputTokens, tt.expectedTotalTokens)
-			expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			// Pass -1 when cacheCreationInputTokens is 0 to not set the flag
+			cacheCreationParam := int32(-1)
+			if tt.usage.CacheCreationInputTokens > 0 {
+				cacheCreationParam = int32(tt.usage.CacheCreationInputTokens) // nolint:gosec
+			}
+			// Pass -1 for cachedInput since we set it explicitly below only when > 0
+			expected := tokenUsageFrom(tt.expectedInputTokens, -1, cacheCreationParam, tt.expectedOutputTokens, tt.expectedTotalTokens) // nolint:gosec // G115: test values are small and safe
+			if tt.expectedCachedTokens > 0 {
+				expected.SetCachedInputTokens(tt.expectedCachedTokens)
+			}
 			assert.Equal(t, expected, result)
 		})
 	}
