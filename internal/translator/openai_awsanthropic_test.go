@@ -25,6 +25,7 @@ import (
 	"github.com/tidwall/gjson"
 	"k8s.io/utils/ptr"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
@@ -380,7 +381,7 @@ func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 									Type: openai.ChatCompletionMessageToolCallTypeFunction,
 									Function: openai.ChatCompletionMessageToolCallFunctionParam{
 										Name:      "get_weather",
-										Arguments: `{"location":"Tokyo","unit":"celsius"}`,
+										Arguments: `{"location": "Tokyo", "unit": "celsius"}`,
 									},
 								},
 							},
@@ -414,13 +415,12 @@ func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 			require.NoError(t, err)
 
 			expectedTokenUsage := tokenUsageFrom(
-				int32(tt.expectedOpenAIResponse.Usage.PromptTokens), // nolint:gosec
-				-1,
-				-1,
-				int32(tt.expectedOpenAIResponse.Usage.CompletionTokens), // nolint:gosec
-				int32(tt.expectedOpenAIResponse.Usage.TotalTokens),      // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.PromptTokens),                            // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CachedTokens),        // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CacheCreationTokens), // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.CompletionTokens),                        // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.TotalTokens),                             // nolint:gosec
 			)
-			expectedTokenUsage.SetCachedInputTokens(uint32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CachedTokens)) //nolint:gosec
 			require.Equal(t, expectedTokenUsage, usedToken)
 
 			if diff := cmp.Diff(tt.expectedOpenAIResponse, gotResp, cmpopts.IgnoreFields(openai.ChatCompletionResponse{}, "Created")); diff != "" {
@@ -447,7 +447,7 @@ func TestOpenAIToAWSAnthropicTranslator_ResponseError(t *testing.T) {
 			expectedOutput: openai.Error{
 				Type: "error",
 				Error: openai.ErrorType{
-					Type:    awsInvokeModelBackendError,
+					Type:    awsBedrockBackendError,
 					Code:    ptr.To("503"),
 					Message: "Service Unavailable",
 				},
@@ -456,22 +456,19 @@ func TestOpenAIToAWSAnthropicTranslator_ResponseError(t *testing.T) {
 		{
 			name: "json error response",
 			responseHeaders: map[string]string{
-				statusHeaderName:      "400",
-				contentTypeHeaderName: "application/json",
+				statusHeaderName:       "400",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "ValidationException",
 			},
-			inputBody: &anthropic.ErrorResponse{
-				Type: "error",
-				Error: anthropic.ErrorObjectUnion{
-					Type:    "invalid_request_error",
-					Message: "Your max_tokens is too high.",
-				},
+			inputBody: &awsbedrock.BedrockException{
+				Message: "messages: field is required",
 			},
 			expectedOutput: openai.Error{
 				Type: "error",
 				Error: openai.ErrorType{
-					Type:    "invalid_request_error",
+					Type:    "ValidationException",
 					Code:    ptr.To("400"),
-					Message: "Your max_tokens is too high.",
+					Message: "messages: field is required",
 				},
 			},
 		},

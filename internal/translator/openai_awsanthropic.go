@@ -19,6 +19,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
@@ -44,16 +45,15 @@ func NewChatCompletionOpenAIToAWSAnthropicTranslator(apiVersion string, modelNam
 type openAIToAWSAnthropicTranslatorV1ChatCompletion struct {
 	apiVersion        string
 	modelNameOverride internalapi.ModelNameOverride
-	streamParser      *anthropicStreamParser // Used for streaming
+	streamParser      *anthropicStreamParser
 	requestModel      internalapi.RequestModel
-	bufferedBody      []byte // Buffer for AWS EventStream data
+	bufferedBody      []byte
 }
 
 // RequestBody implements [OpenAIChatCompletionTranslator.RequestBody] for AWS Anthropic.
 func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, openAIReq *openai.ChatCompletionRequest, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
-	// Store request model and streaming state
 	o.requestModel = openAIReq.Model
 	if o.modelNameOverride != "" {
 		o.requestModel = o.modelNameOverride
@@ -66,9 +66,7 @@ func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, o
 	// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModel.html#API_runtime_InvokeModel_RequestSyntax
 	pathTemplate := "/model/%s/invoke"
 	if openAIReq.Stream {
-		// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModelWithResponseStream.html#API_runtime_InvokeModelWithResponseStream_RequestSyntax
 		pathTemplate = "/model/%s/invoke-with-response-stream"
-		// Initialize stream parser for streaming requests
 		o.streamParser = newAnthropicStreamParser(o.requestModel)
 	}
 
@@ -102,50 +100,44 @@ func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, o
 }
 
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
+// Translate AWS Bedrock exceptions to OpenAI error type.
+// The error type is stored in the "x-amzn-errortype" HTTP header for AWS error responses.
 func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	var openaiError openai.Error
-	var decodeErr error
-
-	// Check for a JSON content type to decide how to parse the error.
 	if v, ok := respHeaders[contentTypeHeaderName]; ok && strings.Contains(v, jsonContentType) {
-		var gcpError anthropic.ErrorResponse
-		if decodeErr = json.NewDecoder(body).Decode(&gcpError); decodeErr != nil {
-			// If we expect JSON but fail to decode, it's an internal translator error.
-			return nil, nil, fmt.Errorf("failed to unmarshal JSON error body: %w", decodeErr)
+		var bedrockError awsbedrock.BedrockException
+		if err = json.NewDecoder(body).Decode(&bedrockError); err != nil {
+			return nil, nil, fmt.Errorf("failed to unmarshal error body: %w", err)
 		}
 		openaiError = openai.Error{
 			Type: "error",
 			Error: openai.ErrorType{
-				Type:    gcpError.Error.Type,
-				Message: gcpError.Error.Message,
+				Type:    respHeaders[awsErrorTypeHeaderName],
+				Message: bedrockError.Message,
 				Code:    &statusCode,
 			},
 		}
 	} else {
-		// If not JSON, read the raw body as the error message.
 		var buf []byte
-		buf, decodeErr = io.ReadAll(body)
-		if decodeErr != nil {
-			return nil, nil, fmt.Errorf("failed to read raw error body: %w", decodeErr)
+		buf, err = io.ReadAll(body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
 		}
 		openaiError = openai.Error{
 			Type: "error",
 			Error: openai.ErrorType{
-				Type:    awsInvokeModelBackendError,
+				Type:    awsBedrockBackendError,
 				Message: string(buf),
 				Code:    &statusCode,
 			},
 		}
 	}
-
-	// Marshal the translated OpenAI error.
 	newBody, err = json.Marshal(openaiError)
 	if err != nil {
-		// This is an internal failure to create the response.
-		return nil, nil, fmt.Errorf("failed to marshal OpenAI error body: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
 		{contentTypeHeaderName, jsonContentType},
@@ -201,7 +193,7 @@ func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) ResponseBody(_ map[stri
 		responseModel = string(anthropicResp.Model)
 	}
 
-	openAIResp, tokenUsage, err := messageToChatCompleion(&anthropicResp, responseModel)
+	openAIResp, tokenUsage, err := messageToChatCompletion(&anthropicResp, responseModel)
 	if err != nil {
 		return nil, nil, metrics.TokenUsage{}, "", err
 	}

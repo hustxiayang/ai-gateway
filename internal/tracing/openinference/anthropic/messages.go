@@ -14,9 +14,9 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/openinference"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
-	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
 
 // MessageRecorder implements recorders for OpenInference chat completion spans.
@@ -211,11 +211,11 @@ func buildResponseAttributes(resp *anthropic.MessagesResponse, config *openinfer
 	u := resp.Usage
 	cacheReadTokens := int64(u.CacheReadInputTokens)
 	cacheCreationTokens := int64(u.CacheCreationInputTokens)
-	cost := translator.ExtractTokenUsageFromAnthropic(
+	cost := metrics.ExtractTokenUsageFromExplicitCaching(
 		int64(u.InputTokens),
 		int64(u.OutputTokens),
-		cacheReadTokens,
-		cacheCreationTokens,
+		&cacheReadTokens,
+		&cacheCreationTokens,
 	)
 	input, _ := cost.InputTokens()
 	cacheRead, _ := cost.CachedInputTokens()

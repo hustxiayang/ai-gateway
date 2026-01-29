@@ -709,7 +709,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 		for i := range o.events {
 			event := &o.events[i]
 			if usage := event.Usage; usage != nil {
-				tokenUsage = ExtractTokenUsageFromExplicitCaching(usage.InputTokens, usage.OutputTokens,
+				tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(usage.InputTokens, usage.OutputTokens,
 					usage.CacheReadInputTokens, usage.CacheWriteInputTokens)
 			}
 			oaiEvent, ok := o.convertEvent(event)
@@ -750,7 +750,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseBody(_ map[string
 
 	// Convert token usage.
 	if bedrockResp.Usage != nil {
-		tokenUsage = ExtractTokenUsageFromExplicitCaching(bedrockResp.Usage.InputTokens, bedrockResp.Usage.OutputTokens,
+		tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(bedrockResp.Usage.InputTokens, bedrockResp.Usage.OutputTokens,
 			bedrockResp.Usage.CacheReadInputTokens, bedrockResp.Usage.CacheWriteInputTokens)
 		totalTokens, _ := tokenUsage.TotalTokens()
 		inputTokens, _ := tokenUsage.InputTokens()
@@ -872,7 +872,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) convertEvent(event *awsbe
 		if event.Usage == nil {
 			return chunk, false
 		}
-		tokenUsage := ExtractTokenUsageFromExplicitCaching(event.Usage.InputTokens, event.Usage.OutputTokens,
+		tokenUsage := metrics.ExtractTokenUsageFromExplicitCaching(event.Usage.InputTokens, event.Usage.OutputTokens,
 			event.Usage.CacheReadInputTokens, event.Usage.CacheWriteInputTokens)
 		totalTokens, _ := tokenUsage.TotalTokens()
 		inputTokens, _ := tokenUsage.InputTokens()

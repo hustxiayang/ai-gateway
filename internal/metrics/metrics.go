@@ -259,18 +259,23 @@ func (u *TokenUsage) Override(other TokenUsage) {
 	}
 }
 
-// ExtractTokenUsageFromExplicitCaching extracts token usage from AWS Bedrock responses
-// with explicit caching support. This handles the optional cache token fields properly.
-func ExtractTokenUsageFromExplicitCaching(inputTokens, outputTokens int64, cacheReadInputTokens, cacheWriteInputTokens *int64) TokenUsage {
+// ExtractTokenUsageFromExplicitCaching extracts the correct token usage from upstream Anthropic or AWS Bedrock token usage response.
+// The total input tokens is the summation of:
+// input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+// This is to unify the usage response returned by envoy ai gateway for both explicit and implicit caching.
+//
+// This function works for both streaming and non-streaming responses by accepting
+// the common usage fields that exist from anthropic or AWS bedrock usage structures.
+func ExtractTokenUsageFromExplicitCaching(inputTokens, outputTokens int64, cacheReadTokens, cacheCreationTokens *int64) TokenUsage {
 	var usage TokenUsage
 	totalInputTokens := inputTokens
-	if cacheWriteInputTokens != nil && *cacheWriteInputTokens > 0 {
-		totalInputTokens += *cacheWriteInputTokens
-		usage.SetCacheCreationInputTokens(uint32(*cacheWriteInputTokens)) //nolint:gosec
+	if cacheCreationTokens != nil {
+		totalInputTokens += *cacheCreationTokens
+		usage.SetCacheCreationInputTokens(uint32(*cacheCreationTokens)) //nolint:gosec
 	}
-	if cacheReadInputTokens != nil && *cacheReadInputTokens > 0 {
-		totalInputTokens += *cacheReadInputTokens
-		usage.SetCachedInputTokens(uint32(*cacheReadInputTokens)) //nolint:gosec
+	if cacheReadTokens != nil {
+		totalInputTokens += *cacheReadTokens
+		usage.SetCachedInputTokens(uint32(*cacheReadTokens)) //nolint:gosec
 	}
 	usage.SetInputTokens(uint32(totalInputTokens))                //nolint:gosec
 	usage.SetOutputTokens(uint32(outputTokens))                   //nolint:gosec

@@ -20,16 +20,15 @@ import (
 )
 
 const (
-	pathHeaderName             = ":path"
-	statusHeaderName           = ":status"
-	contentTypeHeaderName      = "content-type"
-	contentLengthHeaderName    = "content-length"
-	awsErrorTypeHeaderName     = "x-amzn-errortype"
-	jsonContentType            = "application/json"
-	eventStreamContentType     = "text/event-stream"
-	openAIBackendError         = "OpenAIBackendError"
-	awsBedrockBackendError     = "AWSBedrockBackendError"
-	awsInvokeModelBackendError = "AWSInvokeModelBackendError"
+	pathHeaderName          = ":path"
+	statusHeaderName        = ":status"
+	contentTypeHeaderName   = "content-type"
+	contentLengthHeaderName = "content-length"
+	awsErrorTypeHeaderName  = "x-amzn-errortype"
+	jsonContentType         = "application/json"
+	eventStreamContentType  = "text/event-stream"
+	openAIBackendError      = "OpenAIBackendError"
+	awsBedrockBackendError  = "AWSBedrockBackendError"
 )
 
 // Translator translates the request and response messages between the client
