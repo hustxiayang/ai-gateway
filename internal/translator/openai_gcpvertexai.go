@@ -252,6 +252,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		// Add the [DONE] marker to indicate end of stream as per OpenAI API specification.
 		newBody = append(newBody, sseDoneFullLine...)
 	}
+
+	// If no chunks were parsed (data is buffered for next call), return an empty
+	// body slice instead of nil. This prevents Envoy from passing through the original Gemini
+	// format body unchanged in STREAMED mode, which would cause both formats to appear in the response.
+	if newBody == nil {
+		newBody = []byte{}
+	}
+
 	return
 }
 
@@ -570,10 +578,9 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiResponseToOpenAIMe
 	return openaiResp, nil
 }
 
-// ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
-// Translate GCP Vertex AI exceptions to OpenAI error type.
-// GCP error responses typically contain JSON with error details or plain text error messages.
-func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
+// convertGCPVertexAIErrorToOpenAI converts GCP Vertex AI error responses to OpenAI error format.
+// This is a shared function used by both chat completion and embedding translators.
+func convertGCPVertexAIErrorToOpenAI(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
 	var buf []byte
@@ -617,4 +624,13 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeader
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 	}
 	return
+}
+
+// ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
+// Translate GCP Vertex AI exceptions to OpenAI error type.
+// GCP error responses typically contain JSON with error details or plain text error messages.
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
+	newHeaders []internalapi.Header, newBody []byte, err error,
+) {
+	return convertGCPVertexAIErrorToOpenAI(respHeaders, body)
 }
