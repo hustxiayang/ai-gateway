@@ -184,7 +184,7 @@ func createUserFacingErrorResponse(statusCode int, errorType string, message str
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extprocv3.ImmediateResponse{
-				Status:     &typev3.HttpStatus{Code: typev3.StatusCode(statusCode)},
+				Status:     &typev3.HttpStatus{Code: typev3.StatusCode(statusCode)}, // #nosec G115 - HTTP status codes are always in valid int32 range
 				Headers:    headerMutation,
 				Body:       body,
 				GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
