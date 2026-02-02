@@ -28,7 +28,6 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
-// TODO: Double check these
 const (
 	anthropicVersionKey   = "anthropic_version"
 	tempNotSupportedError = "temperature %.2f is not supported by Anthropic (must be between 0.0 and 1.0)"

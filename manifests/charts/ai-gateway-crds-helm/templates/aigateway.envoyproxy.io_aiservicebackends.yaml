@@ -321,7 +321,6 @@ spec:
                     - GCPAnthropic
                     - Anthropic
                     - AWSAnthropic
-                    - AWSInvokeAnthropic
                     type: string
                   prefix:
                     description: |-
