@@ -130,8 +130,8 @@ func (o *openAIToAWSInvokeOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[s
 			return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("failed to convert EventStream to SSE: %w", err)
 		}
 
-		if endOfStream && !strings.HasSuffix(string(newBody), "data: [DONE]\n") {
-			newBody = append(newBody, []byte("data: [DONE]\n")...)
+		if endOfStream && !strings.HasSuffix(string(newBody), "data: [DONE]\n\n") {
+			newBody = append(newBody, []byte("data: [DONE]\n\n")...)
 		}
 		responseModel = o.requestModel
 	} else {
