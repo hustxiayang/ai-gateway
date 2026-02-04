@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"testing"
 	"time"
@@ -2604,4 +2605,307 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_Cache(t *testing.T) {
 		require.Equal(t, "call_003", result.Get("messages.0.content.2.tool_use_id").String())
 		require.Equal(t, string(constant.ValueOf[constant.Ephemeral]()), result.Get("messages.0.content.2.cache_control.type").String(), "tool 3 (with cache) should be cached")
 	})
+}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_SetRedactionConfig(t *testing.T) {
+	translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	translator.SetRedactionConfig(true, true, logger)
+
+	require.True(t, translator.debugLogEnabled)
+	require.True(t, translator.enableRedaction)
+	require.NotNil(t, translator.logger)
+}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RedactBody(t *testing.T) {
+	translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+	t.Run("nil response returns nil", func(t *testing.T) {
+		result := translator.RedactBody(nil)
+		require.Nil(t, result)
+	})
+
+	t.Run("redacts message content", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			ID:    "test-id",
+			Model: "test-model",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					Index:   0,
+					Message: openai.ChatCompletionResponseChoiceMessage{Role: "assistant", Content: ptr.To("sensitive content")},
+				},
+			},
+		}
+
+		result := translator.RedactBody(resp)
+		require.NotNil(t, result)
+		require.Equal(t, "test-id", result.ID)
+		require.Len(t, result.Choices, 1)
+		// Content should be redacted (not the original value)
+		require.NotNil(t, result.Choices[0].Message.Content)
+		require.NotEqual(t, "sensitive content", *result.Choices[0].Message.Content)
+	})
+
+	t.Run("redacts tool calls", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			ID:    "test-id",
+			Model: "test-model",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					Index: 0,
+					Message: openai.ChatCompletionResponseChoiceMessage{
+						Role: "assistant",
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID:   ptr.To("tool-1"),
+								Type: openai.ChatCompletionMessageToolCallTypeFunction,
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Name:      "get_secret",
+									Arguments: `{"password": "secret123"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := translator.RedactBody(resp)
+		require.NotNil(t, result)
+		require.Len(t, result.Choices, 1)
+		require.Len(t, result.Choices[0].Message.ToolCalls, 1)
+		// Tool call name and arguments should be redacted
+		require.NotEqual(t, "get_secret", result.Choices[0].Message.ToolCalls[0].Function.Name)
+		require.NotEqual(t, `{"password": "secret123"}`, result.Choices[0].Message.ToolCalls[0].Function.Arguments)
+	})
+
+	t.Run("redacts audio data", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			ID:    "test-id",
+			Model: "test-model",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					Index: 0,
+					Message: openai.ChatCompletionResponseChoiceMessage{
+						Role: "assistant",
+						Audio: &openai.ChatCompletionResponseChoiceMessageAudio{
+							Data:       "base64-audio-data",
+							Transcript: "sensitive transcript",
+						},
+					},
+				},
+			},
+		}
+
+		result := translator.RedactBody(resp)
+		require.NotNil(t, result)
+		require.Len(t, result.Choices, 1)
+		require.NotNil(t, result.Choices[0].Message.Audio)
+		// Audio data and transcript should be redacted
+		require.NotEqual(t, "base64-audio-data", result.Choices[0].Message.Audio.Data)
+		require.NotEqual(t, "sensitive transcript", result.Choices[0].Message.Audio.Transcript)
+	})
+
+	t.Run("redacts reasoning content", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			ID:    "test-id",
+			Model: "test-model",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					Index: 0,
+					Message: openai.ChatCompletionResponseChoiceMessage{
+						Role: "assistant",
+						ReasoningContent: &openai.ReasoningContentUnion{
+							Value: &openai.ReasoningContent{
+								ReasoningContent: &awsbedrock.ReasoningContentBlock{
+									ReasoningText: &awsbedrock.ReasoningTextBlock{
+										Text:      "sensitive reasoning",
+										Signature: "sig123",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := translator.RedactBody(resp)
+		require.NotNil(t, result)
+		require.Len(t, result.Choices, 1)
+		require.NotNil(t, result.Choices[0].Message.ReasoningContent)
+	})
+
+	t.Run("empty choices returns empty choices", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			ID:      "test-id",
+			Model:   "test-model",
+			Choices: []openai.ChatCompletionResponseChoice{},
+		}
+
+		result := translator.RedactBody(resp)
+		require.NotNil(t, result)
+		require.Empty(t, result.Choices)
+	})
+}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseHeaders(t *testing.T) {
+	t.Run("returns event-stream content type for streaming", func(t *testing.T) {
+		openAIReq := &openai.ChatCompletionRequest{
+			Stream:    true,
+			Model:     "test-model",
+			MaxTokens: ptr.To(int64(100)),
+		}
+		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+		// Initialize the stream parser by calling RequestBody with streaming request
+		_, _, err := translator.RequestBody(nil, openAIReq, false)
+		require.NoError(t, err)
+
+		// Now ResponseHeaders should return the streaming content type
+		headers, err := translator.ResponseHeaders(nil)
+		require.NoError(t, err)
+		require.Len(t, headers, 1)
+		require.Equal(t, contentTypeHeaderName, headers[0].Key())
+		require.Equal(t, eventStreamContentType, headers[0].Value())
+	})
+
+	t.Run("returns no headers for non-streaming", func(t *testing.T) {
+		openAIReq := &openai.ChatCompletionRequest{
+			Stream:    false,
+			Model:     "test-model",
+			MaxTokens: ptr.To(int64(100)),
+		}
+		translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+		// Initialize without streaming
+		_, _, err := translator.RequestBody(nil, openAIReq, false)
+		require.NoError(t, err)
+
+		// ResponseHeaders should return nil for non-streaming
+		headers, err := translator.ResponseHeaders(nil)
+		require.NoError(t, err)
+		require.Nil(t, headers)
+	})
+}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody_WithDebugLogging(t *testing.T) {
+	// Create a buffer to capture log output
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+	translator.SetRedactionConfig(true, true, logger)
+
+	// Initialize translator with the model
+	req := &openai.ChatCompletionRequest{
+		Model:     "claude-3",
+		MaxTokens: ptr.To(int64(100)),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			{
+				OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+					Role:    openai.ChatMessageRoleUser,
+				},
+			},
+		},
+	}
+	reqBody, _ := json.Marshal(req)
+	_, _, err := translator.RequestBody(reqBody, req, false)
+	require.NoError(t, err)
+
+	// Create a response
+	anthropicResponse := anthropic.Message{
+		ID:   "msg_01XYZ",
+		Type: constant.ValueOf[constant.Message](),
+		Role: constant.ValueOf[constant.Assistant](),
+		Content: []anthropic.ContentBlockUnion{
+			{
+				Type: "text",
+				Text: "Hello! How can I help you?",
+			},
+		},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage: anthropic.Usage{
+			InputTokens:  10,
+			OutputTokens: 5,
+		},
+	}
+
+	body, err := json.Marshal(anthropicResponse)
+	require.NoError(t, err)
+
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewReader(body), true, nil)
+	require.NoError(t, err)
+
+	// Verify that debug logging occurred
+	logOutput := logBuf.String()
+	require.Contains(t, logOutput, "response body processing")
+}
+
+// mockSpan implements tracingapi.ChatCompletionSpan for testing
+type mockSpan struct {
+	recordedResponse *openai.ChatCompletionResponse
+}
+
+func (m *mockSpan) RecordResponseChunk(_ *openai.ChatCompletionResponseChunk) {}
+func (m *mockSpan) RecordResponse(resp *openai.ChatCompletionResponse) {
+	m.recordedResponse = resp
+}
+func (m *mockSpan) EndSpanOnError(_ int, _ []byte) {}
+func (m *mockSpan) EndSpan()                       {}
+
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody_WithSpanRecording(t *testing.T) {
+	translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+	// Initialize translator with the model
+	req := &openai.ChatCompletionRequest{
+		Model:     "claude-3",
+		MaxTokens: ptr.To(int64(100)),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			{
+				OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+					Role:    openai.ChatMessageRoleUser,
+				},
+			},
+		},
+	}
+	reqBody, _ := json.Marshal(req)
+	_, _, err := translator.RequestBody(reqBody, req, false)
+	require.NoError(t, err)
+
+	// Create a response
+	anthropicResponse := anthropic.Message{
+		ID:   "msg_01XYZ",
+		Type: constant.ValueOf[constant.Message](),
+		Role: constant.ValueOf[constant.Assistant](),
+		Content: []anthropic.ContentBlockUnion{
+			{
+				Type: "text",
+				Text: "Hello!",
+			},
+		},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage: anthropic.Usage{
+			InputTokens:  10,
+			OutputTokens: 5,
+		},
+	}
+
+	body, err := json.Marshal(anthropicResponse)
+	require.NoError(t, err)
+
+	// Create a mock span
+	span := &mockSpan{}
+
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewReader(body), true, span)
+	require.NoError(t, err)
+
+	// Verify the span recorded the response
+	require.NotNil(t, span.recordedResponse)
+	require.Equal(t, "msg_01XYZ", span.recordedResponse.ID)
+	require.Len(t, span.recordedResponse.Choices, 1)
+	require.Equal(t, "Hello!", *span.recordedResponse.Choices[0].Message.Content)
 }
