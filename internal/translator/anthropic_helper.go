@@ -57,7 +57,7 @@ func anthropicToOpenAIFinishReason(stopReason anthropic.StopReason) (openai.Chat
 // Returns an error if the value is greater than 1.0.
 func validateTemperatureForAnthropic(temp *float64) error {
 	if temp != nil && (*temp < 0.0 || *temp > 1.0) {
-		return fmt.Errorf(tempNotSupportedError, *temp)
+		return fmt.Errorf("%w: "+tempNotSupportedError, internalapi.ErrInvalidRequestBody, *temp)
 	}
 	return nil
 }
@@ -582,7 +582,7 @@ func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest) (params *anth
 	// 1. Handle simple parameters and defaults.
 	maxTokens := cmp.Or(openAIReq.MaxCompletionTokens, openAIReq.MaxTokens)
 	if maxTokens == nil {
-		err = fmt.Errorf("the maximum number of tokens must be set for Anthropic, got nil instead")
+		err = fmt.Errorf("%w: max_tokens or max_completion_tokens is required", internalapi.ErrInvalidRequestBody)
 		return
 	}
 
@@ -748,6 +748,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		p.tokenUsage.SetTotalTokens(inputTokens + outputTokens)
 		totalTokens, _ := p.tokenUsage.TotalTokens()
 		cachedTokens, _ := p.tokenUsage.CachedInputTokens()
+		cacheCreationTokens, _ := p.tokenUsage.CacheCreationInputTokens()
 		finalChunk := openai.ChatCompletionResponseChunk{
 			ID:      p.activeMessageID,
 			Created: p.created,
@@ -758,7 +759,8 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 				CompletionTokens: int(outputTokens),
 				TotalTokens:      int(totalTokens),
 				PromptTokensDetails: &openai.PromptTokensDetails{
-					CachedTokens: int(cachedTokens),
+					CachedTokens:        int(cachedTokens),
+					CacheCreationTokens: int(cacheCreationTokens),
 				},
 			},
 			Model: p.requestModel,
@@ -1057,12 +1059,14 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 	outputTokens, _ := tokenUsage.OutputTokens()
 	totalTokens, _ := tokenUsage.TotalTokens()
 	cachedTokens, _ := tokenUsage.CachedInputTokens()
+	cacheCreationTokens, _ := tokenUsage.CacheCreationInputTokens()
 	openAIResp.Usage = openai.Usage{
 		CompletionTokens: int(outputTokens),
 		PromptTokens:     int(inputTokens),
 		TotalTokens:      int(totalTokens),
 		PromptTokensDetails: &openai.PromptTokensDetails{
-			CachedTokens: int(cachedTokens),
+			CachedTokens:        int(cachedTokens),
+			CacheCreationTokens: int(cacheCreationTokens),
 		},
 	}
 

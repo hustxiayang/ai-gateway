@@ -17,10 +17,6 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 )
 
-const (
-	testTool = "test_123"
-)
-
 // mockErrorReader is a helper for testing io.Reader failures.
 type mockErrorReader struct{}
 

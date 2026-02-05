@@ -292,7 +292,7 @@ func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 		}
 		translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "")
 		_, _, err := translator.RequestBody(nil, missingTokensReq, false)
-		require.ErrorContains(t, err, "the maximum number of tokens must be set for Anthropic, got nil instead")
+		require.ErrorContains(t, err, "max_tokens or max_completion_tokens is required")
 	})
 }
 
