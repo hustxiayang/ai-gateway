@@ -121,7 +121,7 @@ const (
 	// APISchemaGCPVertexAI represents the Google Cloud Gemini API schema.
 	// Used for Gemini models hosted on Google Cloud Vertex AI.
 	APISchemaGCPVertexAI APISchemaName = "GCPVertexAI"
-	// APISchemaGCPAnthropic represents the schema from OpenAI API to Google Cloud Anthropic API.
+	// APISchemaGCPAnthropic represents the Google Cloud Anthropic API schema.
 	// Used for Claude models hosted on Google Cloud Vertex AI.
 	APISchemaGCPAnthropic APISchemaName = "GCPAnthropic"
 	// APISchemaAnthropic represents the standard Anthropic API schema.
