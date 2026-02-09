@@ -576,6 +576,17 @@ func getThinkingConfigParamUnion(tu *openai.ThinkingUnion) *anthropic.ThinkingCo
 	return result
 }
 
+// outputConfigAvailable checks if the model supports structured outputs (OutputConfig).
+// Structured outputs are available on Claude Opus 4.6, Claude Sonnet 4.5, Claude Opus 4.5, and Claude Haiku 4.5.
+// See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+func outputConfigAvailable(model internalapi.RequestModel) bool {
+	modelLower := strings.ToLower(model)
+	return strings.Contains(modelLower, "4.5") ||
+		strings.Contains(modelLower, "4.6") ||
+		strings.Contains(modelLower, "4-5") ||
+		strings.Contains(modelLower, "4-6")
+}
+
 // buildAnthropicParams is a helper function that translates an OpenAI request
 // into the parameter struct required by the Anthropic SDK.
 func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest) (params *anthropic.MessageNewParams, err error) {
@@ -608,11 +619,19 @@ func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest) (params *anth
 		ToolChoice: toolChoice,
 	}
 
-	//
-	if openAIReq.ResponseFormat != nil && outputConfigAvailable() {
-		if openAIReq.ResponseFormat.OfJSONSchema != nil {
-			// conversion here
-			params.OutputConfig.Format.Schema = openAIReq.ResponseFormat.OfJSONSchema.JSONSchema
+	// 5. Handle structured outputs (ResponseFormat -> OutputConfig).
+	// See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+	if openAIReq.ResponseFormat != nil && openAIReq.ResponseFormat.OfJSONSchema != nil && outputConfigAvailable(openAIReq.Model) {
+		// Convert OpenAI JSON schema to Anthropic OutputConfig format
+		var schemaMap map[string]any
+		if err = json.Unmarshal(openAIReq.ResponseFormat.OfJSONSchema.JSONSchema.Schema, &schemaMap); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON schema: %w", err)
+		}
+		params.OutputConfig = anthropic.OutputConfigParam{
+			Format: anthropic.JSONOutputFormatParam{
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: schemaMap,
+			},
 		}
 
 	}
