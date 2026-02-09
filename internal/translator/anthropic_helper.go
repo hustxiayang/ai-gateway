@@ -608,6 +608,15 @@ func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest) (params *anth
 		ToolChoice: toolChoice,
 	}
 
+	//
+	if openAIReq.ResponseFormat != nil && outputConfigAvailable() {
+		if openAIReq.ResponseFormat.OfJSONSchema != nil {
+			// conversion here
+			params.OutputConfig.Format.Schema = openAIReq.ResponseFormat.OfJSONSchema.JSONSchema
+		}
+
+	}
+
 	if openAIReq.Temperature != nil {
 		if err = validateTemperatureForAnthropic(openAIReq.Temperature); err != nil {
 			return nil, err
