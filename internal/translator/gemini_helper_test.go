@@ -1347,7 +1347,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 				},
 			},
 			expectedResponseMode: responseModeNone,
-			requestModel:         "gemini-3-pro",
+			requestModel:         "gemini-3-flash",
 		},
 		{
 			name: "reasoning effort unsupported value",
