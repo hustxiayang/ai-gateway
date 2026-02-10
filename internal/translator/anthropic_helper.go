@@ -581,9 +581,7 @@ func getThinkingConfigParamUnion(tu *openai.ThinkingUnion) *anthropic.ThinkingCo
 // See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
 func outputConfigAvailable(model internalapi.RequestModel) bool {
 	modelLower := strings.ToLower(model)
-	return strings.Contains(modelLower, "4.5") ||
-		strings.Contains(modelLower, "4.6") ||
-		strings.Contains(modelLower, "4-5") ||
+	return strings.Contains(modelLower, "4-5") ||
 		strings.Contains(modelLower, "4-6")
 }
 
