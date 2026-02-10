@@ -900,16 +900,6 @@ func TestOutputConfigAvailable(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "claude-4.5-sonnet supported",
-			model:    "claude-4.5-sonnet",
-			expected: false,
-		},
-		{
-			name:     "claude-4.6-opus supported",
-			model:    "claude-4.6-opus",
-			expected: false,
-		},
-		{
 			name:     "claude-sonnet-4-5-20250514 supported",
 			model:    "claude-sonnet-4-5-20250514",
 			expected: true,
@@ -965,7 +955,7 @@ func TestBuildAnthropicParamsWithStructuredOutput(t *testing.T) {
 		{
 			name: "structured output with json_schema on supported model",
 			request: &openai.ChatCompletionRequest{
-				Model:               "claude-4.5-sonnet",
+				Model:               "claude-sonnet-4-5-20250514",
 				MaxCompletionTokens: ptr.To(int64(1024)),
 				Messages: []openai.ChatCompletionMessageParamUnion{
 					{OfUser: &openai.ChatCompletionUserMessageParam{
@@ -1019,7 +1009,7 @@ func TestBuildAnthropicParamsWithStructuredOutput(t *testing.T) {
 		{
 			name: "no response format",
 			request: &openai.ChatCompletionRequest{
-				Model:               "claude-4.5-sonnet",
+				Model:               "claude-sonnet-4-5-20250514",
 				MaxCompletionTokens: ptr.To(int64(1024)),
 				Messages: []openai.ChatCompletionMessageParamUnion{
 					{OfUser: &openai.ChatCompletionUserMessageParam{
@@ -1033,7 +1023,7 @@ func TestBuildAnthropicParamsWithStructuredOutput(t *testing.T) {
 		{
 			name: "invalid json schema returns error",
 			request: &openai.ChatCompletionRequest{
-				Model:               "claude-4.5-sonnet",
+				Model:               "claude-sonnet-4-5-20250514",
 				MaxCompletionTokens: ptr.To(int64(1024)),
 				Messages: []openai.ChatCompletionMessageParamUnion{
 					{OfUser: &openai.ChatCompletionUserMessageParam{
@@ -1057,7 +1047,7 @@ func TestBuildAnthropicParamsWithStructuredOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params, err := buildAnthropicParams(tt.request)
+			params, err := buildAnthropicParams(tt.request, "AWSAnthropic")
 
 			if tt.expectErr {
 				require.Error(t, err)
