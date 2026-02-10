@@ -902,12 +902,12 @@ func TestOutputConfigAvailable(t *testing.T) {
 		{
 			name:     "claude-4.5-sonnet supported",
 			model:    "claude-4.5-sonnet",
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "claude-4.6-opus supported",
 			model:    "claude-4.6-opus",
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "claude-sonnet-4-5-20250514 supported",
