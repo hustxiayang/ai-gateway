@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
@@ -72,7 +73,14 @@ func (a *anthropicToGCPAnthropicTranslator) RequestBody(raw []byte, req *anthrop
 	// Strip output_config.format from the body since GCP Vertex AI does not support structured outputs.
 	// Requests with output_config.format will be rejected by Vertex with "Extra inputs are not permitted".
 	// We only strip the format field, preserving other output_config fields like effort.
-	newBody, _ = sjson.DeleteBytesOptions(newBody, "output_config.format", sjsonOptionsInPlace)
+	if gjson.GetBytes(newBody, "output_config.format").Exists() {
+		newBody, _ = sjson.DeleteBytesOptions(newBody, "output_config.format", sjsonOptionsInPlace)
+		// If output_config is now empty (format was the only field), remove the entire key
+		// to avoid leaving an empty object that GCP may also reject.
+		if oc := gjson.GetBytes(newBody, "output_config"); oc.Exists() && len(oc.Map()) == 0 {
+			newBody, _ = sjson.DeleteBytesOptions(newBody, "output_config", sjsonOptionsInPlace)
+		}
+	}
 
 	// Determine the GCP path based on whether streaming is requested.
 	specifier := "rawPredict"
@@ -92,26 +100,23 @@ func (a *anthropicToGCPAnthropicTranslator) RequestBody(raw []byte, req *anthrop
 	return
 }
 
-// filteredAnthropicBetaHeader returns a new anthropic-beta header with the
-// "structured-outputs-2025-12-15" value removed, or nil if no change is needed.
+// filteredAnthropicBetaHeader returns the anthropic-beta header with the
+// "structured-outputs-2025-12-15" value removed. If no anthropic-beta header
+// exists in the request, returns nil.
 // The anthropic-beta header is a comma-separated list of beta feature names.
 func (a *anthropicToGCPAnthropicTranslator) filteredAnthropicBetaHeader() *internalapi.Header {
 	betaValue, ok := a.requestHeaders[anthropicBetaHeaderName]
-	if !ok || betaValue == "" {
+	if !ok {
 		return nil
 	}
 	betas := strings.Split(betaValue, ",")
 	filtered := make([]string, 0, len(betas))
-	changed := false
 	for _, b := range betas {
-		if strings.TrimSpace(b) == structuredOutputsBetaValue {
-			changed = true
+		trimmed := strings.TrimSpace(b)
+		if trimmed == "" || trimmed == structuredOutputsBetaValue {
 			continue
 		}
-		filtered = append(filtered, b)
-	}
-	if !changed {
-		return nil
+		filtered = append(filtered, trimmed)
 	}
 	h := internalapi.Header{anthropicBetaHeaderName, strings.Join(filtered, ",")}
 	return &h

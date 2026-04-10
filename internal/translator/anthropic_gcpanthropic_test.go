@@ -480,43 +480,39 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_StripsOutputConfigFormat(
 
 func TestAnthropicToGCPAnthropicTranslator_RequestBody_StripsStructuredOutputsBeta(t *testing.T) {
 	tests := []struct {
-		name              string
-		requestHeaders    map[string]string
-		expectBetaHeader  bool
-		expectedBetaValue string
+		name               string
+		requestHeaders     map[string]string
+		expectBetaInOutput bool   // whether anthropic-beta should appear in returned headers
+		expectedBetaValue  string // expected value if present
 	}{
 		{
-			name:             "no anthropic-beta header",
-			requestHeaders:   map[string]string{},
-			expectBetaHeader: false,
+			name:               "no anthropic-beta header in request",
+			requestHeaders:     map[string]string{},
+			expectBetaInOutput: false,
 		},
 		{
-			name:             "empty anthropic-beta header",
-			requestHeaders:   map[string]string{"anthropic-beta": ""},
-			expectBetaHeader: false,
+			name:               "only structured-outputs beta is stripped, result is empty",
+			requestHeaders:     map[string]string{"anthropic-beta": "structured-outputs-2025-12-15"},
+			expectBetaInOutput: true,
+			expectedBetaValue:  "",
 		},
 		{
-			name:              "only structured-outputs beta is stripped",
-			requestHeaders:    map[string]string{"anthropic-beta": "structured-outputs-2025-12-15"},
-			expectBetaHeader:  true,
-			expectedBetaValue: "",
+			name:               "structured-outputs stripped, other betas preserved",
+			requestHeaders:     map[string]string{"anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15,structured-outputs-2025-12-15"},
+			expectBetaInOutput: true,
+			expectedBetaValue:  "max-tokens-3-5-sonnet-2024-07-15",
 		},
 		{
-			name:              "structured-outputs stripped, other betas preserved",
-			requestHeaders:    map[string]string{"anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15,structured-outputs-2025-12-15"},
-			expectBetaHeader:  true,
-			expectedBetaValue: "max-tokens-3-5-sonnet-2024-07-15",
+			name:               "structured-outputs in middle stripped, others preserved",
+			requestHeaders:     map[string]string{"anthropic-beta": "beta-a,structured-outputs-2025-12-15,beta-b"},
+			expectBetaInOutput: true,
+			expectedBetaValue:  "beta-a,beta-b",
 		},
 		{
-			name:              "structured-outputs in middle stripped, others preserved",
-			requestHeaders:    map[string]string{"anthropic-beta": "beta-a,structured-outputs-2025-12-15,beta-b"},
-			expectBetaHeader:  true,
-			expectedBetaValue: "beta-a,beta-b",
-		},
-		{
-			name:             "unrelated beta not stripped",
-			requestHeaders:   map[string]string{"anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15"},
-			expectBetaHeader: false,
+			name:               "unrelated beta passes through unchanged",
+			requestHeaders:     map[string]string{"anthropic-beta": "max-tokens-3-5-sonnet-2024-07-15"},
+			expectBetaInOutput: true,
+			expectedBetaValue:  "max-tokens-3-5-sonnet-2024-07-15",
 		},
 	}
 
@@ -546,11 +542,11 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_StripsStructuredOutputsBe
 				}
 			}
 
-			if tt.expectBetaHeader {
-				assert.True(t, foundBeta, "expected anthropic-beta header in response")
+			if tt.expectBetaInOutput {
+				require.True(t, foundBeta, "expected anthropic-beta in returned headers")
 				assert.Equal(t, tt.expectedBetaValue, betaValue)
 			} else {
-				assert.False(t, foundBeta, "did not expect anthropic-beta header in response")
+				assert.False(t, foundBeta, "no anthropic-beta in request, so none in output")
 			}
 		})
 	}
