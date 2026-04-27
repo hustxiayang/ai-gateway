@@ -1040,12 +1040,13 @@ type ChatCompletionRequest struct {
 
 	// Constrains effort on reasoning for
 	// [reasoning models](https://platform.openai.com/docs/guides/reasoning). Currently
-	// supported values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Reducing reasoning
+	// supported values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`. Reducing reasoning
 	// effort can result in faster responses and fewer tokens used on reasoning in a
 	// response.
+	// Note: `max` is an Anthropic-specific extension not defined in the OpenAI SDK.
 	//
-	// Any of "minimal", "low", "medium", "high", "xhigh", "max".
-	ReasoningEffort openai.ReasoningEffort `json:"reasoning_effort,omitzero"`
+	// Any of "none", "low", "medium", "high", "xhigh", "max".
+	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitzero"`
 
 	// ServiceTier:string or null
 	// Specifies the processing type used for serving the request.
