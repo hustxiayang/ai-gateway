@@ -394,6 +394,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:application/pdf;base64,dGVzdA==",
@@ -412,6 +415,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "pdf",
@@ -484,6 +490,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "analyze this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:text/csv;base64,dGVzdA==",
@@ -502,6 +511,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("analyze this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "csv",
@@ -526,6 +538,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,dGVzdA==",
@@ -544,6 +559,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "docx",
@@ -568,6 +586,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:application/msword;base64,dGVzdA==",
@@ -586,6 +607,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "doc",
@@ -610,6 +634,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "analyze this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:application/vnd.ms-excel;base64,dGVzdA==",
@@ -628,6 +655,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("analyze this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "xls",
@@ -652,6 +682,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "analyze this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,dGVzdA==",
@@ -670,6 +703,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("analyze this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "xlsx",
@@ -694,6 +730,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:text/html;base64,dGVzdA==",
@@ -712,6 +751,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "html",
@@ -736,6 +778,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:text/plain;base64,dGVzdA==",
@@ -754,6 +799,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "txt",
@@ -778,6 +826,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 						OfUser: &openai.ChatCompletionUserMessageParam{
 							Content: openai.StringOrUserRoleContentUnion{
 								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfText: &openai.ChatCompletionContentPartTextParam{
+										Text: "summarize this",
+									}},
 									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
 										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
 											URL: "data:text/markdown;base64,dGVzdA==",
@@ -796,6 +847,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 					{
 						Role: openai.ChatMessageRoleUser,
 						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("summarize this"),
+							},
 							{
 								Document: &awsbedrock.DocumentBlock{
 									Format: "md",
@@ -2266,6 +2320,29 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBodyErr(t *testing.
 					},
 				},
 				ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: 123},
+			},
+			err: internalapi.ErrInvalidRequestBody,
+		},
+		{
+			name: "test document without text block",
+			input: openai.ChatCompletionRequest{
+				Model: "gpt-4o",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Content: openai.StringOrUserRoleContentUnion{
+								Value: []openai.ChatCompletionContentPartUserUnionParam{
+									{OfImageURL: &openai.ChatCompletionContentPartImageParam{
+										ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+											URL: "data:application/pdf;base64,dGVzdA==",
+										},
+									}},
+								},
+							},
+							Role: openai.ChatMessageRoleUser,
+						},
+					},
+				},
 			},
 			err: internalapi.ErrInvalidRequestBody,
 		},

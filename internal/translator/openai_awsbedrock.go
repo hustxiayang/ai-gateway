@@ -285,9 +285,11 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 	} else if contents, ok := openAiMessage.Content.Value.([]openai.ChatCompletionContentPartUserUnionParam); ok {
 		chatMessage := &awsbedrock.Message{Role: role}
 		chatMessage.Content = make([]*awsbedrock.ContentBlock, 0, len(contents))
+		var hasText, hasDocument bool
 		for i := range contents {
 			contentPart := &contents[i]
 			if contentPart.OfText != nil {
+				hasText = true
 				textContentPart := contentPart.OfText
 				block := &awsbedrock.ContentBlock{
 					Text: &textContentPart.Text,
@@ -308,6 +310,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 
 				var block *awsbedrock.ContentBlock
 				if docFormat, ok := mimeTypeToDocumentFormat(contentType); ok {
+					hasDocument = true
 					block = &awsbedrock.ContentBlock{
 						Document: &awsbedrock.DocumentBlock{
 							Format: docFormat,
@@ -337,6 +340,9 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 					})
 				}
 			}
+		}
+		if hasDocument && !hasText {
+			return nil, fmt.Errorf("%w: Bedrock requires at least one text block alongside a document block", internalapi.ErrInvalidRequestBody)
 		}
 		return chatMessage, nil
 	}
