@@ -77,6 +77,52 @@ func getAwsBedrockThinkingMap(tu *openai.ThinkingUnion) map[string]any {
 	return resultMap
 }
 
+// mimeTypeToImageFormat maps a MIME type to a Bedrock image format string.
+// Returns the format and true if the MIME type is a supported image type, or empty string and false otherwise.
+// Supported formats: png, jpeg, gif, webp.
+func mimeTypeToImageFormat(mimeType string) (string, bool) {
+	switch mimeType {
+	case mimeTypeImagePNG:
+		return "png", true
+	case mimeTypeImageJPEG:
+		return "jpeg", true
+	case mimeTypeImageGIF:
+		return "gif", true
+	case mimeTypeImageWEBP:
+		return "webp", true
+	default:
+		return "", false
+	}
+}
+
+// mimeTypeToDocumentFormat maps a MIME type to a Bedrock document format string.
+// Returns the format and true if the MIME type is a supported document type, or empty string and false otherwise.
+// Supported formats: pdf, csv, doc, docx, xls, xlsx, html, txt, md.
+func mimeTypeToDocumentFormat(mimeType string) (string, bool) {
+	switch mimeType {
+	case mimeTypeApplicationPDF:
+		return "pdf", true
+	case mimeTypeTextCSV:
+		return "csv", true
+	case mimeTypeApplicationMSWord:
+		return "doc", true
+	case mimeTypeApplicationDocx:
+		return "docx", true
+	case mimeTypeApplicationMSExcel:
+		return "xls", true
+	case mimeTypeApplicationXlsx:
+		return "xlsx", true
+	case mimeTypeTextHTML:
+		return "html", true
+	case mimeTypeTextPlain:
+		return "txt", true
+	case mimeTypeTextMarkdown:
+		return "md", true
+	default:
+		return "", false
+	}
+}
+
 // getCachePoint returns a cache point block for AWS Bedrock if cache control is enabled, otherwise nil.
 func getCachePoint(fields *openai.AnthropicContentFields) *awsbedrock.CachePointBlock {
 	if isCacheEnabled(fields) {
@@ -261,38 +307,27 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) openAIMessageToBedrockMes
 				}
 
 				var block *awsbedrock.ContentBlock
-				if contentType == mimeTypeApplicationPDF {
+				if docFormat, ok := mimeTypeToDocumentFormat(contentType); ok {
 					block = &awsbedrock.ContentBlock{
 						Document: &awsbedrock.DocumentBlock{
-							Format: "pdf",
+							Format: docFormat,
 							Name:   "document",
 							Source: awsbedrock.DocumentSource{
 								Bytes: b,
 							},
 						},
 					}
-				} else {
-					var format string
-					switch contentType {
-					case mimeTypeImagePNG:
-						format = "png"
-					case mimeTypeImageJPEG:
-						format = "jpeg"
-					case mimeTypeImageGIF:
-						format = "gif"
-					case mimeTypeImageWEBP:
-						format = "webp"
-					default:
-						return nil, fmt.Errorf("%w: unsupported image format %s", internalapi.ErrInvalidRequestBody, contentType)
-					}
+				} else if imgFormat, ok := mimeTypeToImageFormat(contentType); ok {
 					block = &awsbedrock.ContentBlock{
 						Image: &awsbedrock.ImageBlock{
-							Format: format,
+							Format: imgFormat,
 							Source: awsbedrock.ImageSource{
-								Bytes: b, // Decoded data as bytes.
+								Bytes: b,
 							},
 						},
 					}
+				} else {
+					return nil, fmt.Errorf("%w: unsupported format %s", internalapi.ErrInvalidRequestBody, contentType)
 				}
 				chatMessage.Content = append(chatMessage.Content, block)
 				cachePointBlock := getCachePoint(imageContentPart.AnthropicContentFields)
