@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
+
+	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -19,7 +22,8 @@ import (
 )
 
 const (
-	gcpMethodPredict = "predict"
+	gcpMethodPredict      = "predict"
+	gcpMethodEmbedContent = "embedContent"
 )
 
 // NewEmbeddingOpenAIToGCPVertexAITranslator implements [Factory] for OpenAI to GCP VertexAI translation
@@ -32,11 +36,15 @@ func NewEmbeddingOpenAIToGCPVertexAITranslator(requestModel internalapi.RequestM
 }
 
 // openAIToGCPVertexAITranslatorV1Embedding translates OpenAI Embeddings API to GCP Vertex AI Gemini Embeddings API.
-// Note: This uses the Gemini native API (predict endpoint), not Vertex AI's OpenAI-compatible API:
+// It auto-detects the endpoint based on model name:
+//   - Older models (text-embedding-004, gemini-embedding-001): predict endpoint
+//   - Newer models (gemini-embedding-2-*, maas-*): embedContent endpoint
+//
 // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api
 type openAIToGCPVertexAITranslatorV1Embedding struct {
 	requestModel      internalapi.RequestModel
 	modelNameOverride internalapi.ModelNameOverride
+	useEmbedContent   bool
 }
 
 // createInstancesFromEmbeddingInputItem converts an EmbeddingInputItem to GCP Instance(s).
@@ -145,6 +153,89 @@ func openAIEmbeddingToGeminiMessage(openAIReq *openai.EmbeddingRequest) (*gcp.Pr
 	return gcr, nil
 }
 
+// isEmbedContentModel returns true if the model should use the embedContent endpoint
+// instead of the predict endpoint. This mirrors the logic in the genai SDK.
+func isEmbedContentModel(model string) bool {
+	return (strings.Contains(model, "gemini") && model != "gemini-embedding-001") ||
+		strings.Contains(model, "maas")
+}
+
+// collectInputTexts extracts all input text strings from an OpenAI EmbeddingRequestInput.
+func collectInputTexts(input openai.EmbeddingRequestInput) ([]string, error) {
+	switch v := input.Value.(type) {
+	case string:
+		return []string{v}, nil
+	case []string:
+		return v, nil
+	case openai.EmbeddingInputItem:
+		switch c := v.Content.Value.(type) {
+		case string:
+			return []string{c}, nil
+		case []string:
+			return c, nil
+		}
+		return nil, fmt.Errorf("unsupported EmbeddingInputItem content type: %T", v.Content.Value)
+	case []openai.EmbeddingInputItem:
+		var texts []string
+		for _, item := range v {
+			switch c := item.Content.Value.(type) {
+			case string:
+				texts = append(texts, c)
+			case []string:
+				texts = append(texts, c...)
+			default:
+				return nil, fmt.Errorf("unsupported EmbeddingInputItem content type: %T", item.Content.Value)
+			}
+		}
+		return texts, nil
+	default:
+		return nil, fmt.Errorf("unsupported input type for embedding: %T", v)
+	}
+}
+
+// openAIEmbeddingToEmbedContentRequest converts an OpenAI EmbeddingRequest to a GCP EmbedContentRequest.
+// Each input text becomes a separate Part in a single Content object.
+func openAIEmbeddingToEmbedContentRequest(openAIReq *openai.EmbeddingRequest) (*gcp.EmbedContentRequest, error) {
+	texts, err := collectInputTexts(openAIReq.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	parts := make([]*genai.Part, len(texts))
+	for i, text := range texts {
+		parts[i] = genai.NewPartFromText(text)
+	}
+
+	req := &gcp.EmbedContentRequest{
+		Content: genai.Content{Parts: parts},
+	}
+
+	if openAIReq.Dimensions != nil && *openAIReq.Dimensions > 0 {
+		req.OutputDimensionality = *openAIReq.Dimensions
+	}
+
+	if openAIReq.GCPVertexAIEmbeddingVendorFields != nil {
+		if openAIReq.AutoTruncate {
+			req.AutoTruncate = &openAIReq.AutoTruncate
+		}
+		if openAIReq.TaskType != "" {
+			req.TaskType = openAIReq.TaskType
+		}
+	}
+
+	// Also check per-item task type from single EmbeddingInputItem (non-vendor field).
+	if item, ok := openAIReq.Input.Value.(openai.EmbeddingInputItem); ok && req.TaskType == "" {
+		if item.TaskType != "" {
+			req.TaskType = item.TaskType
+		}
+		if item.TaskType == openai.EmbeddingTaskTypeRetrievalDocument && item.Title != "" {
+			req.Title = item.Title
+		}
+	}
+
+	return req, nil
+}
+
 // RequestBody implements [OpenAIEmbeddingTranslator.RequestBody] for GCP Gemini.
 // This method translates an OpenAI Embedding request to a GCP Gemini Embeddings API request.
 func (o *openAIToGCPVertexAITranslatorV1Embedding) RequestBody(_ []byte, req *openai.EmbeddingRequest, _ bool) (
@@ -156,18 +247,30 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) RequestBody(_ []byte, req *op
 		o.requestModel = o.modelNameOverride
 	}
 
-	// Use the predict endpoint for text embeddings in Vertex AI.
-	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api#curl
-	path := buildGCPModelPathSuffix(gcpModelPublisherGoogle, o.requestModel, gcpMethodPredict)
+	var path string
 
-	var gcpReq *gcp.PredictRequest
+	if isEmbedContentModel(o.requestModel) {
+		o.useEmbedContent = true
+		path = buildGCPModelPathSuffix(gcpModelPublisherGoogle, o.requestModel, gcpMethodEmbedContent)
 
-	gcpReq, err = openAIEmbeddingToGeminiMessage(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error converting EmbeddingRequest: %w", err)
+		var gcpReq *gcp.EmbedContentRequest
+		gcpReq, err = openAIEmbeddingToEmbedContentRequest(req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error converting EmbeddingRequest: %w", err)
+		}
+		newBody, err = json.Marshal(gcpReq)
+	} else {
+		o.useEmbedContent = false
+		path = buildGCPModelPathSuffix(gcpModelPublisherGoogle, o.requestModel, gcpMethodPredict)
+
+		var gcpReq *gcp.PredictRequest
+		gcpReq, err = openAIEmbeddingToGeminiMessage(req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error converting EmbeddingRequest: %w", err)
+		}
+		newBody, err = json.Marshal(gcpReq)
 	}
 
-	newBody, err = json.Marshal(gcpReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error marshaling Gemini request: %w", err)
 	}
@@ -197,56 +300,19 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseBody(_ map[string]str
 		return nil, nil, tokenUsage, "", fmt.Errorf("failed to read gemini embedding response body: %w", err)
 	}
 
-	// Unmarshal as GCP PredictResponse.
-	var gcpResp gcp.PredictResponse
-	err = json.Unmarshal(respBody, &gcpResp)
-	if err != nil {
-		return nil, nil, tokenUsage, "", fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	// Convert GCP response to OpenAI format.
-	openaiResp := openai.EmbeddingResponse{
-		Object: "list",
-		Model:  o.requestModel,
-		Usage: openai.EmbeddingUsage{
-			PromptTokens: 0, // Will be set from token usage
-			TotalTokens:  0, // Will be set from token usage
-		},
-	}
-
+	var openaiResp openai.EmbeddingResponse
 	var promptTokens int
-	// Convert embedding vectors from GCP predictions to OpenAI embeddings.
-	if len(gcpResp.Predictions) > 0 {
-		openaiResp.Data = make([]openai.Embedding, len(gcpResp.Predictions))
-		for i, prediction := range gcpResp.Predictions {
-			if prediction != nil {
-				// Convert float32 slice to float64 slice for OpenAI format.
-				float64Values := make([]float64, len(prediction.Embeddings.Values))
-				for j, v := range prediction.Embeddings.Values {
-					float64Values[j] = float64(v)
-				}
 
-				openaiResp.Data[i] = openai.Embedding{
-					Object:    "embedding",
-					Index:     i,
-					Embedding: openai.EmbeddingUnion{Value: float64Values},
-				}
-
-				// Extract token count from statistics if available.
-				if prediction.Embeddings.Statistics != nil {
-					// Accumulate token counts across all predictions.
-					promptTokens += prediction.Embeddings.Statistics.TokenCount
-					// Propagate truncation information to the response.
-					openaiResp.Data[i].Truncated = prediction.Embeddings.Statistics.Truncated
-				}
-			}
-		}
+	if o.useEmbedContent {
+		openaiResp, promptTokens, err = o.parseEmbedContentResponse(respBody)
 	} else {
-		openaiResp.Data = []openai.Embedding{}
+		openaiResp, promptTokens, err = o.parsePredictResponse(respBody)
+	}
+	if err != nil {
+		return nil, nil, tokenUsage, "", err
 	}
 
 	// Set token usage from accumulated values.
-	// Embeddings only consume input tokens, so total equals prompt tokens.
 	openaiResp.Usage.PromptTokens = promptTokens
 	openaiResp.Usage.TotalTokens = promptTokens
 
@@ -257,7 +323,6 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseBody(_ map[string]str
 	}
 
 	// Update token usage metrics.
-	// Embeddings don't return output tokens; populate input and total when provided.
 	tokenUsage.SetInputTokens(uint32(promptTokens)) //nolint:gosec
 	tokenUsage.SetTotalTokens(uint32(promptTokens)) //nolint:gosec
 
@@ -267,10 +332,87 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseBody(_ map[string]str
 	}
 
 	newHeaders = []internalapi.Header{{contentLengthHeaderName, strconv.Itoa(len(newBody))}}
-
 	responseModel = openaiResp.Model
-
 	return
+}
+
+// parsePredictResponse parses a GCP PredictResponse and converts it to the OpenAI format.
+func (o *openAIToGCPVertexAITranslatorV1Embedding) parsePredictResponse(respBody []byte) (openai.EmbeddingResponse, int, error) {
+	var gcpResp gcp.PredictResponse
+	if err := json.Unmarshal(respBody, &gcpResp); err != nil {
+		return openai.EmbeddingResponse{}, 0, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	openaiResp := openai.EmbeddingResponse{
+		Object: "list",
+		Model:  o.requestModel,
+	}
+
+	var promptTokens int
+	if len(gcpResp.Predictions) > 0 {
+		openaiResp.Data = make([]openai.Embedding, len(gcpResp.Predictions))
+		for i, prediction := range gcpResp.Predictions {
+			if prediction != nil {
+				float64Values := make([]float64, len(prediction.Embeddings.Values))
+				for j, v := range prediction.Embeddings.Values {
+					float64Values[j] = float64(v)
+				}
+				openaiResp.Data[i] = openai.Embedding{
+					Object:    "embedding",
+					Index:     i,
+					Embedding: openai.EmbeddingUnion{Value: float64Values},
+				}
+				if prediction.Embeddings.Statistics != nil {
+					promptTokens += prediction.Embeddings.Statistics.TokenCount
+					openaiResp.Data[i].Truncated = prediction.Embeddings.Statistics.Truncated
+				}
+			}
+		}
+	} else {
+		openaiResp.Data = []openai.Embedding{}
+	}
+
+	return openaiResp, promptTokens, nil
+}
+
+// parseEmbedContentResponse parses a GCP EmbedContentResponse and converts it to the OpenAI format.
+func (o *openAIToGCPVertexAITranslatorV1Embedding) parseEmbedContentResponse(respBody []byte) (openai.EmbeddingResponse, int, error) {
+	var gcpResp gcp.EmbedContentResponse
+	if err := json.Unmarshal(respBody, &gcpResp); err != nil {
+		return openai.EmbeddingResponse{}, 0, fmt.Errorf("failed to unmarshal embedContent response: %w", err)
+	}
+
+	openaiResp := openai.EmbeddingResponse{
+		Object: "list",
+		Model:  o.requestModel,
+	}
+
+	var promptTokens int
+	if len(gcpResp.Embeddings) > 0 {
+		openaiResp.Data = make([]openai.Embedding, len(gcpResp.Embeddings))
+		for i, emb := range gcpResp.Embeddings {
+			if emb == nil {
+				continue
+			}
+			float64Values := make([]float64, len(emb.Values))
+			for j, v := range emb.Values {
+				float64Values[j] = float64(v)
+			}
+			openaiResp.Data[i] = openai.Embedding{
+				Object:    "embedding",
+				Index:     i,
+				Embedding: openai.EmbeddingUnion{Value: float64Values},
+			}
+			if emb.Statistics != nil {
+				promptTokens += int(emb.Statistics.TokenCount)
+				openaiResp.Data[i].Truncated = emb.Statistics.Truncated
+			}
+		}
+	} else {
+		openaiResp.Data = []openai.Embedding{}
+	}
+
+	return openaiResp, promptTokens, nil
 }
 
 // ResponseError implements [OpenAIEmbeddingTranslator.ResponseError].

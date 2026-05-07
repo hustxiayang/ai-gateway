@@ -107,3 +107,38 @@ type Prediction struct {
 type PredictResponse struct {
 	Predictions []*Prediction `json:"predictions"`
 }
+
+// EmbedContentRequest is the request body for the embedContent endpoint used by newer embedding models
+// (e.g. gemini-embedding-2-*). All input texts are packed as parts in a single Content object.
+// https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api
+type EmbedContentRequest struct {
+	Content              genai.Content            `json:"content"`
+	TaskType             openai.EmbeddingTaskType `json:"taskType,omitempty"`
+	Title                string                   `json:"title,omitempty"`
+	OutputDimensionality int                      `json:"outputDimensionality,omitempty"`
+	AutoTruncate         *bool                    `json:"autoTruncate,omitempty"`
+}
+
+// EmbedContentResponse is the response from the embedContent endpoint.
+// Each part in the request produces a corresponding embedding in the response.
+type EmbedContentResponse struct {
+	Embeddings []*EmbedContentEmbedding `json:"embeddings,omitempty"`
+}
+
+// EmbedContentEmbedding represents a single embedding from the embedContent response.
+type EmbedContentEmbedding struct {
+	// The embedding values.
+	Values []float32 `json:"values,omitempty"`
+	// Vertex API only. Statistics of the input text associated with this embedding.
+	Statistics *EmbedContentEmbeddingStatistics `json:"statistics,omitempty"`
+}
+
+// EmbedContentEmbeddingStatistics contains per-embedding statistics from the embedContent endpoint.
+// Note: Unlike the predict endpoint which uses snake_case (token_count), the embedContent endpoint
+// uses camelCase (tokenCount), matching the genai SDK's ContentEmbeddingStatistics type.
+type EmbedContentEmbeddingStatistics struct {
+	// Number of tokens of the input text.
+	TokenCount float32 `json:"tokenCount,omitempty"`
+	// Whether the input text was truncated.
+	Truncated bool `json:"truncated,omitempty"`
+}
