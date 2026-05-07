@@ -38,7 +38,7 @@ func NewEmbeddingOpenAIToGCPVertexAITranslator(requestModel internalapi.RequestM
 // openAIToGCPVertexAITranslatorV1Embedding translates OpenAI Embeddings API to GCP Vertex AI Gemini Embeddings API.
 // It auto-detects the endpoint based on model name:
 //   - Older models (text-embedding-004, gemini-embedding-001): predict endpoint
-//   - Newer models (gemini-embedding-2-*, maas-*): embedContent endpoint
+//   - Newer models (gemini-embedding-2-*): embedContent endpoint
 //
 // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api
 type openAIToGCPVertexAITranslatorV1Embedding struct {
@@ -107,15 +107,18 @@ func setInstances(input openai.EmbeddingRequestInput, instances []*gcp.Instance)
 		}
 		return instances, nil
 	default:
-		return nil, fmt.Errorf("unsupported input type for embedding: %T (supported: string, []string, EmbeddingInputItem, []EmbeddingInputItem)", v)
+		return nil, fmt.Errorf("%w: unsupported input type for embedding: %T (supported: string, []string, EmbeddingInputItem, []EmbeddingInputItem)", internalapi.ErrInvalidRequestBody, v)
 	}
 }
 
-// openAIEmbeddingToGeminiMessage converts an OpenAI EmbeddingRequest to a GCP PredictRequest.
+// openAIEmbeddingToGeminiMessage converts an OpenAI EmbeddingCompletionRequest to a GCP PredictRequest.
 func openAIEmbeddingToGeminiMessage(openAIReq *openai.EmbeddingRequest) (*gcp.PredictRequest, error) {
+	if openAIReq.OfCompletion == nil {
+		return nil, fmt.Errorf("%w: model %s does not support multimodal embedding via messages", internalapi.ErrInvalidRequestBody, openAIReq.Model)
+	}
 	// Convert OpenAI EmbeddingRequest's input to Gemini instances.
 	var instances []*gcp.Instance
-	instances, err := setInstances(openAIReq.Input, instances)
+	instances, err := setInstances(openAIReq.OfCompletion.Input, instances)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +145,12 @@ func openAIEmbeddingToGeminiMessage(openAIReq *openai.EmbeddingRequest) (*gcp.Pr
 				instance.TaskType = openAIReq.TaskType
 			}
 		}
+		// Apply global title to all instances if specified.
+		if openAIReq.Title != "" {
+			for _, instance := range instances {
+				instance.Title = openAIReq.Title
+			}
+		}
 	}
 
 	// Build the request using gcp.PredictRequest.
@@ -154,13 +163,16 @@ func openAIEmbeddingToGeminiMessage(openAIReq *openai.EmbeddingRequest) (*gcp.Pr
 }
 
 // isEmbedContentModel returns true if the model should use the embedContent endpoint
-// instead of the predict endpoint. This mirrors the logic in the genai SDK.
+// instead of the predict endpoint.
+// Reference: https://github.com/googleapis/go-genai/blob/v1.54.0/transformer.go#L565
+// Check and update this function when new Gemini embedding model versions are released.
 func isEmbedContentModel(model string) bool {
-	return (strings.Contains(model, "gemini") && model != "gemini-embedding-001") ||
-		strings.Contains(model, "maas")
+	return strings.Contains(model, "gemini") && model != "gemini-embedding-001"
 }
 
 // collectInputTexts extracts all input text strings from an OpenAI EmbeddingRequestInput.
+// Only plain string inputs are supported for the embedContent endpoint.
+// EmbeddingInputItem (with per-item task_type/title) is rejected — use global vendor fields instead.
 func collectInputTexts(input openai.EmbeddingRequestInput) ([]string, error) {
 	switch v := input.Value.(type) {
 	case string:
@@ -168,69 +180,98 @@ func collectInputTexts(input openai.EmbeddingRequestInput) ([]string, error) {
 	case []string:
 		return v, nil
 	case openai.EmbeddingInputItem:
-		switch c := v.Content.Value.(type) {
-		case string:
-			return []string{c}, nil
-		case []string:
-			return c, nil
-		}
-		return nil, fmt.Errorf("unsupported EmbeddingInputItem content type: %T", v.Content.Value)
+		return nil, fmt.Errorf("%w: object input with per-item task_type/title is not supported for this model; use plain string input and set task_type at the request level", internalapi.ErrInvalidRequestBody)
 	case []openai.EmbeddingInputItem:
-		var texts []string
-		for _, item := range v {
-			switch c := item.Content.Value.(type) {
-			case string:
-				texts = append(texts, c)
-			case []string:
-				texts = append(texts, c...)
-			default:
-				return nil, fmt.Errorf("unsupported EmbeddingInputItem content type: %T", item.Content.Value)
-			}
-		}
-		return texts, nil
+		return nil, fmt.Errorf("%w: object input with per-item task_type/title is not supported for this model; use plain string input and set task_type at the request level", internalapi.ErrInvalidRequestBody)
 	default:
-		return nil, fmt.Errorf("unsupported input type for embedding: %T", v)
+		return nil, fmt.Errorf("%w: unsupported input type for embedding: %T", internalapi.ErrInvalidRequestBody, v)
 	}
+}
+
+// collectPartsFromMessages extracts genai.Part objects from chat messages for embedding.
+// Only user messages are processed; system/assistant/tool/developer messages are skipped.
+// Supported content types: text and images (URL or data URI).
+// Audio/video/PDF would require extending the OpenAI chat message schema.
+func collectPartsFromMessages(messages []openai.ChatCompletionMessageParamUnion, requestModel internalapi.RequestModel) ([]*genai.Part, error) {
+	var parts []*genai.Part
+	for _, msg := range messages {
+		if msg.OfUser == nil {
+			continue
+		}
+		msgParts, err := userMsgToGeminiParts(*msg.OfUser, requestModel)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, msgParts...)
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("%w: no user messages found in embedding request", internalapi.ErrInvalidRequestBody)
+	}
+	return parts, nil
 }
 
 // openAIEmbeddingToEmbedContentRequest converts an OpenAI EmbeddingRequest to a GCP EmbedContentRequest.
 // Each input text becomes a separate Part in a single Content object.
-func openAIEmbeddingToEmbedContentRequest(openAIReq *openai.EmbeddingRequest) (*gcp.EmbedContentRequest, error) {
-	texts, err := collectInputTexts(openAIReq.Input)
-	if err != nil {
-		return nil, err
-	}
+// When messages are provided, multimodal content parts are extracted from user messages.
+func openAIEmbeddingToEmbedContentRequest(openAIReq *openai.EmbeddingRequest, requestModel internalapi.RequestModel) (*gcp.EmbedContentRequest, error) {
+	var parts []*genai.Part
 
-	parts := make([]*genai.Part, len(texts))
-	for i, text := range texts {
-		parts[i] = genai.NewPartFromText(text)
+	switch {
+	case openAIReq.OfChat != nil:
+		// Multimodal path: convert chat messages to genai parts.
+		var err error
+		parts, err = collectPartsFromMessages(openAIReq.OfChat.Messages, requestModel)
+		if err != nil {
+			return nil, err
+		}
+	case openAIReq.OfCompletion != nil:
+		// Text-only path: existing collectInputTexts logic.
+		texts, err := collectInputTexts(openAIReq.OfCompletion.Input)
+		if err != nil {
+			return nil, err
+		}
+		parts = make([]*genai.Part, len(texts))
+		for i, text := range texts {
+			parts[i] = genai.NewPartFromText(text)
+		}
+	default:
+		return nil, fmt.Errorf("%w: embedding request must have either input or messages", internalapi.ErrInvalidRequestBody)
 	}
 
 	req := &gcp.EmbedContentRequest{
 		Content: genai.Content{Parts: parts},
 	}
 
+	// Config fields are sent via "embedContentConfig" (not deprecated top-level fields).
+	// https://github.com/googleapis/go-genai/blob/v1.54.0/models.go#L727
+	var config gcp.EmbedContentConfig
+	hasConfig := false
+
 	if openAIReq.Dimensions != nil && *openAIReq.Dimensions > 0 {
-		req.OutputDimensionality = *openAIReq.Dimensions
+		config.OutputDimensionality = *openAIReq.Dimensions
+		hasConfig = true
 	}
 
 	if openAIReq.GCPVertexAIEmbeddingVendorFields != nil {
 		if openAIReq.AutoTruncate {
-			req.AutoTruncate = &openAIReq.AutoTruncate
+			config.AutoTruncate = &openAIReq.AutoTruncate
+			hasConfig = true
 		}
+		// NOTE: gemini-embedding-2 silently ignores taskType — task must be included as a prompt
+		// instruction instead. We still send it in case future embedContent models support it.
+		// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/get-multimodal-embeddings
 		if openAIReq.TaskType != "" {
-			req.TaskType = openAIReq.TaskType
+			config.TaskType = openAIReq.TaskType
+			hasConfig = true
+		}
+		if openAIReq.Title != "" {
+			config.Title = openAIReq.Title
+			hasConfig = true
 		}
 	}
 
-	// Also check per-item task type from single EmbeddingInputItem (non-vendor field).
-	if item, ok := openAIReq.Input.Value.(openai.EmbeddingInputItem); ok && req.TaskType == "" {
-		if item.TaskType != "" {
-			req.TaskType = item.TaskType
-		}
-		if item.TaskType == openai.EmbeddingTaskTypeRetrievalDocument && item.Title != "" {
-			req.Title = item.Title
-		}
+	if hasConfig {
+		req.Config = &config
 	}
 
 	return req, nil
@@ -254,13 +295,18 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) RequestBody(_ []byte, req *op
 		path = buildGCPModelPathSuffix(gcpModelPublisherGoogle, o.requestModel, gcpMethodEmbedContent)
 
 		var gcpReq *gcp.EmbedContentRequest
-		gcpReq, err = openAIEmbeddingToEmbedContentRequest(req)
+		gcpReq, err = openAIEmbeddingToEmbedContentRequest(req, o.requestModel)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error converting EmbeddingRequest: %w", err)
 		}
 		newBody, err = json.Marshal(gcpReq)
 	} else {
 		o.useEmbedContent = false
+
+		if req.OfChat != nil {
+			return nil, nil, fmt.Errorf("%w: model %s does not support multimodal embedding via messages", internalapi.ErrInvalidRequestBody, o.requestModel)
+		}
+
 		path = buildGCPModelPathSuffix(gcpModelPublisherGoogle, o.requestModel, gcpMethodPredict)
 
 		var gcpReq *gcp.PredictRequest
@@ -388,25 +434,19 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) parseEmbedContentResponse(res
 	}
 
 	var promptTokens int
-	if len(gcpResp.Embeddings) > 0 {
-		openaiResp.Data = make([]openai.Embedding, len(gcpResp.Embeddings))
-		for i, emb := range gcpResp.Embeddings {
-			if emb == nil {
-				continue
-			}
-			float64Values := make([]float64, len(emb.Values))
-			for j, v := range emb.Values {
-				float64Values[j] = float64(v)
-			}
-			openaiResp.Data[i] = openai.Embedding{
-				Object:    "embedding",
-				Index:     i,
-				Embedding: openai.EmbeddingUnion{Value: float64Values},
-			}
-			if emb.Statistics != nil {
-				promptTokens += int(emb.Statistics.TokenCount)
-				openaiResp.Data[i].Truncated = emb.Statistics.Truncated
-			}
+	if gcpResp.Embedding != nil {
+		float64Values := make([]float64, len(gcpResp.Embedding.Values))
+		for j, v := range gcpResp.Embedding.Values {
+			float64Values[j] = float64(v)
+		}
+		openaiResp.Data = []openai.Embedding{{
+			Object:    "embedding",
+			Index:     0,
+			Embedding: openai.EmbeddingUnion{Value: float64Values},
+			Truncated: gcpResp.Truncated,
+		}}
+		if gcpResp.UsageMetadata != nil {
+			promptTokens = gcpResp.UsageMetadata.PromptTokenCount
 		}
 	} else {
 		openaiResp.Data = []openai.Embedding{}

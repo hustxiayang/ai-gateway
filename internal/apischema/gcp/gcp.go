@@ -110,9 +110,23 @@ type PredictResponse struct {
 
 // EmbedContentRequest is the request body for the embedContent endpoint used by newer embedding models
 // (e.g. gemini-embedding-2-*). All input texts are packed as parts in a single Content object.
-// https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api
+//
+// The REST API reference documents deprecated top-level fields (taskType, outputDimensionality, etc.):
+//
+//	https://docs.cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.publishers.models/embedContent
+//
+// However, Vertex AI also accepts "embedContentConfig" as a nested config object (undocumented in REST
+// reference but used by the genai SDK v1.54+ (https://github.com/googleapis/go-genai/blob/v1.54.0/models.go#L727)
+// and verified experimentally). We use "embedContentConfig" to follow the SDK convention and avoid
+// the deprecated fields.
 type EmbedContentRequest struct {
-	Content              genai.Content            `json:"content"`
+	Content genai.Content       `json:"content"`
+	Config  *EmbedContentConfig `json:"embedContentConfig,omitempty"`
+}
+
+// EmbedContentConfig contains optional parameters for the embedContent method.
+// https://github.com/googleapis/go-genai/blob/v1.54.0/models.go#L727
+type EmbedContentConfig struct {
 	TaskType             openai.EmbeddingTaskType `json:"taskType,omitempty"`
 	Title                string                   `json:"title,omitempty"`
 	OutputDimensionality int                      `json:"outputDimensionality,omitempty"`
@@ -120,25 +134,25 @@ type EmbedContentRequest struct {
 }
 
 // EmbedContentResponse is the response from the embedContent endpoint.
-// Each part in the request produces a corresponding embedding in the response.
+// The REST API returns a single embedding (not an array), plus usage metadata.
+// https://docs.cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.publishers.models/embedContent
 type EmbedContentResponse struct {
-	Embeddings []*EmbedContentEmbedding `json:"embeddings,omitempty"`
+	// The embedding generated from the input content (singular object, not an array).
+	Embedding *EmbedContentEmbedding `json:"embedding,omitempty"`
+	// Usage metadata about the response.
+	UsageMetadata *EmbedContentUsageMetadata `json:"usageMetadata,omitempty"`
+	// Whether the input content was truncated before generating the embedding.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
-// EmbedContentEmbedding represents a single embedding from the embedContent response.
+// EmbedContentEmbedding represents the embedding values from the embedContent response.
 type EmbedContentEmbedding struct {
 	// The embedding values.
 	Values []float32 `json:"values,omitempty"`
-	// Vertex API only. Statistics of the input text associated with this embedding.
-	Statistics *EmbedContentEmbeddingStatistics `json:"statistics,omitempty"`
 }
 
-// EmbedContentEmbeddingStatistics contains per-embedding statistics from the embedContent endpoint.
-// Note: Unlike the predict endpoint which uses snake_case (token_count), the embedContent endpoint
-// uses camelCase (tokenCount), matching the genai SDK's ContentEmbeddingStatistics type.
-type EmbedContentEmbeddingStatistics struct {
-	// Number of tokens of the input text.
-	TokenCount float32 `json:"tokenCount,omitempty"`
-	// Whether the input text was truncated.
-	Truncated bool `json:"truncated,omitempty"`
+// EmbedContentUsageMetadata contains token usage from the embedContent response.
+type EmbedContentUsageMetadata struct {
+	PromptTokenCount int `json:"promptTokenCount,omitempty"`
+	TotalTokenCount  int `json:"totalTokenCount,omitempty"`
 }
