@@ -1720,7 +1720,7 @@ const (
 //   - embedContent: embedContentConfig.autoTruncate, embedContentConfig.taskType, embedContentConfig.title
 type GCPVertexAIEmbeddingVendorFields struct {
 	// Auto-truncate input text if it exceeds the model's max length. Defaults to true.
-	AutoTruncate bool `json:"auto_truncate,omitempty"`
+	AutoTruncate *bool `json:"auto_truncate,omitempty"`
 
 	// Global task type for the request. Defaults to RETRIEVAL_QUERY if unset.
 	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/task-types

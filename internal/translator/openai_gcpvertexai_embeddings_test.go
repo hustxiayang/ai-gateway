@@ -171,9 +171,9 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 		{
 			name: "embedding request with auto_truncate vendor field",
 			input: openai.EmbeddingRequest{
-				EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "text-embedding-004", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: true}},
+				EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "text-embedding-004", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: &[]bool{true}[0]}},
 				OfCompletion: &openai.EmbeddingCompletionRequest{
-					EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "text-embedding-004", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: true}},
+					EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "text-embedding-004", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: &[]bool{true}[0]}},
 					Input: openai.EmbeddingRequestInput{
 						Value: "Test text for auto truncate",
 					},
@@ -257,7 +257,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 			wantBodyNotContain: []string{`"instances"`, `"parameters"`},
 		},
 		{
-			name: "embedContent: multiple string inputs",
+			name: "embedContent: multiple string inputs rejected (batch not supported)",
 			input: openai.EmbeddingRequest{
 				EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview"},
 				OfCompletion: &openai.EmbeddingCompletionRequest{
@@ -267,15 +267,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 					},
 				},
 			},
-			wantPath: "publishers/google/models/gemini-embedding-2-preview:embedContent",
-			wantBodyContains: []string{
-				`"content"`,
-				`"parts"`,
-				`"text":"a"`,
-				`"text":"b"`,
-				`"text":"c"`,
-			},
-			wantBodyNotContain: []string{`"instances"`, `"parameters"`},
+			wantError: true,
 		},
 		{
 			name: "embedContent: with dimensions",
@@ -335,9 +327,9 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_RequestBody(t *testing.T) {
 		{
 			name: "embedContent: auto_truncate vendor field uses camelCase",
 			input: openai.EmbeddingRequest{
-				EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: true}},
+				EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: &[]bool{true}[0]}},
 				OfCompletion: &openai.EmbeddingCompletionRequest{
-					EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: true}},
+					EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview", GCPVertexAIEmbeddingVendorFields: &openai.GCPVertexAIEmbeddingVendorFields{AutoTruncate: &[]bool{true}[0]}},
 					Input: openai.EmbeddingRequestInput{
 						Value: "text for auto truncate",
 					},
@@ -1206,7 +1198,7 @@ func TestResponseModel_GCPVertexAIEmbeddings_EmbedContent(t *testing.T) {
 		EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview"},
 		OfCompletion: &openai.EmbeddingCompletionRequest{
 			EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "gemini-embedding-2-preview"},
-			Input:                openai.EmbeddingRequestInput{Value: []string{"first", "second"}},
+			Input:                openai.EmbeddingRequestInput{Value: "hello world"},
 		},
 	}
 	reqBody, _ := json.Marshal(req)

@@ -134,8 +134,8 @@ func openAIEmbeddingToGeminiMessage(openAIReq *openai.EmbeddingRequest) (*gcp.Pr
 	// Apply vendor-specific fields if present.
 	if openAIReq.GCPVertexAIEmbeddingVendorFields != nil {
 		// Set auto truncate if specified.
-		if openAIReq.AutoTruncate {
-			parameters.AutoTruncate = openAIReq.AutoTruncate
+		if openAIReq.AutoTruncate != nil {
+			parameters.AutoTruncate = *openAIReq.AutoTruncate
 		}
 
 		// Apply global task type to all instances if specified.
@@ -230,6 +230,9 @@ func openAIEmbeddingToEmbedContentRequest(openAIReq *openai.EmbeddingRequest, re
 		if err != nil {
 			return nil, err
 		}
+		if len(texts) > 1 {
+			return nil, fmt.Errorf("%w: model %s does not support batch embeddings; send one input per request", internalapi.ErrInvalidRequestBody, requestModel)
+		}
 		parts = make([]*genai.Part, len(texts))
 		for i, text := range texts {
 			parts[i] = genai.NewPartFromText(text)
@@ -253,8 +256,8 @@ func openAIEmbeddingToEmbedContentRequest(openAIReq *openai.EmbeddingRequest, re
 	}
 
 	if openAIReq.GCPVertexAIEmbeddingVendorFields != nil {
-		if openAIReq.AutoTruncate {
-			config.AutoTruncate = &openAIReq.AutoTruncate
+		if openAIReq.AutoTruncate != nil {
+			config.AutoTruncate = openAIReq.AutoTruncate
 			hasConfig = true
 		}
 		// NOTE: gemini-embedding-2 silently ignores taskType — task must be included as a prompt
