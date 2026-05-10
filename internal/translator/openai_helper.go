@@ -331,8 +331,6 @@ func openAIFinishReasonToAnthropic(reason openai.ChatCompletionChoicesFinishReas
 		return anthropic.StopReasonToolUse
 	case openai.ChatCompletionChoicesFinishReasonContentFilter:
 		return anthropic.StopReasonRefusal
-	case openai.ChatCompletionChoicesFinishReasonRefusal:
-		return anthropic.StopReasonRefusal
 	default:
 		return anthropic.StopReasonEndTurn
 	}
