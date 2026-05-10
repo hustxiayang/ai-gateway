@@ -21,6 +21,7 @@ import (
 	openaisdk "github.com/openai/openai-go/v3"
 	"k8s.io/utils/ptr"
 
+	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -56,9 +57,11 @@ func anthropicToOpenAIFinishReason(stopReason anthropic.StopReason) (openai.Chat
 	case anthropic.StopReasonToolUse:
 		return openai.ChatCompletionChoicesFinishReasonToolCalls, nil
 	case anthropic.StopReasonRefusal:
-		return openai.ChatCompletionChoicesFinishReasonContentFilter, nil
+		return openai.ChatCompletionChoicesFinishReasonRefusal, nil
+	case anthropic.StopReason(anthropicschema.StopReasonModelContextWindowExceeded):
+		return openai.ChatCompletionChoicesFinishReasonContextWindowExceeded, nil
 	default:
-		return "", fmt.Errorf("received invalid stop reason %v", stopReason)
+		return openai.ChatCompletionChoicesFinishReasonError, fmt.Errorf("received invalid stop reason %v", stopReason)
 	}
 }
 
