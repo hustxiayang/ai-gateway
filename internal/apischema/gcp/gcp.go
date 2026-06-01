@@ -113,7 +113,7 @@ type PredictResponse struct {
 //
 // The REST API reference documents deprecated top-level fields (taskType, outputDimensionality, etc.):
 //
-//	https://docs.cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.publishers.models/embedContent
+//	https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/projects.locations.publishers.models/embedContent
 //
 // However, Vertex AI also accepts "embedContentConfig" as a nested config object (undocumented in REST
 // reference but used by the genai SDK v1.54+ (https://github.com/googleapis/go-genai/blob/v1.54.0/models.go#L727)
