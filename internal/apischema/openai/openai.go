@@ -76,6 +76,12 @@ type ChatCompletionContentPartTextType string
 // ChatCompletionContentPartImageType The type of the content part.
 type ChatCompletionContentPartImageType string
 
+// ChatCompletionContentPartAudioType The type of the content part.
+type ChatCompletionContentPartAudioType string
+
+// ChatCompletionContentPartVideoType The type of the content part.
+type ChatCompletionContentPartVideoType string
+
 // ChatCompletionContentPartFileType The type of the content part.
 type ChatCompletionContentPartFileType string
 
@@ -84,6 +90,8 @@ const (
 	ChatCompletionContentPartRefusalTypeRefusal       ChatCompletionContentPartRefusalType    = "refusal"
 	ChatCompletionContentPartInputAudioTypeInputAudio ChatCompletionContentPartInputAudioType = "input_audio"
 	ChatCompletionContentPartImageTypeImageURL        ChatCompletionContentPartImageType      = "image_url"
+	ChatCompletionContentPartAudioTypeAudioURL        ChatCompletionContentPartAudioType      = "audio_url"
+	ChatCompletionContentPartVideoTypeVideoURL        ChatCompletionContentPartVideoType      = "video_url"
 	ChatCompletionContentPartFileTypeFile             ChatCompletionContentPartFileType       = "file"
 )
 
@@ -153,6 +161,34 @@ type ChatCompletionContentPartImageParam struct {
 	*AnthropicContentFields `json:",inline,omitempty"`
 }
 
+type ChatCompletionContentPartAudioAudioURLParam struct {
+	// Either a URL of the audio or the base64 encoded audio data.
+	URL string `json:"url"`
+}
+
+// ChatCompletionContentPartAudioParam Learn more in the
+// [Multimodal Inputs - vLLM](https://docs.vllm.ai/en/latest/features/multimodal_inputs/#audio-inputs_1).
+type ChatCompletionContentPartAudioParam struct {
+	AudioURL ChatCompletionContentPartAudioAudioURLParam `json:"audio_url"`
+	// The type of the content part.
+	Type                    ChatCompletionContentPartAudioType `json:"type"`
+	*AnthropicContentFields `json:",inline,omitempty"`
+}
+
+type ChatCompletionContentPartVideoVideoURLParam struct {
+	// Either a URL of the video or the base64 encoded video data.
+	URL string `json:"url"`
+}
+
+// ChatCompletionContentPartVideoParam Learn more in the
+// [Multimodal Inputs - vLLM](https://docs.vllm.ai/en/latest/features/multimodal_inputs/#video-inputs_1).
+type ChatCompletionContentPartVideoParam struct {
+	VideoURL ChatCompletionContentPartVideoVideoURLParam `json:"video_url"`
+	// The type of the content part.
+	Type                    ChatCompletionContentPartVideoType `json:"type"`
+	*AnthropicContentFields `json:",inline,omitempty"`
+}
+
 type ChatCompletionContentPartFileFileParam struct {
 	// The base64 encoded file data, used when passing the file to the model as a
 	// string.
@@ -179,6 +215,8 @@ type ChatCompletionContentPartUserUnionParam struct {
 	OfText       *ChatCompletionContentPartTextParam       `json:",omitzero,inline"`
 	OfInputAudio *ChatCompletionContentPartInputAudioParam `json:",omitzero,inline"`
 	OfImageURL   *ChatCompletionContentPartImageParam      `json:",omitzero,inline"`
+	OfAudioURL   *ChatCompletionContentPartAudioParam      `json:",omitzero,inline"`
+	OfVideoURL   *ChatCompletionContentPartVideoParam      `json:",omitzero,inline"`
 	OfFile       *ChatCompletionContentPartFileParam       `json:",omitzero,inline"`
 }
 
@@ -210,6 +248,18 @@ func (c *ChatCompletionContentPartUserUnionParam) UnmarshalJSON(data []byte) err
 			return err
 		}
 		c.OfImageURL = &imageContent
+	case string(ChatCompletionContentPartAudioTypeAudioURL):
+		var audioContent ChatCompletionContentPartAudioParam
+		if err := json.Unmarshal(data, &audioContent); err != nil {
+			return err
+		}
+		c.OfAudioURL = &audioContent
+	case string(ChatCompletionContentPartVideoTypeVideoURL):
+		var videoContent ChatCompletionContentPartVideoParam
+		if err := json.Unmarshal(data, &videoContent); err != nil {
+			return err
+		}
+		c.OfVideoURL = &videoContent
 	case string(ChatCompletionContentPartFileTypeFile):
 		var fileContent ChatCompletionContentPartFileParam
 		if err := json.Unmarshal(data, &fileContent); err != nil {
@@ -232,6 +282,12 @@ func (c ChatCompletionContentPartUserUnionParam) MarshalJSON() ([]byte, error) {
 	}
 	if c.OfImageURL != nil {
 		return json.Marshal(c.OfImageURL)
+	}
+	if c.OfAudioURL != nil {
+		return json.Marshal(c.OfAudioURL)
+	}
+	if c.OfVideoURL != nil {
+		return json.Marshal(c.OfVideoURL)
 	}
 	return nil, errors.New("no content to marshal")
 }
@@ -1308,10 +1364,16 @@ type ChatCompletionResponse struct {
 type ChatCompletionChoicesFinishReason string
 
 const (
-	ChatCompletionChoicesFinishReasonStop          ChatCompletionChoicesFinishReason = "stop"
-	ChatCompletionChoicesFinishReasonLength        ChatCompletionChoicesFinishReason = "length"
-	ChatCompletionChoicesFinishReasonToolCalls     ChatCompletionChoicesFinishReason = "tool_calls"
-	ChatCompletionChoicesFinishReasonContentFilter ChatCompletionChoicesFinishReason = "content_filter"
+	ChatCompletionChoicesFinishReasonStop                  ChatCompletionChoicesFinishReason = "stop"
+	ChatCompletionChoicesFinishReasonLength                ChatCompletionChoicesFinishReason = "length"
+	ChatCompletionChoicesFinishReasonToolCalls             ChatCompletionChoicesFinishReason = "tool_calls"
+	ChatCompletionChoicesFinishReasonContentFilter         ChatCompletionChoicesFinishReason = "content_filter"
+	ChatCompletionChoicesFinishReasonRecitation            ChatCompletionChoicesFinishReason = "recitation"
+	ChatCompletionChoicesFinishReasonMalformedFunctionCall ChatCompletionChoicesFinishReason = "malformed_function_call"
+	ChatCompletionChoicesFinishReasonUnexpectedToolCall    ChatCompletionChoicesFinishReason = "unexpected_tool_call"
+	ChatCompletionChoicesFinishReasonLanguage              ChatCompletionChoicesFinishReason = "language"
+	ChatCompletionChoicesFinishReasonNoImage               ChatCompletionChoicesFinishReason = "no_image"
+	ChatCompletionChoicesFinishReasonError                 ChatCompletionChoicesFinishReason = "error"
 )
 
 type ChatCompletionTokenLogprobTopLogprob struct {
@@ -3685,7 +3747,16 @@ func (r *ResponseInputItemUnionParam) UnmarshalJSON(data []byte) error {
 	// Handle messages without explicit type field (for compatibility with simple message arrays)
 	// This allows arrays like [{"role": "user", "content": "Hello"}] to work without requiring type field
 	if typ.String() == "" {
-		if gjson.GetBytes(data, "role").Exists() && gjson.GetBytes(data, "content").Exists() {
+		role := gjson.GetBytes(data, "role")
+		if role.Exists() && gjson.GetBytes(data, "content").Exists() {
+			if role.String() == "assistant" {
+				// Assistant history may be sent as output_message content without type: "message".
+				var om ResponseOutputMessage
+				if err := json.Unmarshal(data, &om); err == nil {
+					r.OfOutputMessage = &om
+					return nil
+				}
+			}
 			// Treat as EasyInputMessageParam
 			var msg EasyInputMessageParam
 			if err := json.Unmarshal(data, &msg); err != nil {
@@ -8397,3 +8468,85 @@ const (
 	SpeechModelGPT4oMiniTTS         = "gpt-4o-mini-tts"
 	SpeechModelGPT4oMiniTTS20251215 = "gpt-4o-mini-tts-2025-12-15"
 )
+
+// TranscriptionRequest represents parsed form fields from a /v1/audio/transcriptions multipart request.
+// The actual audio file bytes are not stored here; they remain in the raw body for passthrough.
+type TranscriptionRequest struct {
+	Model                  string   `json:"model"`
+	Language               string   `json:"language,omitempty"`
+	Prompt                 string   `json:"prompt,omitempty"`
+	ResponseFormat         string   `json:"response_format,omitempty"`
+	Temperature            *float64 `json:"temperature,omitempty"`
+	TimestampGranularities []string `json:"timestamp_granularities,omitempty"`
+	Stream                 bool     `json:"stream,omitempty"`
+	FileName               string   `json:"file_name,omitempty"`
+	FileSize               int64    `json:"file_size,omitempty"`
+}
+
+// TranslationRequest represents parsed form fields from a /v1/audio/translations multipart request.
+type TranslationRequest struct {
+	Model          string   `json:"model"`
+	Prompt         string   `json:"prompt,omitempty"`
+	ResponseFormat string   `json:"response_format,omitempty"`
+	Temperature    *float64 `json:"temperature,omitempty"`
+	FileName       string   `json:"file_name,omitempty"`
+	FileSize       int64    `json:"file_size,omitempty"`
+}
+
+// TranscriptionResponse represents the JSON response from /v1/audio/transcriptions.
+type TranscriptionResponse struct {
+	Text     string                 `json:"text"`
+	Task     string                 `json:"task,omitempty"`
+	Language string                 `json:"language,omitempty"`
+	Duration float64                `json:"duration,omitempty"`
+	Segments []TranscriptionSegment `json:"segments,omitempty"`
+	Words    []TranscriptionWord    `json:"words,omitempty"`
+}
+
+// TranscriptionSegment represents a segment in verbose transcription output.
+// Field names/types match openai.TranscriptionSegment from the SDK.
+type TranscriptionSegment struct {
+	ID               int64   `json:"id"`
+	Seek             int64   `json:"seek"`
+	Start            float64 `json:"start"`
+	End              float64 `json:"end"`
+	Text             string  `json:"text"`
+	Tokens           []int64 `json:"tokens"`
+	Temperature      float64 `json:"temperature"`
+	AvgLogprob       float64 `json:"avg_logprob"`
+	CompressionRatio float64 `json:"compression_ratio"`
+	NoSpeechProb     float64 `json:"no_speech_prob"`
+}
+
+// TranscriptionWord represents a word with timestamp in transcription output.
+// Field names/types match openai.TranscriptionWord from the SDK.
+type TranscriptionWord struct {
+	Word  string  `json:"word"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
+// TranscriptionStreamEvent is one SSE event from /v1/audio/transcriptions when stream=true
+// (gpt-4o-transcribe and gpt-4o-mini-transcribe only; whisper-1 silently ignores the flag).
+//
+// The `Type` field discriminates:
+//   - "transcript.text.delta" — intermediate event carrying a `Delta` text chunk.
+//   - "transcript.text.done"  — terminal event carrying the full `Text`.
+type TranscriptionStreamEvent struct {
+	Type  string `json:"type"`
+	Delta string `json:"delta,omitempty"`
+	Text  string `json:"text,omitempty"`
+}
+
+// Transcription stream event type constants.
+const (
+	// TranscriptionStreamEventTypeDelta is emitted for each intermediate text chunk during streaming.
+	TranscriptionStreamEventTypeDelta = "transcript.text.delta"
+	// TranscriptionStreamEventTypeDone is the terminal event in a transcription stream.
+	TranscriptionStreamEventTypeDone = "transcript.text.done"
+)
+
+// TranslationResponse represents the JSON response from /v1/audio/translations.
+type TranslationResponse struct {
+	Text string `json:"text"`
+}

@@ -27,7 +27,6 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/yaml"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/rotators"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -318,6 +317,160 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 		require.Equal(t, "foo", fc.Backends[0].HeaderMutation.Set[0].Value)
 		require.Equal(t, "x-bar", fc.Backends[0].HeaderMutation.Remove[0])
 	}
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels verifies that mixing routes
+// with and without Spec.Hostnames produces a filter config where:
+//   - each per-host list contains the host's own models AND every unscoped model (so the unscoped
+//     route's models remain visible on host-matched /v1/models requests), and
+//   - UnscopedModels is populated separately so unmatched hosts can fall back to it without leaking
+//     host-scoped models.
+func TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := NewGatewayController(fakeClient, kube, ctrl.Log,
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "scoped-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Hostnames: []gwapiv1.Hostname{"api.example.com"},
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "scoped-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "unscoped-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				// No Hostnames -> "unscoped": its models apply to every host.
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "orange"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "unscoped-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, b := range []*aigv1b1.AIServiceBackend{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+	} {
+		require.NoError(t, fakeClient.Create(t.Context(), b))
+	}
+
+	const someNamespace = "some-namespace"
+	configName := FilterConfigSecretPerGatewayName("gw-hostname", gwNamespace)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	require.NoError(t, err)
+	require.True(t, effective, "expected filter config to be effective")
+
+	secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
+	require.NoError(t, err)
+	configStr, ok := secret.StringData[FilterConfigKeyInSecret]
+	require.True(t, ok)
+	var fc filterapi.Config
+	require.NoError(t, yaml.Unmarshal([]byte(configStr), &fc))
+
+	// Global Models list still contains every model (used as fallback when no ModelsByHost is configured).
+	require.ElementsMatch(t,
+		[]string{"scoped-model", "unscoped-model"},
+		[]string{fc.Models[0].Name, fc.Models[1].Name},
+	)
+
+	// UnscopedModels only holds the route-without-hostnames contribution.
+	require.Len(t, fc.UnscopedModels, 1)
+	require.Equal(t, "unscoped-model", fc.UnscopedModels[0].Name)
+
+	// ModelsByHost["api.example.com"] should have BOTH the scoped model and the merged-in unscoped
+	// model — otherwise the unscoped route's models would silently disappear on host-matched requests.
+	require.Contains(t, fc.ModelsByHost, "api.example.com")
+	gotHostModels := make([]string, 0, len(fc.ModelsByHost["api.example.com"]))
+	for _, m := range fc.ModelsByHost["api.example.com"] {
+		gotHostModels = append(gotHostModels, m.Name)
+	}
+	require.ElementsMatch(t, []string{"scoped-model", "unscoped-model"}, gotHostModels)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUnscopedModelsEmpty
+// regression-locks the gate added to avoid duplicating Models into UnscopedModels when no route is
+// hostname-scoped. Without the gate, every existing golden YAML that didn't expect an
+// `unscopedModels:` field would break (as Test_translate did when this gate was missing).
+func TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUnscopedModelsEmpty(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := NewGatewayController(fakeClient, kube, ctrl.Log,
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-only-unscoped", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				// No Hostnames — and no other route adds Hostnames either.
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "lone-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}))
+
+	const someNamespace = "some-namespace"
+	configName := FilterConfigSecretPerGatewayName("gw-unscoped-only", gwNamespace)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	require.NoError(t, err)
+	require.True(t, effective)
+
+	secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
+	require.NoError(t, err)
+	var fc filterapi.Config
+	require.NoError(t, yaml.Unmarshal([]byte(secret.StringData[FilterConfigKeyInSecret]), &fc))
+
+	require.Len(t, fc.Models, 1)
+	require.Equal(t, "lone-model", fc.Models[0].Name)
+	// Critical: with no scoped routes, ModelsByHost must be empty AND UnscopedModels must stay nil
+	// so it's omitted from the marshalled YAML (omitempty).
+	require.Empty(t, fc.ModelsByHost)
+	require.Nil(t, fc.UnscopedModels)
 }
 
 // TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostAggregation verifies that
@@ -1874,6 +2027,14 @@ func Test_schemaToFilterAPI(t *testing.T) {
 			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAWSBedrock},
 			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSBedrock},
 		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAnthropic},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "v1"},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAnthropic, Prefix: ptr.To("gateway/v1")},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "gateway/v1"},
+		},
 	} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			require.Equal(t, tc.expected, schemaToFilterAPI(tc.in))
@@ -1951,15 +2112,15 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 
 	const gwNamespace = "ns"
 	// Two routes with different CreationTimestamp for deterministic order.
-	mcpRoutes := []aigv1a1.MCPRoute{
+	mcpRoutes := []aigv1b1.MCPRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-old", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour))},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
 						Name: gwapiv1.ObjectName("backendA"),
 					},
-					ToolSelector: &aigv1a1.MCPToolFilter{
+					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolA"},
 					},
 				}},
@@ -1967,12 +2128,12 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-new", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour))},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
 						Name: gwapiv1.ObjectName("backendB"),
 					},
-					ToolSelector: &aigv1a1.MCPToolFilter{
+					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolB"},
 					},
 				}},
@@ -2005,15 +2166,15 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 }
 
 func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
-	mcpRoutes := []aigv1a1.MCPRoute{
+	mcpRoutes := []aigv1b1.MCPRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
 						Name: gwapiv1.ObjectName("backend"),
 					},
-					ToolSelector: &aigv1a1.MCPToolFilter{
+					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include:      []string{"toolA"},
 						Exclude:      []string{"toolB"},
 						ExcludeRegex: []string{"^secret.*"},
@@ -2037,16 +2198,16 @@ func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
 
 func Test_mcpConfig_ForwardHeaders(t *testing.T) {
 	renamed := "X-Backend-Auth"
-	mcpRoutes := []aigv1a1.MCPRoute{
+	mcpRoutes := []aigv1b1.MCPRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{
 					{
 						BackendObjectReference: gwapiv1.BackendObjectReference{
 							Name: gwapiv1.ObjectName("backendA"),
 						},
-						ForwardHeaders: []aigv1a1.MCPHeaderForward{
+						ForwardHeaders: []aigv1b1.MCPHeaderForward{
 							{Name: "X-Api-Key"},
 							{Name: "Authorization", BackendHeader: &renamed},
 						},
