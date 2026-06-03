@@ -255,17 +255,41 @@ func buildEmbeddingsRequestAttributes(embRequest *openai.EmbeddingRequest, body 
 	// 3. It would require model-specific tokenizer libraries (tiktoken, sentencepiece, etc.)
 	// 4. Azure deployments don't affect this (they only host OpenAI models with cl100k_base)
 	// Following OpenInference spec guidance to only record human-readable text.
-	if !config.HideInputs && !config.HideEmbeddingsText && embRequest.OfCompletion != nil {
-		switch input := embRequest.OfCompletion.Input.Value.(type) {
-		case string:
-			attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(0), input))
-		case []string:
-			for i, text := range input {
-				attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(i), text))
+	if !config.HideInputs && !config.HideEmbeddingsText {
+		switch {
+		case embRequest.OfCompletion != nil:
+			switch input := embRequest.OfCompletion.Input.Value.(type) {
+			case string:
+				attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(0), input))
+			case []string:
+				for i, text := range input {
+					attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(i), text))
+				}
+			// Token inputs are not recorded to reduce span size.
+			case []int64:
+			case [][]int64:
 			}
-		// Token inputs are not recorded to reduce span size.
-		case []int64:
-		case [][]int64:
+		case embRequest.OfChat != nil:
+			idx := 0
+			for _, msg := range embRequest.OfChat.Messages {
+				if msg.OfUser == nil {
+					continue
+				}
+				switch content := msg.OfUser.Content.Value.(type) {
+				case string:
+					if content != "" {
+						attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(idx), content))
+						idx++
+					}
+				case []openai.ChatCompletionContentPartUserUnionParam:
+					for _, part := range content {
+						if part.OfText != nil && part.OfText.Text != "" {
+							attrs = append(attrs, attribute.String(openinference.EmbeddingTextAttribute(idx), part.OfText.Text))
+							idx++
+						}
+					}
+				}
+			}
 		}
 	}
 

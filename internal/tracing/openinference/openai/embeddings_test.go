@@ -202,7 +202,7 @@ func TestEmbeddingsRecorder_RecordRequest(t *testing.T) {
 			},
 		},
 		{
-			name:    "chat embedding request (no embedding text attributes)",
+			name:    "chat embedding request",
 			req:     chatEmbeddingReq,
 			reqBody: chatEmbeddingReqBody,
 			config:  &openinference.TraceConfig{},
@@ -211,7 +211,7 @@ func TestEmbeddingsRecorder_RecordRequest(t *testing.T) {
 				attribute.String(openinference.InputValue, string(chatEmbeddingReqBody)),
 				attribute.String(openinference.InputMimeType, openinference.MimeTypeJSON),
 				attribute.String(openinference.EmbeddingInvocationParameters, `{"model":"gemini-embedding-2"}`),
-				// No embedding.text attributes for chat-style requests.
+				attribute.String(openinference.EmbeddingTextAttribute(0), "embed this text"),
 			},
 		},
 		{
