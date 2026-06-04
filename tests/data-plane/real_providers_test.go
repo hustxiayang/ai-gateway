@@ -288,7 +288,18 @@ func TestWithRealProviders(t *testing.T) {
 						return false
 					}
 					// Step 3: Simulate the tool returning a response, add the tool response to the params, and check the second response.
-					params.Messages = append(params.Messages, completion.Choices[0].Message.ToParam())
+					// Build the assistant param using tc.ToParam() for each tool call to preserve provider-specific
+					// fields (e.g., Gemini's thought_signature which is required for multi-turn tool call conversations).
+					assistantMsg := completion.Choices[0].Message
+					toolCallParams := make([]openai.ChatCompletionMessageToolCallParam, len(assistantMsg.ToolCalls))
+					for i, tc := range assistantMsg.ToolCalls {
+						toolCallParams[i] = tc.ToParam()
+					}
+					params.Messages = append(params.Messages, openai.ChatCompletionMessageParamUnion{
+						OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+							ToolCalls: toolCallParams,
+						},
+					})
 					getWeatherCalled := false
 					for _, toolCall := range toolCalls {
 						if toolCall.Function.Name == "get_weather" {
