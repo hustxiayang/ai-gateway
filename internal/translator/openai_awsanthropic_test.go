@@ -333,6 +333,7 @@ func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens: 5,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -367,6 +368,7 @@ func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens: 10,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{

@@ -790,6 +790,7 @@ type anthropicStreamParser struct {
 	activeToolCalls map[int64]*streamingToolCall
 	toolIndex       int64
 	tokenUsage      metrics.TokenUsage
+	thinkingTokens  int64
 	stopReason      anthropic.StopReason
 	requestModel    internalapi.RequestModel
 	sentFirstChunk  bool
@@ -875,6 +876,9 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 				PromptTokensDetails: &openai.PromptTokensDetails{
 					CachedTokens:        int(cachedTokens),
 					CacheCreationTokens: int(cacheCreationTokens),
+				},
+				CompletionTokensDetails: &openai.CompletionTokensDetails{
+					ReasoningTokens: int(p.thinkingTokens),
 				},
 			},
 			Model: p.requestModel,
@@ -1063,6 +1067,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			// Accumulate cache creation tokens
 			p.tokenUsage.AddCacheCreationInputTokens(cacheCreation)
 		}
+		p.thinkingTokens = u.OutputTokensDetails.ThinkingTokens
 		if event.Delta.StopReason != "" {
 			p.stopReason = event.Delta.StopReason
 		}
@@ -1189,6 +1194,9 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 		PromptTokensDetails: &openai.PromptTokensDetails{
 			CachedTokens:        int(cachedTokens),
 			CacheCreationTokens: int(cacheCreationTokens),
+		},
+		CompletionTokensDetails: &openai.CompletionTokensDetails{
+			ReasoningTokens: int(usage.OutputTokensDetails.ThinkingTokens),
 		},
 	}
 
