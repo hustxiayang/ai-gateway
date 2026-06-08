@@ -1547,7 +1547,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "reasoning effort low",
 			input: &openai.ChatCompletionRequest{
-				ReasoningEffort: openaigo.ReasoningEffortLow,
+				ReasoningEffort: openai.ReasoningEffortLow,
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ThinkingConfig: &genai.ThinkingConfig{
@@ -1560,7 +1560,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "reasoning effort medium",
 			input: &openai.ChatCompletionRequest{
-				ReasoningEffort: openaigo.ReasoningEffortMedium,
+				ReasoningEffort: openai.ReasoningEffortMedium,
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ThinkingConfig: &genai.ThinkingConfig{
@@ -1573,7 +1573,7 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 		{
 			name: "high reasoning effort maps to ThinkingLevelHigh",
 			input: &openai.ChatCompletionRequest{
-				ReasoningEffort: openaigo.ReasoningEffortHigh,
+				ReasoningEffort: openai.ReasoningEffortHigh,
 			},
 			expectedGenerationConfig: &genai.GenerationConfig{
 				ThinkingConfig: &genai.ThinkingConfig{
@@ -3385,7 +3385,7 @@ func TestMapDetailMediaResolution(t *testing.T) {
 func TestMapReasoningEffortToThinkingLevel(t *testing.T) {
 	tests := []struct {
 		name             string
-		reasoningEffort  openaigo.ReasoningEffort
+		reasoningEffort  openai.ReasoningEffort
 		model            internalapi.RequestModel
 		expectedThinking genai.ThinkingLevel
 		expectedErrorMsg string
@@ -3404,25 +3404,25 @@ func TestMapReasoningEffortToThinkingLevel(t *testing.T) {
 		},
 		{
 			name:             "low effort maps to ThinkingLevelLow",
-			reasoningEffort:  openaigo.ReasoningEffortLow,
+			reasoningEffort:  openai.ReasoningEffortLow,
 			model:            "gemini-3-flash",
 			expectedThinking: genai.ThinkingLevelLow,
 		},
 		{
 			name:             "medium effort on Flash maps to ThinkingLevelMedium",
-			reasoningEffort:  openaigo.ReasoningEffortMedium,
+			reasoningEffort:  openai.ReasoningEffortMedium,
 			model:            "gemini-3-flash",
 			expectedThinking: genai.ThinkingLevelMedium,
 		},
 		{
 			name:             "medium effort on Pro maps to ThinkingLevelHigh",
-			reasoningEffort:  openaigo.ReasoningEffortMedium,
+			reasoningEffort:  openai.ReasoningEffortMedium,
 			model:            "gemini-3-pro",
 			expectedThinking: genai.ThinkingLevelHigh,
 		},
 		{
 			name:             "high effort maps to ThinkingLevelHigh",
-			reasoningEffort:  openaigo.ReasoningEffortHigh,
+			reasoningEffort:  openai.ReasoningEffortHigh,
 			model:            "gemini-3-flash",
 			expectedThinking: genai.ThinkingLevelHigh,
 		},
