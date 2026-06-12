@@ -345,7 +345,7 @@ func TestToGCPVertexAIV1Tokenize_ResponseError(t *testing.T) {
 			}`,
 			expectedType:    "INVALID_ARGUMENT",
 			expectedCode:    "400",
-			expectedMessage: "Error: Invalid request: model not found\nDetails: [{\"type\":\"additional_info\",\"value\":\"gemini-invalid not supported\"}]",
+			expectedMessage: "Error: Invalid request: model not found\nDetails: [{\"type\": \"additional_info\", \"value\": \"gemini-invalid not supported\"}]",
 		},
 		{
 			name: "GCP structured error without details",

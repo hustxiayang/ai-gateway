@@ -42,6 +42,9 @@ func (o *ToGCPVertexAIV1Tokenize) tokenizeToGeminiCountToken(tokenizeChatReq *to
 	if err != nil {
 		return nil, err
 	}
+	if len(contents) == 0 && systemInstruction == nil {
+		return nil, fmt.Errorf("messages must produce at least one content entry")
+	}
 
 	// Some models support only partialJSONSchema.
 	parametersJSONSchemaAvailable := responseJSONSchemaAvailable(requestModel)

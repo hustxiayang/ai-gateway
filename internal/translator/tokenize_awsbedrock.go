@@ -38,11 +38,12 @@ type ToAWSBedrockV1Tokenize struct {
 
 // tokenizeToBedrockCountTokens converts an OpenAI tokenize chat request to AWS Bedrock CountTokens format.
 // AWS Bedrock has a dedicated CountTokens endpoint that counts input tokens without generating any output.
+// The API expects: {"input": {"converse": {"messages": [...], "system": [...], "toolConfig": {...}}}}
 func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *tokenize.ChatRequest) (*awsbedrock.CountTokensInput, error) {
-	var bedrockReq awsbedrock.CountTokensInput
+	var converseInput awsbedrock.CountTokensConverseInput
 
 	// Convert Chat Completion messages to Bedrock format
-	bedrockReq.Messages = make([]*awsbedrock.Message, 0, len(tokenizeChatReq.Messages))
+	converseInput.Messages = make([]*awsbedrock.Message, 0, len(tokenizeChatReq.Messages))
 	for i := range tokenizeChatReq.Messages {
 		msg := &tokenizeChatReq.Messages[i]
 		role := msg.ExtractMessgaeRole()
@@ -53,20 +54,20 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 			if err != nil {
 				return nil, err
 			}
-			bedrockReq.Messages = append(bedrockReq.Messages, bedrockMessage)
+			converseInput.Messages = append(converseInput.Messages, bedrockMessage)
 		case msg.OfAssistant != nil:
 			assistantMessage := msg.OfAssistant
 			bedrockMessage, err := o.openAIMessageToBedrockMessageRoleAssistant(assistantMessage, role)
 			if err != nil {
 				return nil, err
 			}
-			bedrockReq.Messages = append(bedrockReq.Messages, bedrockMessage)
+			converseInput.Messages = append(converseInput.Messages, bedrockMessage)
 		case msg.OfSystem != nil:
-			if bedrockReq.System == nil {
-				bedrockReq.System = make([]*awsbedrock.SystemContentBlock, 0)
+			if converseInput.System == nil {
+				converseInput.System = make([]*awsbedrock.SystemContentBlock, 0)
 			}
 			systemMessage := msg.OfSystem
-			err := o.openAIMessageToBedrockMessageRoleSystem(systemMessage, &bedrockReq.System)
+			err := o.openAIMessageToBedrockMessageRoleSystem(systemMessage, &converseInput.System)
 			if err != nil {
 				return nil, err
 			}
@@ -76,7 +77,7 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 			if err != nil {
 				return nil, err
 			}
-			bedrockReq.Messages = append(bedrockReq.Messages, bedrockMessage)
+			converseInput.Messages = append(converseInput.Messages, bedrockMessage)
 		default:
 			return nil, fmt.Errorf("unexpected role: %s", role)
 		}
@@ -84,13 +85,17 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 
 	// Convert ToolConfiguration if tools are present
 	if len(tokenizeChatReq.Tools) > 0 {
-		err := o.openAIToolsToBedrockToolConfiguration(tokenizeChatReq, &bedrockReq)
+		err := o.openAIToolsToBedrockToolConfiguration(tokenizeChatReq, &converseInput)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert tools: %w", err)
 		}
 	}
 
-	return &bedrockReq, nil
+	return &awsbedrock.CountTokensInput{
+		Input: awsbedrock.CountTokensInputUnion{
+			Converse: &converseInput,
+		},
+	}, nil
 }
 
 // Helper methods adapted from the existing AWS Bedrock chat completion translator
@@ -210,9 +215,9 @@ func (o *ToAWSBedrockV1Tokenize) openAIMessageToBedrockMessageRoleTool(
 }
 
 func (o *ToAWSBedrockV1Tokenize) openAIToolsToBedrockToolConfiguration(tokenizeChatReq *tokenize.ChatRequest,
-	bedrockReq *awsbedrock.CountTokensInput,
+	converseInput *awsbedrock.CountTokensConverseInput,
 ) error {
-	bedrockReq.ToolConfig = &awsbedrock.ToolConfiguration{}
+	converseInput.ToolConfig = &awsbedrock.ToolConfiguration{}
 	tools := make([]*awsbedrock.Tool, 0, len(tokenizeChatReq.Tools))
 	for i := range tokenizeChatReq.Tools {
 		toolDefinition := &tokenizeChatReq.Tools[i]
@@ -234,7 +239,7 @@ func (o *ToAWSBedrockV1Tokenize) openAIToolsToBedrockToolConfiguration(tokenizeC
 			tools = append(tools, tool)
 		}
 	}
-	bedrockReq.ToolConfig.Tools = tools
+	converseInput.ToolConfig.Tools = tools
 	return nil
 }
 

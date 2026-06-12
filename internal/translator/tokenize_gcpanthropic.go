@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 	"github.com/tidwall/sjson"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -56,7 +57,7 @@ func (o *ToGCPAnthropicV1Tokenize) tokenizeToAnthropicMessages(tokenizeChatReq *
 	// Build Anthropic MessageCountTokens request
 	countTokensParam := &anthropic.MessageCountTokensParams{
 		Messages: messages,
-		Model:    anthropic.Model(requestModel),
+		Model:    requestModel,
 	}
 
 	// Set system prompt if present
@@ -83,16 +84,45 @@ func (o *ToGCPAnthropicV1Tokenize) tokenizeToAnthropicMessages(tokenizeChatReq *
 
 	// Convert tools if present
 	if len(tokenizeChatReq.Tools) > 0 {
-		countTokensParam.Tools = make([]anthropic.MessageCountTokensToolUnionParam, len(tokenizeChatReq.Tools))
-		for i, tool := range tokenizeChatReq.Tools {
-			if tool.Function != nil {
-				countTokensParam.Tools[i] = anthropic.MessageCountTokensToolParamOfTool(
-					anthropic.ToolInputSchemaParam{
-						Properties: tool.Function.Parameters,
-					},
-					tool.Function.Name,
-				)
+		countTokensParam.Tools = make([]anthropic.MessageCountTokensToolUnionParam, 0, len(tokenizeChatReq.Tools))
+		for _, tool := range tokenizeChatReq.Tools {
+			if tool.Function == nil {
+				continue
 			}
+			inputSchema := anthropic.ToolInputSchemaParam{}
+			if tool.Function.Parameters != nil {
+				paramsMap, ok := tool.Function.Parameters.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("failed to cast tool parameters to map[string]any")
+				}
+				if typeVal, ok := paramsMap["type"].(string); ok {
+					inputSchema.Type = constant.Object(typeVal)
+				}
+				if propsVal, ok := paramsMap["properties"].(map[string]any); ok {
+					inputSchema.Properties = propsVal
+				}
+				if requiredVal, ok := paramsMap["required"].([]any); ok {
+					requiredSlice := make([]string, len(requiredVal))
+					for i, v := range requiredVal {
+						if s, ok := v.(string); ok {
+							requiredSlice[i] = s
+						}
+					}
+					inputSchema.Required = requiredSlice
+				}
+				extraFields := make(map[string]any)
+				for key, value := range paramsMap {
+					if _, found := anthropicInputSchemaKeysToSkip[key]; found {
+						continue
+					}
+					extraFields[key] = value
+				}
+				inputSchema.ExtraFields = extraFields
+			}
+			countTokensParam.Tools = append(countTokensParam.Tools, anthropic.MessageCountTokensToolParamOfTool(
+				inputSchema,
+				tool.Function.Name,
+			))
 		}
 	}
 
@@ -133,8 +163,10 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 		o.requestModel = o.modelNameOverride
 	}
 
-	// Build the correct path for GCP Anthropic token counting
-	// Use countTokens method as per: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/count-tokens
+	// Build the correct path for GCP Anthropic token counting.
+	// The virtual model path "count-tokens" is GCP's token counting endpoint;
+	// the actual Claude model name is specified in the request body.
+	// See: https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/count-tokens
 	path := buildGCPModelPathSuffix(gcpModelPublisherAnthropic, "count-tokens", gcpMethodRawPredict)
 
 	anthropicReq, err := o.tokenizeToAnthropicMessages(tokenizeReq.ChatRequest, o.requestModel)

@@ -62,10 +62,11 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 		// Verify the body contains AWS Bedrock CountTokens request
 		var bedrockReq awsbedrock.CountTokensInput
 		require.NoError(t, json.Unmarshal(body, &bedrockReq))
-		require.NotNil(t, bedrockReq.Messages)
-		require.Len(t, bedrockReq.Messages, 1)
-		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Messages[0].Role)
-		require.Len(t, bedrockReq.Messages[0].Content, 1)
+		require.NotNil(t, bedrockReq.Input.Converse)
+		require.NotNil(t, bedrockReq.Input.Converse.Messages)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 1)
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[0].Role)
+		require.Len(t, bedrockReq.Input.Converse.Messages[0].Content, 1)
 	})
 
 	t.Run("chat request - with model override", func(t *testing.T) {
@@ -124,11 +125,12 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 
 		var bedrockReq awsbedrock.CountTokensInput
 		require.NoError(t, json.Unmarshal(body, &bedrockReq))
-		require.NotNil(t, bedrockReq.System)
-		require.Len(t, bedrockReq.System, 1)
-		require.Equal(t, "You are a helpful assistant", bedrockReq.System[0].Text)
-		require.Len(t, bedrockReq.Messages, 1) // System message should not be in messages
-		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Messages[0].Role)
+		require.NotNil(t, bedrockReq.Input.Converse)
+		require.NotNil(t, bedrockReq.Input.Converse.System)
+		require.Len(t, bedrockReq.Input.Converse.System, 1)
+		require.Equal(t, "You are a helpful assistant", *bedrockReq.Input.Converse.System[0].Text)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 1) // System message should not be in messages
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[0].Role)
 	})
 
 	t.Run("completion request - not supported", func(t *testing.T) {
@@ -448,9 +450,10 @@ func TestToAWSBedrockV1Tokenize_HelperMethods(t *testing.T) {
 		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
 		require.NoError(t, err)
 		require.NotNil(t, bedrockReq)
-		require.NotNil(t, bedrockReq.Messages)
-		require.Len(t, bedrockReq.Messages, 1)
-		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Messages[0].Role)
+		require.NotNil(t, bedrockReq.Input.Converse)
+		require.NotNil(t, bedrockReq.Input.Converse.Messages)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 1)
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[0].Role)
 	})
 
 	t.Run("bedrockCountTokensToResponse", func(t *testing.T) {

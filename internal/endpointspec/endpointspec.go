@@ -488,6 +488,11 @@ func (TokenizeEndpointSpec) RedactSensitiveInfoFromRequest(req *tokenize.Request
 	return req, nil
 }
 
+// ParseMultipartBody implements [Spec.ParseMultipartBody].
+func (TokenizeEndpointSpec) ParseMultipartBody([]byte, string, bool) (internalapi.OriginalModel, *tokenize.RequestUnion, bool, []byte, error) {
+	return "", nil, false, nil, errMultipartNotSupported
+}
+
 // redactMessage redacts sensitive content from a chat message while preserving its type and structure.
 // This dispatches to role-specific redaction functions based on the message type.
 func redactMessage(msg openai.ChatCompletionMessageParamUnion) openai.ChatCompletionMessageParamUnion {
