@@ -2097,3 +2097,94 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody_WithSpanRec
 	require.Len(t, span.recordedResponse.Choices, 1)
 	require.Equal(t, "Hello!", *span.recordedResponse.Choices[0].Message.Content)
 }
+
+// TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody_StreamingCacheTokensNotDoubled
+// verifies that cache tokens reported in both message_start and message_delta are not double-counted.
+// This is a regression test for the bug where prompt_tokens and cached_tokens were doubled in streaming.
+func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody_StreamingCacheTokensNotDoubled(t *testing.T) {
+	translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "").(*openAIToGCPAnthropicTranslatorV1ChatCompletion)
+
+	// Initialize translator with stream=true
+	req := &openai.ChatCompletionRequest{
+		Stream:    true,
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: ptr.To(int64(100)),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			{
+				OfUser: &openai.ChatCompletionUserMessageParam{
+					Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+					Role:    openai.ChatMessageRoleUser,
+				},
+			},
+		},
+	}
+	reqBody, _ := json.Marshal(req)
+	_, _, err := translator.RequestBody(reqBody, req, false)
+	require.NoError(t, err)
+
+	// Simulate streaming: message_start has input_tokens=678, cache_read=13363, cache_creation=0
+	messageStartChunk := `event: message_start
+data: {"type": "message_start", "message": {"id": "msg_abc123", "type": "message", "role": "assistant", "content": [], "model": "claude-sonnet-4-6", "usage": {"input_tokens": 678, "cache_read_input_tokens": 13363, "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+
+`
+	contentBlockStartChunk := `event: content_block_start
+data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+
+`
+	contentBlockDeltaChunk := `event: content_block_delta
+data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}}
+
+`
+	contentBlockStopChunk := `event: content_block_stop
+data: {"type": "content_block_stop", "index": 0}
+
+`
+	// message_delta reports cache tokens again (same values as message_start) — this must NOT double-count
+	messageDeltaChunk := `event: message_delta
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1, "input_tokens": 678, "cache_read_input_tokens": 13363, "cache_creation_input_tokens": 0}}
+
+`
+	messageStopChunk := `event: message_stop
+data: {"type": "message_stop"}
+
+`
+
+	// Process all chunks sequentially (non-endOfStream until the last)
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewBufferString(messageStartChunk), false, nil)
+	require.NoError(t, err)
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewBufferString(contentBlockStartChunk), false, nil)
+	require.NoError(t, err)
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewBufferString(contentBlockDeltaChunk), false, nil)
+	require.NoError(t, err)
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewBufferString(contentBlockStopChunk), false, nil)
+	require.NoError(t, err)
+	_, _, _, _, err = translator.ResponseBody(nil, bytes.NewBufferString(messageDeltaChunk), false, nil)
+	require.NoError(t, err)
+	_, _, tokenUsage, _, err := translator.ResponseBody(nil, bytes.NewBufferString(messageStopChunk), true, nil)
+	require.NoError(t, err)
+
+	// Verify: input_tokens should be 678 + 13363 = 14041, NOT doubled to 27404
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	require.True(t, inputSet)
+	require.Equal(t, uint32(14041), inputTokens, "prompt_tokens must not be doubled in streaming")
+
+	// Verify: cached_tokens should be 13363, NOT doubled to 26726
+	cachedTokens, cachedSet := tokenUsage.CachedInputTokens()
+	require.True(t, cachedSet)
+	require.Equal(t, uint32(13363), cachedTokens, "cached_tokens must not be doubled in streaming")
+
+	// Verify: output_tokens = 1
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	require.True(t, outputSet)
+	require.Equal(t, uint32(1), outputTokens)
+
+	// Verify: total = input + output = 14042
+	totalTokens, totalSet := tokenUsage.TotalTokens()
+	require.True(t, totalSet)
+	require.Equal(t, uint32(14042), totalTokens)
+
+	// Verify: cache_creation_input_tokens = 0
+	cacheCreation, cacheCreationSet := tokenUsage.CacheCreationInputTokens()
+	require.True(t, cacheCreationSet)
+	require.Equal(t, uint32(0), cacheCreation)
+}

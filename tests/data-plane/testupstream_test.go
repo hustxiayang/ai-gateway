@@ -551,7 +551,7 @@ data: [DONE]
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody: `event: message_start
-data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 15}}}
+data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 15, "cache_read_input_tokens": 10}}}
 
 event: content_block_start
 data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
@@ -566,7 +566,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12, "cache_read_input_tokens":10}}
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}}
 
 event: message_stop
 data: {"type": "message_stop"}
