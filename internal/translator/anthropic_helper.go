@@ -1062,7 +1062,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			p.tokenUsage.AddOutputTokens(output)
 		}
 		// Cache token details are already set in message_start — don't touch them here
-		// since message_delta only contains incremental output_tokens.
+		// to avoid double-counting, as message_delta may also contain them.
 		p.tokenUsage.SetReasoningTokens(uint32(u.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 		if event.Delta.StopReason != "" {
 			p.stopReason = event.Delta.StopReason
