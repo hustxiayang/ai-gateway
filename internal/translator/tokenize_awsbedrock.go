@@ -263,11 +263,23 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 		return nil, nil, fmt.Errorf("invalid tokenize request: %w", err)
 	}
 
-	// Store the request model to use as fallback for response model
+	// Store the request model to use as fallback for response model.
+	// If this is a CompletionRequest, convert the prompt to a single user message
+	// since Bedrock's CountTokens API only supports the Converse format.
 	if tokenizeReq.ChatRequest != nil {
 		o.requestModel = tokenizeReq.ChatRequest.Model
-	} else {
-		return nil, nil, fmt.Errorf("only ChatRequest is supported for AWS Bedrock models")
+	} else if tokenizeReq.CompletionRequest != nil {
+		o.requestModel = tokenizeReq.CompletionRequest.Model
+		tokenizeReq.ChatRequest = &tokenize.ChatRequest{
+			Model: tokenizeReq.CompletionRequest.Model,
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Role:    "user",
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+				}},
+			},
+		}
+		tokenizeReq.CompletionRequest = nil
 	}
 
 	if o.modelNameOverride != "" {

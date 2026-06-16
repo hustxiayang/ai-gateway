@@ -13,6 +13,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
@@ -97,12 +98,23 @@ func (o *ToGCPVertexAIV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Re
 		return nil, nil, fmt.Errorf("invalid tokenize request: %w", err)
 	}
 
-	// Store the request model to use as fallback for response model
-	// Support both ChatRequest and CompletionRequest
+	// Store the request model to use as fallback for response model.
+	// If this is a CompletionRequest, convert the prompt to a single user message
+	// since GCP Vertex AI CountTokens only supports the Gemini contents format.
 	if tokenizeReq.ChatRequest != nil {
 		o.requestModel = tokenizeReq.ChatRequest.Model
-	} else {
-		return nil, nil, fmt.Errorf("only ChatRequest is supported for gemini models")
+	} else if tokenizeReq.CompletionRequest != nil {
+		o.requestModel = tokenizeReq.CompletionRequest.Model
+		tokenizeReq.ChatRequest = &tokenize.ChatRequest{
+			Model: tokenizeReq.CompletionRequest.Model,
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Role:    "user",
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+				}},
+			},
+		}
+		tokenizeReq.CompletionRequest = nil
 	}
 	if o.modelNameOverride != "" {
 		// Use modelName override if set.

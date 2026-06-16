@@ -150,12 +150,23 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 		return nil, nil, fmt.Errorf("invalid tokenize request: %w", err)
 	}
 
-	// Store the request model to use as fallback for response model
-	// Support both ChatRequest and CompletionRequest
+	// Store the request model to use as fallback for response model.
+	// If this is a CompletionRequest, convert the prompt to a single user message
+	// since GCP Anthropic count-tokens only supports the Messages format.
 	if tokenizeReq.ChatRequest != nil {
 		o.requestModel = tokenizeReq.ChatRequest.Model
-	} else {
-		return nil, nil, fmt.Errorf("only ChatRequest is supported for gcp anthropic models")
+	} else if tokenizeReq.CompletionRequest != nil {
+		o.requestModel = tokenizeReq.CompletionRequest.Model
+		tokenizeReq.ChatRequest = &tokenize.ChatRequest{
+			Model: tokenizeReq.CompletionRequest.Model,
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{
+					Role:    "user",
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+				}},
+			},
+		}
+		tokenizeReq.CompletionRequest = nil
 	}
 
 	if o.modelNameOverride != "" {
@@ -163,9 +174,8 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 		o.requestModel = o.modelNameOverride
 	}
 
-	// Build the correct path for GCP Anthropic token counting.
-	// The virtual model path "count-tokens" is GCP's token counting endpoint;
-	// the actual Claude model name is specified in the request body.
+	// The GCP Anthropic count-tokens endpoint uses "count-tokens" as a virtual model name
+	// in the path, while the actual Claude model name is specified in the request body.
 	// See: https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/count-tokens
 	path := buildGCPModelPathSuffix(gcpModelPublisherAnthropic, "count-tokens", gcpMethodRawPredict)
 

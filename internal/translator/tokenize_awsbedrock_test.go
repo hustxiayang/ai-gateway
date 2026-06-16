@@ -133,7 +133,7 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[0].Role)
 	})
 
-	t.Run("completion request - not supported", func(t *testing.T) {
+	t.Run("completion request - converted to chat", func(t *testing.T) {
 		translator := NewTokenizeToAWSBedrockTranslator("").(*ToAWSBedrockV1Tokenize)
 
 		req := &tokenize.RequestUnion{
@@ -143,9 +143,18 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 			},
 		}
 
-		_, _, err := translator.RequestBody(nil, req, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "only ChatRequest is supported for AWS Bedrock models")
+		headers, body, err := translator.RequestBody(nil, req, false)
+		require.NoError(t, err)
+		require.NotNil(t, body)
+		require.Equal(t, "anthropic.claude-3-opus-20240229-v1:0", translator.requestModel)
+		require.Len(t, headers, 2)
+
+		var bedrockReq awsbedrock.CountTokensInput
+		require.NoError(t, json.Unmarshal(body, &bedrockReq))
+		require.NotNil(t, bedrockReq.Input.Converse)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 1)
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[0].Role)
+		require.Equal(t, "Hello world", *bedrockReq.Input.Converse.Messages[0].Content[0].Text)
 	})
 
 	t.Run("invalid union - both types set", func(t *testing.T) {

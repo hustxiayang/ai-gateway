@@ -133,7 +133,7 @@ func TestToGCPVertexAIV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, "user", gcpReq.Contents[0].Role)
 	})
 
-	t.Run("completion request - not supported", func(t *testing.T) {
+	t.Run("completion request - converted to chat", func(t *testing.T) {
 		translator := NewTokenizeToGCPVertexAITranslator("").(*ToGCPVertexAIV1Tokenize)
 
 		req := &tokenize.RequestUnion{
@@ -143,9 +143,18 @@ func TestToGCPVertexAIV1Tokenize_RequestBody(t *testing.T) {
 			},
 		}
 
-		_, _, err := translator.RequestBody(nil, req, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "only ChatRequest is supported for gemini models")
+		headers, body, err := translator.RequestBody(nil, req, false)
+		require.NoError(t, err)
+		require.NotNil(t, body)
+		require.Equal(t, "gemini-2.0-flash-001", translator.requestModel)
+		require.Len(t, headers, 2)
+		require.Contains(t, headers[0].Value(), "gemini-2.0-flash-001")
+		require.Contains(t, headers[0].Value(), "countTokens")
+
+		var gcpReq gcp.CountTokenRequest
+		require.NoError(t, json.Unmarshal(body, &gcpReq))
+		require.Len(t, gcpReq.Contents, 1)
+		require.Equal(t, "user", gcpReq.Contents[0].Role)
 	})
 
 	t.Run("empty model string", func(t *testing.T) {

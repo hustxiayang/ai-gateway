@@ -54,7 +54,7 @@ func TestToGCPAnthropicV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, "claude-3-opus-20240229", translator.requestModel)
 		require.Len(t, headers, 2)
 		require.Equal(t, pathHeaderName, headers[0].Key())
-		require.Contains(t, headers[0].Value(), "claude-3-opus-20240229")
+		require.Contains(t, headers[0].Value(), "count-tokens")
 		require.Contains(t, headers[0].Value(), "rawPredict")
 		require.Equal(t, contentLengthHeaderName, headers[1].Key())
 		require.Equal(t, strconv.Itoa(len(body)), headers[1].Value())
@@ -92,7 +92,7 @@ func TestToGCPAnthropicV1Tokenize_RequestBody(t *testing.T) {
 		require.NotNil(t, body)
 		require.Equal(t, "override-model", translator.requestModel)
 		require.Len(t, headers, 2)
-		require.Contains(t, headers[0].Value(), "override-model")
+		require.Contains(t, headers[0].Value(), "count-tokens")
 	})
 
 	t.Run("chat request - with system instruction", func(t *testing.T) {
@@ -129,7 +129,7 @@ func TestToGCPAnthropicV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, anthropic.MessageParamRoleUser, anthropicReq.Messages[0].Role)
 	})
 
-	t.Run("completion request - not supported", func(t *testing.T) {
+	t.Run("completion request - converted to chat", func(t *testing.T) {
 		translator := NewTokenizeToGCPAnthropicTranslator("").(*ToGCPAnthropicV1Tokenize)
 
 		req := &tokenize.RequestUnion{
@@ -139,9 +139,18 @@ func TestToGCPAnthropicV1Tokenize_RequestBody(t *testing.T) {
 			},
 		}
 
-		_, _, err := translator.RequestBody(nil, req, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "only ChatRequest is supported for gcp anthropic models")
+		headers, body, err := translator.RequestBody(nil, req, false)
+		require.NoError(t, err)
+		require.NotNil(t, body)
+		require.Equal(t, "claude-3-opus-20240229", translator.requestModel)
+		require.Len(t, headers, 2)
+		require.Contains(t, headers[0].Value(), "count-tokens")
+		require.Contains(t, headers[0].Value(), "rawPredict")
+
+		var anthropicReq anthropic.MessageCountTokensParams
+		require.NoError(t, json.Unmarshal(body, &anthropicReq))
+		require.Len(t, anthropicReq.Messages, 1)
+		require.Equal(t, anthropic.MessageParamRoleUser, anthropicReq.Messages[0].Role)
 	})
 
 	t.Run("empty model string", func(t *testing.T) {
