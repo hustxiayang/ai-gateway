@@ -566,7 +566,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}}
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12, "cache_read_input_tokens": 10}}
 
 event: message_stop
 data: {"type": "message_stop"}
