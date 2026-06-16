@@ -1061,12 +1061,12 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if output, ok := usage.OutputTokens(); ok {
 			p.tokenUsage.AddOutputTokens(output)
 		}
-		// Update cache token details from delta (don't add to InputTokens — already included in message_start)
+		// Set (not add) cache token details from delta — message_start already set these once
 		if cached, ok := usage.CachedInputTokens(); ok {
-			p.tokenUsage.AddCachedInputTokens(cached)
+			p.tokenUsage.SetCachedInputTokens(cached)
 		}
 		if cacheCreation, ok := usage.CacheCreationInputTokens(); ok {
-			p.tokenUsage.AddCacheCreationInputTokens(cacheCreation)
+			p.tokenUsage.SetCacheCreationInputTokens(cacheCreation)
 		}
 		p.tokenUsage.SetReasoningTokens(uint32(u.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 		if event.Delta.StopReason != "" {
