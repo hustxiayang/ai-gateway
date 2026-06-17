@@ -1370,6 +1370,11 @@ func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingResponseBody(t *
 			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
 		},
 		{
+			name:          "streaming response with thinking tokens",
+			gcpChunk:      `{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":15,"totalTokenCount":35,"thoughtsTokenCount":10}}`,
+			expectedUsage: tokenUsageFrom(10, 0, -1, 25, 35, 10),
+		},
+		{
 			name:          "finish reason without content (MAX_TOKENS)",
 			gcpChunk:      `{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":21,"candidatesTokenCount":71,"totalTokenCount":92}}`,
 			expectedUsage: tokenUsageFrom(21, 0, -1, 71, 92, 0),
