@@ -966,8 +966,8 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			&u.CacheReadInputTokens,
 			&u.CacheCreationInputTokens,
 		)
-		// For message_start, we store the initial usage but don't add to the accumulated
-		// The message_delta event will contain the final totals
+		// Set all input token counts (input, cache read, cache creation) from message_start.
+		// message_delta may also contain these fields but only output_tokens is used from it.
 		if input, ok := usage.InputTokens(); ok {
 			p.tokenUsage.SetInputTokens(input)
 		}
@@ -1061,8 +1061,6 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if output, ok := usage.OutputTokens(); ok {
 			p.tokenUsage.AddOutputTokens(output)
 		}
-		// Cache token details are already set in message_start — don't touch them here
-		// to avoid double-counting, as message_delta may also contain them.
 		p.tokenUsage.SetReasoningTokens(uint32(u.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 		if event.Delta.StopReason != "" {
 			p.stopReason = event.Delta.StopReason
