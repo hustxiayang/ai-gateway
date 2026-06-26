@@ -80,11 +80,25 @@ func newAWSHandler(ctx context.Context, awsAuth *filterapi.AWSAuth) (filterapi.B
 
 // Do implements [Handler.Do].
 //
-// This assumes that during the transformation, the path is set in the header mutation as well as
-// the body in the body mutation.
+// The method reads :method, :path, :authority, and host from requestHeaders. It resolves the host
+// for the signed request in the following order:
+//  1. the :authority pseudo-header, when present;
+//  2. the host header, when :authority is absent;
+//  3. the standard AWS Bedrock endpoint for the configured region
+//     (bedrock-runtime.<region>.amazonaws.com), when both host and :authority are absent.
+//
+// The transformation must set :path in the header mutation and provide the request body
+// before this method is called.
 func (a *awsHandler) Do(ctx context.Context, requestHeaders map[string]string, mutatedBody []byte) ([]internalapi.Header, error) {
 	method := requestHeaders[":method"]
 	path := requestHeaders[":path"]
+	host := requestHeaders[":authority"]
+	if host == "" {
+		host = requestHeaders["host"]
+	}
+	if host == "" {
+		host = fmt.Sprintf("bedrock-runtime.%s.amazonaws.com", a.region)
+	}
 
 	var body []byte
 	if len(mutatedBody) > 0 {
@@ -93,7 +107,7 @@ func (a *awsHandler) Do(ctx context.Context, requestHeaders map[string]string, m
 
 	payloadHash := sha256.Sum256(body)
 	req, err := http.NewRequest(method,
-		fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com%s", a.region, path),
+		fmt.Sprintf("https://%s%s", host, path),
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("cannot create request: %w", err)
