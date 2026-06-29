@@ -110,7 +110,7 @@ func (o *ToGCPVertexAIV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Re
 			Messages: []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Role:    "user",
-					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.Prompt},
 				}},
 			},
 		}

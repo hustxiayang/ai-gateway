@@ -275,7 +275,7 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 			Messages: []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Role:    "user",
-					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.Prompt},
 				}},
 			},
 		}
@@ -290,8 +290,17 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 	// Build the correct path for AWS Bedrock CountTokens API
 	// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
 	pathTemplate := "/model/%s/count-tokens"
+	pathModel := o.requestModel
+	// AWS Bedrock's CountTokens API does not support cross-region inference (CRIS) model IDs
+	// (e.g., "us.anthropic.claude-sonnet-4-6" returns "The provided model doesn't support
+	// counting tokens"). Strip the region prefix for count-tokens only.
+	if i := strings.IndexByte(pathModel, '.'); i >= 0 {
+		if prefix := pathModel[:i]; len(prefix) <= 2 {
+			pathModel = pathModel[i+1:]
+		}
+	}
 	// URL encode the model name for the path to handle ARNs with special characters
-	encodedModelName := url.PathEscape(o.requestModel)
+	encodedModelName := url.PathEscape(pathModel)
 	path := fmt.Sprintf(pathTemplate, encodedModelName)
 
 	bedrockReq, err := o.tokenizeToBedrockCountTokens(tokenizeReq.ChatRequest)

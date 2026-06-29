@@ -162,7 +162,7 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 			Messages: []openai.ChatCompletionMessageParamUnion{
 				{OfUser: &openai.ChatCompletionUserMessageParam{
 					Role:    "user",
-					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.CompletionRequest.Prompt},
+					Content: openai.StringOrUserRoleContentUnion{Value: tokenizeReq.Prompt},
 				}},
 			},
 		}
@@ -170,8 +170,13 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 	}
 
 	if o.modelNameOverride != "" {
-		// Use modelName override if set.
-		o.requestModel = o.modelNameOverride
+		// GCP Vertex AI's count-tokens endpoint does not accept "@default" or "@latest"
+		// version aliases. Strip them for count-tokens only.
+		model := o.modelNameOverride
+		if strings.HasSuffix(model, "@default") || strings.HasSuffix(model, "@latest") {
+			model = model[:strings.LastIndexByte(model, '@')]
+		}
+		o.requestModel = model
 	}
 
 	// The GCP Anthropic count-tokens endpoint uses "count-tokens" as a virtual model name
