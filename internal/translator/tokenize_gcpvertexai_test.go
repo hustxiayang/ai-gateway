@@ -18,7 +18,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/gcp"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -734,6 +734,86 @@ func TestToGCPVertexAIV1Tokenize_IdentifiedIssues(t *testing.T) {
 		_, _, err = translator.RequestBody(nil, validChatReq, false)
 		require.NoError(t, err)
 	})
+}
+
+func TestToGCPVertexAIV1Tokenize_MediaResolution(t *testing.T) {
+	translator := NewTokenizeToGCPVertexAITranslator("").(*ToGCPVertexAIV1Tokenize)
+
+	req := &tokenize.RequestUnion{
+		ChatRequest: &tokenize.ChatRequest{
+			Model: "gemini-2.0-flash-001",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+					},
+				},
+			},
+			MediaResolution: "HIGH",
+		},
+	}
+
+	_, body, err := translator.RequestBody(nil, req, false)
+	require.NoError(t, err)
+
+	var gcpReq gcp.CountTokenRequest
+	require.NoError(t, json.Unmarshal(body, &gcpReq))
+	require.NotNil(t, gcpReq.GenerationConfig)
+	require.Equal(t, genai.MediaResolution("HIGH"), gcpReq.GenerationConfig.MediaResolution)
+}
+
+func TestToGCPVertexAIV1Tokenize_ToolsConversion(t *testing.T) {
+	translator := NewTokenizeToGCPVertexAITranslator("").(*ToGCPVertexAIV1Tokenize)
+
+	req := &tokenize.RequestUnion{
+		ChatRequest: &tokenize.ChatRequest{
+			Model: "gemini-2.0-flash-001",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "What's the weather?"},
+					},
+				},
+			},
+			Tools: []openai.Tool{
+				{
+					Type: "function",
+					Function: &openai.FunctionDefinition{
+						Name:        "get_weather",
+						Description: "Get weather",
+						Parameters: map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"location": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, body, err := translator.RequestBody(nil, req, false)
+	require.NoError(t, err)
+
+	var gcpReq gcp.CountTokenRequest
+	require.NoError(t, json.Unmarshal(body, &gcpReq))
+	require.NotEmpty(t, gcpReq.Tools)
+}
+
+func TestToGCPVertexAIV1Tokenize_EmptyMessages(t *testing.T) {
+	translator := &ToGCPVertexAIV1Tokenize{}
+
+	chatReq := &tokenize.ChatRequest{
+		Model:    "gemini-2.0-flash-001",
+		Messages: []openai.ChatCompletionMessageParamUnion{},
+	}
+
+	_, err := translator.tokenizeToGeminiCountToken(chatReq, "gemini-2.0-flash-001")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "messages must produce at least one content entry")
 }
 
 // Benchmark tests for performance

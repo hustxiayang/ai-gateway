@@ -14,7 +14,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -39,7 +39,7 @@ type ToAWSBedrockV1Tokenize struct {
 // tokenizeToBedrockCountTokens converts an OpenAI tokenize chat request to AWS Bedrock CountTokens format.
 // AWS Bedrock has a dedicated CountTokens endpoint that counts input tokens without generating any output.
 // The API expects: {"input": {"converse": {"messages": [...], "system": [...], "toolConfig": {...}}}}
-func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *tokenize.ChatRequest) (*awsbedrock.CountTokensInput, error) {
+func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *tokenize.ChatRequest) (*awsbedrock.CountTokensConverseRequest, error) {
 	var converseInput awsbedrock.CountTokensConverseInput
 
 	// Convert Chat Completion messages to Bedrock format
@@ -91,11 +91,9 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 		}
 	}
 
-	return &awsbedrock.CountTokensInput{
-		Input: awsbedrock.CountTokensInputUnion{
-			Converse: &converseInput,
-		},
-	}, nil
+	req := &awsbedrock.CountTokensConverseRequest{}
+	req.Input.Converse = &converseInput
+	return req, nil
 }
 
 // Helper methods adapted from the existing AWS Bedrock chat completion translator

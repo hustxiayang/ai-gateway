@@ -31,6 +31,8 @@ const (
 	LineFeedSSEDelimiter               = "\n\n"
 	CarriageReturnSSEDelimiter         = "\r\r"
 	CarriageReturnLineFeedSSEDelimiter = "\r\n\r\n"
+
+	gcpVertexAIBackendError = "GCPVertexAIBackendError"
 )
 
 // detectSSEDelimiter detects which SSE delimiter is being used in the data.
@@ -249,7 +251,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
 			}
 			if chunk.UsageMetadata.CandidatesTokenCount >= 0 {
-				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount + chunk.UsageMetadata.ThoughtsTokenCount)) //nolint:gosec
+				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount)) //nolint:gosec
 			}
 			if chunk.UsageMetadata.TotalTokenCount >= 0 {
 				tokenUsage.SetTotalTokens(uint32(chunk.UsageMetadata.TotalTokenCount)) //nolint:gosec
@@ -646,6 +648,7 @@ func convertGCPVertexAIErrorToOpenAI(respHeaders map[string]string, body io.Read
 
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
 // Translate GCP Vertex AI exceptions to OpenAI error type.
+// GCP error responses typically contain JSON with error details or plain text error messages.
 func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {

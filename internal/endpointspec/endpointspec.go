@@ -22,7 +22,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	cohereschema "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
@@ -114,7 +114,7 @@ type (
 	TranscriptionEndpointSpec struct{}
 	// TranslationEndpointSpec implements EndpointSpec for /v1/audio/translations.
 	TranslationEndpointSpec struct{}
-	// TokenizeEndpointSpec implements EndpointSpec for /v1/tokenize.
+	// TokenizeEndpointSpec implements EndpointSpec for /tokenize.
 	TokenizeEndpointSpec struct{}
 )
 
@@ -429,7 +429,7 @@ func (TokenizeEndpointSpec) ParseBody(
 	// Try to detect if it's a chat or completion request by checking for "messages" field
 	var rawRequest map[string]interface{}
 	if err := json.Unmarshal(body, &rawRequest); err != nil {
-		return "", nil, false, nil, fmt.Errorf("failed to unmarshal tokenize request: %w", err)
+		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /tokenize: %w", internalapi.ErrMalformedRequest, err)
 	}
 
 	var req tokenize.RequestUnion
@@ -439,27 +439,24 @@ func (TokenizeEndpointSpec) ParseBody(
 	if _, hasMessages := rawRequest["messages"]; hasMessages {
 		var chatReq tokenize.ChatRequest
 		if err := json.Unmarshal(body, &chatReq); err != nil {
-			return "", nil, false, nil, fmt.Errorf("failed to unmarshal chat tokenize request: %w", err)
+			return "", nil, false, nil, fmt.Errorf("%w: failed to parse chat tokenize request: %w", internalapi.ErrMalformedRequest, err)
 		}
-		// Validate the chat request
 		if err := chatReq.Validate(); err != nil {
-			return "", nil, false, nil, fmt.Errorf("invalid chat tokenize request: %w", err)
+			return "", nil, false, nil, fmt.Errorf("%w: invalid chat tokenize request: %w", internalapi.ErrMalformedRequest, err)
 		}
 		req.ChatRequest = &chatReq
 		model = chatReq.Model
 	} else {
-		// This is a completion tokenize request (has "prompt" field)
 		var completionReq tokenize.CompletionRequest
 		if err := json.Unmarshal(body, &completionReq); err != nil {
-			return "", nil, false, nil, fmt.Errorf("failed to unmarshal completion tokenize request: %w", err)
+			return "", nil, false, nil, fmt.Errorf("%w: failed to parse completion tokenize request: %w", internalapi.ErrMalformedRequest, err)
 		}
 		req.CompletionRequest = &completionReq
 		model = completionReq.Model
 	}
 
-	// Validate that the union has exactly one request type set
 	if err := req.Validate(); err != nil {
-		return "", nil, false, nil, fmt.Errorf("invalid tokenize request: %w", err)
+		return "", nil, false, nil, fmt.Errorf("%w: invalid tokenize request: %w", internalapi.ErrMalformedRequest, err)
 	}
 
 	// Tokenize requests are never streaming
@@ -474,9 +471,11 @@ func (TokenizeEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, m
 	case filterapi.APISchemaGCPVertexAI:
 		return translator.NewTokenizeToGCPVertexAITranslator(modelNameOverride), nil
 	case filterapi.APISchemaGCPAnthropic:
-		return translator.NewTokenizeToGCPAnthropicTranslator(modelNameOverride), nil
+		return translator.NewTokenizeToGCPAnthropicTranslator(schema.Version, modelNameOverride), nil
 	case filterapi.APISchemaAWSBedrock:
 		return translator.NewTokenizeToAWSBedrockTranslator(modelNameOverride), nil
+	case filterapi.APISchemaAWSAnthropic:
+		return translator.NewTokenizeToAWSAnthropicTranslator(schema.Version, modelNameOverride), nil
 	default:
 		return nil, fmt.Errorf("unsupported API schema for tokenize endpoint: backend=%s", schema.Name)
 	}

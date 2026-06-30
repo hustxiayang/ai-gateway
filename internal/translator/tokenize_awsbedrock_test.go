@@ -17,7 +17,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -60,7 +60,7 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, strconv.Itoa(len(body)), headers[1].Value())
 
 		// Verify the body contains AWS Bedrock CountTokens request
-		var bedrockReq awsbedrock.CountTokensInput
+		var bedrockReq awsbedrock.CountTokensConverseRequest
 		require.NoError(t, json.Unmarshal(body, &bedrockReq))
 		require.NotNil(t, bedrockReq.Input.Converse)
 		require.NotNil(t, bedrockReq.Input.Converse.Messages)
@@ -123,7 +123,7 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, body)
 
-		var bedrockReq awsbedrock.CountTokensInput
+		var bedrockReq awsbedrock.CountTokensConverseRequest
 		require.NoError(t, json.Unmarshal(body, &bedrockReq))
 		require.NotNil(t, bedrockReq.Input.Converse)
 		require.NotNil(t, bedrockReq.Input.Converse.System)
@@ -149,7 +149,7 @@ func TestToAWSBedrockV1Tokenize_RequestBody(t *testing.T) {
 		require.Equal(t, "anthropic.claude-3-opus-20240229-v1:0", translator.requestModel)
 		require.Len(t, headers, 2)
 
-		var bedrockReq awsbedrock.CountTokensInput
+		var bedrockReq awsbedrock.CountTokensConverseRequest
 		require.NoError(t, json.Unmarshal(body, &bedrockReq))
 		require.NotNil(t, bedrockReq.Input.Converse)
 		require.Len(t, bedrockReq.Input.Converse.Messages, 1)
@@ -562,6 +562,282 @@ func TestToAWSBedrockV1Tokenize_IntegrationScenarios(t *testing.T) {
 		require.Equal(t, "error", errorResp.Type)
 		require.Equal(t, "ValidationException", errorResp.Error.Type)
 		require.Contains(t, errorResp.Error.Message, "Invalid model ARN specified")
+	})
+}
+
+func TestToAWSBedrockV1Tokenize_MessageConversion(t *testing.T) {
+	translator := &ToAWSBedrockV1Tokenize{}
+
+	t.Run("user message with multi-part text content", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role: openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{
+							Value: []openai.ChatCompletionContentPartUserUnionParam{
+								{OfText: &openai.ChatCompletionContentPartTextParam{Text: "Hello"}},
+								{OfText: &openai.ChatCompletionContentPartTextParam{Text: "World"}},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 1)
+		require.Len(t, bedrockReq.Input.Converse.Messages[0].Content, 2)
+		require.Equal(t, "Hello", *bedrockReq.Input.Converse.Messages[0].Content[0].Text)
+		require.Equal(t, "World", *bedrockReq.Input.Converse.Messages[0].Content[1].Text)
+	})
+
+	t.Run("assistant message with string content", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role:    openai.ChatMessageRoleAssistant,
+						Content: openai.StringOrAssistantRoleContentUnion{Value: "Hello there!"},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 2)
+		require.Equal(t, "assistant", bedrockReq.Input.Converse.Messages[1].Role)
+		require.Len(t, bedrockReq.Input.Converse.Messages[1].Content, 1)
+		require.Equal(t, "Hello there!", *bedrockReq.Input.Converse.Messages[1].Content[0].Text)
+	})
+
+	t.Run("assistant message with slice content", func(t *testing.T) {
+		text := "part one"
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						Content: openai.StringOrAssistantRoleContentUnion{
+							Value: []openai.ChatCompletionAssistantMessageParamContent{
+								{Type: openai.ChatCompletionAssistantMessageParamContentTypeText, Text: &text},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 2)
+		require.Equal(t, "assistant", bedrockReq.Input.Converse.Messages[1].Role)
+		require.Len(t, bedrockReq.Input.Converse.Messages[1].Content, 1)
+		require.Equal(t, "part one", *bedrockReq.Input.Converse.Messages[1].Content[0].Text)
+	})
+
+	t.Run("tool message with string content", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Use the tool"},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						Role:       openai.ChatMessageRoleTool,
+						ToolCallID: "call_123",
+						Content: openai.ContentUnion{
+							Value: "tool result text",
+						},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 2)
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[1].Role)
+		require.NotNil(t, bedrockReq.Input.Converse.Messages[1].Content[0].ToolResult)
+		require.Equal(t, "call_123", *bedrockReq.Input.Converse.Messages[1].Content[0].ToolResult.ToolUseID)
+		require.Equal(t, "tool result text", *bedrockReq.Input.Converse.Messages[1].Content[0].ToolResult.Content[0].Text)
+	})
+
+	t.Run("tool message with text parts content", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Use the tool"},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						Role:       openai.ChatMessageRoleTool,
+						ToolCallID: "call_456",
+						Content: openai.ContentUnion{
+							Value: []openai.ChatCompletionContentPartTextParam{
+								{Text: "result part 1"},
+								{Text: "result part 2"},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.Messages, 2)
+		toolResult := bedrockReq.Input.Converse.Messages[1].Content[0].ToolResult
+		require.Len(t, toolResult.Content, 2)
+		require.Equal(t, "result part 1", *toolResult.Content[0].Text)
+		require.Equal(t, "result part 2", *toolResult.Content[1].Text)
+	})
+
+	t.Run("system message with text parts content", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfSystem: &openai.ChatCompletionSystemMessageParam{
+						Role: openai.ChatMessageRoleSystem,
+						Content: openai.ContentUnion{
+							Value: []openai.ChatCompletionContentPartTextParam{
+								{Text: "system part 1"},
+								{Text: "system part 2"},
+							},
+						},
+					},
+				},
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.Len(t, bedrockReq.Input.Converse.System, 2)
+		require.Equal(t, "system part 1", *bedrockReq.Input.Converse.System[0].Text)
+		require.Equal(t, "system part 2", *bedrockReq.Input.Converse.System[1].Text)
+	})
+
+	t.Run("with tools configuration", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "What's the weather?"},
+					},
+				},
+			},
+			Tools: []openai.Tool{
+				{
+					Type: "function",
+					Function: &openai.FunctionDefinition{
+						Name:        "get_weather",
+						Description: "Get the current weather",
+						Parameters: map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"location": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+				{
+					Type: "function",
+					Function: &openai.FunctionDefinition{
+						Name: "no_desc_tool",
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		require.NotNil(t, bedrockReq.Input.Converse.ToolConfig)
+		require.Len(t, bedrockReq.Input.Converse.ToolConfig.Tools, 2)
+		require.Equal(t, "get_weather", *bedrockReq.Input.Converse.ToolConfig.Tools[0].ToolSpec.Name)
+		require.Equal(t, "Get the current weather", *bedrockReq.Input.Converse.ToolConfig.Tools[0].ToolSpec.Description)
+		require.Equal(t, "no_desc_tool", *bedrockReq.Input.Converse.ToolConfig.Tools[1].ToolSpec.Name)
+		require.Nil(t, bedrockReq.Input.Converse.ToolConfig.Tools[1].ToolSpec.Description)
+	})
+}
+
+func TestToAWSBedrockV1Tokenize_CRISPrefixStripping(t *testing.T) {
+	t.Run("CRIS prefix stripped from model path", func(t *testing.T) {
+		translator := NewTokenizeToAWSBedrockTranslator("").(*ToAWSBedrockV1Tokenize)
+
+		req := &tokenize.RequestUnion{
+			ChatRequest: &tokenize.ChatRequest{
+				Model: "us.anthropic.claude-sonnet-4-6",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+						},
+					},
+				},
+			},
+		}
+
+		headers, _, err := translator.RequestBody(nil, req, false)
+		require.NoError(t, err)
+		require.Contains(t, headers[0].Value(), "anthropic.claude-sonnet-4-6")
+		require.NotContains(t, headers[0].Value(), "us.anthropic")
+	})
+
+	t.Run("non-CRIS prefix not stripped", func(t *testing.T) {
+		translator := NewTokenizeToAWSBedrockTranslator("").(*ToAWSBedrockV1Tokenize)
+
+		req := &tokenize.RequestUnion{
+			ChatRequest: &tokenize.ChatRequest{
+				Model: "anthropic.claude-3-haiku-20240307-v1:0",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+						},
+					},
+				},
+			},
+		}
+
+		headers, _, err := translator.RequestBody(nil, req, false)
+		require.NoError(t, err)
+		require.Contains(t, headers[0].Value(), "anthropic.claude-3-haiku-20240307-v1:0")
 	})
 }
 

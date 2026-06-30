@@ -12,11 +12,11 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/shared/constant"
+	anthropicVertex "github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/tidwall/sjson"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -29,8 +29,9 @@ const (
 )
 
 // NewTokenizeToGCPAnthropicTranslator implements [Factory] for tokenize to GCP Anthropic translation.
-func NewTokenizeToGCPAnthropicTranslator(modelNameOverride internalapi.ModelNameOverride) TokenizeTranslator {
+func NewTokenizeToGCPAnthropicTranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) TokenizeTranslator {
 	return &ToGCPAnthropicV1Tokenize{
+		apiVersion:        apiVersion,
 		modelNameOverride: modelNameOverride,
 	}
 }
@@ -42,91 +43,6 @@ type ToGCPAnthropicV1Tokenize struct {
 	modelNameOverride internalapi.ModelNameOverride
 	requestModel      internalapi.RequestModel
 	apiVersion        string
-}
-
-// tokenizeToAnthropicMessages converts an OpenAI tokenize chat request to GCP Anthropic token counting format.
-// Since Anthropic doesn't have a dedicated tokenization endpoint, we use the MessageCountTokens API
-// to count input tokens accurately without needing to generate any output.
-func (o *ToGCPAnthropicV1Tokenize) tokenizeToAnthropicMessages(tokenizeChatReq *tokenize.ChatRequest, requestModel internalapi.RequestModel) (*anthropic.MessageCountTokensParams, error) {
-	// Convert OpenAI messages to Anthropic format
-	messages, systemBlocks, err := openAIToAnthropicMessages(tokenizeChatReq.Messages)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert messages: %w", err)
-	}
-
-	// Build Anthropic MessageCountTokens request
-	countTokensParam := &anthropic.MessageCountTokensParams{
-		Messages: messages,
-		Model:    requestModel,
-	}
-
-	// Set system prompt if present
-	if len(systemBlocks) > 0 {
-		// Convert system blocks to MessageCountTokensParamsSystemUnion
-		if len(systemBlocks) == 1 {
-			// Single system block - use string format
-			countTokensParam.System = anthropic.MessageCountTokensParamsSystemUnion{
-				OfString: anthropic.String(systemBlocks[0].Text),
-			}
-		} else {
-			// Multiple system blocks - use array format
-			textBlocks := make([]anthropic.TextBlockParam, len(systemBlocks))
-			for i, block := range systemBlocks {
-				textBlocks[i] = anthropic.TextBlockParam{
-					Text: block.Text,
-				}
-			}
-			countTokensParam.System = anthropic.MessageCountTokensParamsSystemUnion{
-				OfTextBlockArray: textBlocks,
-			}
-		}
-	}
-
-	// Convert tools if present
-	if len(tokenizeChatReq.Tools) > 0 {
-		countTokensParam.Tools = make([]anthropic.MessageCountTokensToolUnionParam, 0, len(tokenizeChatReq.Tools))
-		for _, tool := range tokenizeChatReq.Tools {
-			if tool.Function == nil {
-				continue
-			}
-			inputSchema := anthropic.ToolInputSchemaParam{}
-			if tool.Function.Parameters != nil {
-				paramsMap, ok := tool.Function.Parameters.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("failed to cast tool parameters to map[string]any")
-				}
-				if typeVal, ok := paramsMap["type"].(string); ok {
-					inputSchema.Type = constant.Object(typeVal)
-				}
-				if propsVal, ok := paramsMap["properties"].(map[string]any); ok {
-					inputSchema.Properties = propsVal
-				}
-				if requiredVal, ok := paramsMap["required"].([]any); ok {
-					requiredSlice := make([]string, len(requiredVal))
-					for i, v := range requiredVal {
-						if s, ok := v.(string); ok {
-							requiredSlice[i] = s
-						}
-					}
-					inputSchema.Required = requiredSlice
-				}
-				extraFields := make(map[string]any)
-				for key, value := range paramsMap {
-					if _, found := anthropicInputSchemaKeysToSkip[key]; found {
-						continue
-					}
-					extraFields[key] = value
-				}
-				inputSchema.ExtraFields = extraFields
-			}
-			countTokensParam.Tools = append(countTokensParam.Tools, anthropic.MessageCountTokensToolParamOfTool(
-				inputSchema,
-				tool.Function.Name,
-			))
-		}
-	}
-
-	return countTokensParam, nil
 }
 
 // anthropicTokensCountToResponse converts an Anthropic MessageTokensCount response to OpenAI tokenize format.
@@ -170,13 +86,13 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 	}
 
 	if o.modelNameOverride != "" {
-		// GCP Vertex AI's count-tokens endpoint does not accept "@default" or "@latest"
-		// version aliases. Strip them for count-tokens only.
-		model := o.modelNameOverride
-		if strings.HasSuffix(model, "@default") || strings.HasSuffix(model, "@latest") {
-			model = model[:strings.LastIndexByte(model, '@')]
-		}
-		o.requestModel = model
+		o.requestModel = o.modelNameOverride
+	}
+
+	// GCP Vertex AI's count-tokens endpoint does not accept "@default" or "@latest"
+	// version aliases. Strip them for count-tokens only.
+	if strings.HasSuffix(o.requestModel, "@default") || strings.HasSuffix(o.requestModel, "@latest") {
+		o.requestModel = o.requestModel[:strings.LastIndexByte(o.requestModel, '@')]
 	}
 
 	// The GCP Anthropic count-tokens endpoint uses "count-tokens" as a virtual model name
@@ -184,7 +100,7 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 	// See: https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/count-tokens
 	path := buildGCPModelPathSuffix(gcpModelPublisherAnthropic, "count-tokens", gcpMethodRawPredict)
 
-	anthropicReq, err := o.tokenizeToAnthropicMessages(tokenizeReq.ChatRequest, o.requestModel)
+	anthropicReq, err := openAIToAnthropicCountTokensParams(tokenizeReq.ChatRequest, o.requestModel)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error converting to Anthropic request: %w", err)
 	}
@@ -195,7 +111,7 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 	}
 
 	// Add anthropic_version field (required by GCP)
-	anthropicVersion := "vertex-2023-10-16" // Default version
+	anthropicVersion := anthropicVertex.DefaultVersion
 	if o.apiVersion != "" {
 		anthropicVersion = o.apiVersion
 	}
@@ -258,7 +174,7 @@ func (o *ToGCPAnthropicV1Tokenize) ResponseBody(_ map[string]string, body io.Rea
 }
 
 // translateGCPAnthropicErrorToOpenAI translates GCP Anthropic error responses to OpenAI error format.
-// This is a shared helper function for GCP Anthropic translators.
+// GCP error responses typically contain JSON with error details or plain text error messages.
 func translateGCPAnthropicErrorToOpenAI(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {

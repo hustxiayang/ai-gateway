@@ -638,30 +638,31 @@ type TitanEmbeddingResponse struct {
 	InputTextTokenCount int `json:"inputTextTokenCount"`
 }
 
-// CountTokensConverseInput holds the Converse-style parameters for token counting.
-type CountTokensConverseInput struct {
-	// The messages to count tokens for
-	Messages []*Message `json:"messages"`
-
-	// A system prompt to include in token counting
-	System []*SystemContentBlock `json:"system,omitempty"`
-
-	// Configuration information for tools to include in token counting
-	ToolConfig *ToolConfiguration `json:"toolConfig,omitempty"`
-}
-
-// CountTokensInputUnion is a union type for the input to the CountTokens API.
-// Only one field may be set at a time.
-type CountTokensInputUnion struct {
-	// Converse holds Converse-style (messages/system) token counting input.
-	Converse *CountTokensConverseInput `json:"converse,omitempty"`
-}
-
-// CountTokensInput represents the request structure for the AWS Bedrock CountTokens API.
+// CountTokensConverseInput mirrors the Converse input for the Bedrock CountTokens API.
 // https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
-// The actual body sent to POST /model/{modelId}/count-tokens is {"input": {"converse": {...}}}.
-type CountTokensInput struct {
-	Input CountTokensInputUnion `json:"input"`
+type CountTokensConverseInput struct {
+	Messages   []*Message            `json:"messages"`
+	System     []*SystemContentBlock `json:"system,omitempty"`
+	ToolConfig *ToolConfiguration    `json:"toolConfig,omitempty"`
+}
+
+// CountTokensConverseRequest is the request structure for the Bedrock CountTokens API using Converse-style input.
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensConverseRequest struct {
+	Input struct {
+		Converse *CountTokensConverseInput `json:"converse"`
+	} `json:"input"`
+}
+
+// CountTokensInvokeModelRequest is the request structure for the Bedrock CountTokens API using InvokeModel-style input.
+// The body is a base64-encoded model-specific request body (e.g., Anthropic Messages format).
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensInvokeModelRequest struct {
+	Input struct {
+		InvokeModel struct {
+			Body string `json:"body"`
+		} `json:"invokeModel"`
+	} `json:"input"`
 }
 
 // CountTokensResponse represents the response structure for the AWS Bedrock CountTokens API

@@ -347,32 +347,33 @@ curl -H "Content-Type: application/json" \
 
 **Status:** ✅ Supported
 
-**Description:** Count tokens for text input without generating a response. Useful for cost estimation, prompt optimization, and understanding model input limits. Compatible with vLLM tokenize API.
+**Description:** Count tokens for text input without generating a response. Useful for cost estimation, prompt optimization, and understanding model input limits. The request format is compatible with the [vLLM tokenize API](https://docs.vllm.ai/en/latest/api/tokenization.html).
 
 **Features:**
 
 - ✅ Chat message tokenization (OpenAI messages format)
 - ✅ Completion prompt tokenization (single string prompt)
-- ✅ Model selection via request body or `x-ai-eg-model` header
-- ✅ Optional token string return (actual token strings, not just counts)
-- ✅ Special token handling (BOS, EOS tokens)
+- ✅ Model selection via `model` field in request body
 - ✅ Tool/function call tokenization support
 - ✅ Provider fallback and load balancing
-- ✅ Full metrics support (request duration, token counts)
+- ✅ Metrics support (request duration, token counts)
 
 **Supported Providers:**
 
-- OpenAI-compatible providers that implement `/tokenize` (e.g., vLLM). Note: OpenAI itself does not offer a tokenize REST API.
-- GCP Vertex AI (automatic translation to Gemini CountTokens API)
-- AWS Bedrock (automatic translation to AWS Bedrock CountTokens API, Claude models only)
-- GCP Anthropic (automatic translation to Anthropic MessageCountTokens API, available in limited regions)
+| Provider                            | API Schema     | Translation Target                                                                                                           | Notes                                                                                 |
+| ----------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| OpenAI-compatible (e.g., vLLM)      | `OpenAI`       | Passthrough                                                                                                                  | vLLM natively supports `/tokenize`. OpenAI itself does not offer a tokenize REST API. |
+| GCP Vertex AI (Gemini)              | `GCPVertexAI`  | [Gemini CountTokens API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/count-tokens)                 | Supports `media_resolution` parameter.                                                |
+| GCP Anthropic (Claude on Vertex AI) | `GCPAnthropic` | [Anthropic MessageCountTokens API](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/count-tokens) | Uses `rawPredict` method with `count-tokens` virtual model.                           |
+| AWS Bedrock                         | `AWSBedrock`   | [AWS Bedrock CountTokens API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html)          | Supports models that implement the Converse API.                                      |
+| AWS Bedrock (Anthropic)             | `AWSAnthropic` | [AWS Bedrock CountTokens API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html)          | Uses the same CountTokens API as `AWSBedrock`.                                        |
 
 **Chat Message Example:**
 
 ```bash
 curl -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-3.5-turbo",
+    "model": "gemini-2.5-flash",
     "messages": [
       {
         "role": "system",
@@ -382,8 +383,7 @@ curl -H "Content-Type: application/json" \
         "role": "user",
         "content": "How many tokens is this message?"
       }
-    ],
-    "return_token_strs": true
+    ]
   }' \
   $GATEWAY_URL/tokenize
 ```
@@ -393,92 +393,39 @@ curl -H "Content-Type: application/json" \
 ```bash
 curl -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-3.5-turbo-instruct",
-    "prompt": "Once upon a time, in a land far away",
-    "add_special_tokens": true,
-    "return_token_strs": false
-  }' \
-  $GATEWAY_URL/tokenize
-```
-
-**GCP Vertex AI Example (Gemini):**
-
-```bash
-curl -H "Content-Type: application/json" \
-  -H "x-backend: gcp-backend" \
-  -d '{
-    "model": "gemini-1.5-pro",
-    "messages": [
-      {
-        "role": "user",
-        "content": "What is machine learning?"
-      }
-    ],
-    "media_resolution": "HIGH"
-  }' \
-  $GATEWAY_URL/tokenize
-```
-
-**AWS Bedrock Example (Claude models):**
-
-```bash
-curl -H "Content-Type: application/json" \
-  -H "x-backend: aws-bedrock" \
-  -d '{
-    "model": "anthropic.claude-3-haiku-20240307-v1:0",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Count tokens in this AWS Bedrock message"
-      }
-    ]
-  }' \
-  $GATEWAY_URL/tokenize
-```
-
-**GCP Anthropic Example (Claude models):**
-
-```bash
-curl -H "Content-Type: application/json" \
-  -H "x-backend: gcp-anthropic" \
-  -d '{
-    "model": "claude-3-haiku-20240307",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Count tokens in this GCP Anthropic message"
-      }
-    ]
+    "model": "gemini-2.5-flash",
+    "prompt": "Once upon a time, in a land far away"
   }' \
   $GATEWAY_URL/tokenize
 ```
 
 **Response Format:**
 
+For translated backends (GCP Vertex AI, GCP Anthropic, AWS Bedrock), the response contains only the token count:
+
+```json
+{
+  "count": 15
+}
+```
+
+For OpenAI-compatible backends that natively support tokenization (e.g., vLLM), additional fields may be present depending on request parameters:
+
 ```json
 {
   "count": 15,
-  "max_model_len": 4096,
+  "max_model_len": 131072,
   "tokens": [1234, 5678, 9012],
   "token_strs": ["Hello", " world", "!"]
 }
 ```
 
-**Use Cases:**
-
-- **Cost Estimation**: Calculate token usage before making expensive completion requests
-- **Prompt Optimization**: Understand how different phrasings affect token counts
-- **Input Validation**: Ensure prompts fit within model context limits
-- **Batch Processing**: Pre-calculate costs for large batches of requests
-- **A/B Testing**: Compare token efficiency between different prompt strategies
-
 **Configuration Notes:**
 
-- For **vLLM backends**: Set up as OpenAI-compatible backend, vLLM natively provides tokenize support
-- For **GCP Vertex AI**: Configure with GCPVertexAI schema, requests automatically translate to Gemini CountTokens API. Available in all Gemini regions.
-- For **AWS Bedrock**: Configure with AWSBedrock schema, requests automatically translate to AWS Bedrock CountTokens API. Completion prompts are automatically converted to chat messages. Supports Claude models only (e.g., `anthropic.claude-3-haiku-20240307-v1:0`).
-- For **GCP Anthropic**: Configure with GCPAnthropic schema, requests translate to Anthropic MessageCountTokens API. Completion prompts are automatically converted to chat messages. Supports Claude models (e.g., `claude-3-haiku-20240307`). Available in limited regions (us-east5, europe-west1, asia-southeast1, us-central1, europe-west4).
-- For **cost optimization**: Use tokenize before expensive operations to validate input size
+- For **vLLM backends**: Configure with `OpenAI` schema. vLLM natively provides `/tokenize` and the gateway passes the request through.
+- For **GCP Vertex AI**: Configure with `GCPVertexAI` schema. Requests are automatically translated to the Gemini CountTokens API. Completion prompts are automatically converted to chat messages.
+- For **AWS Bedrock**: Configure with `AWSBedrock` or `AWSAnthropic` schema. Requests are automatically translated to the AWS Bedrock CountTokens API. Completion prompts are automatically converted to chat messages. Cross-region inference (CRIS) model ID prefixes are automatically stripped.
+- For **GCP Anthropic**: Configure with `GCPAnthropic` schema. Requests are translated to the Anthropic MessageCountTokens API via `rawPredict`. Completion prompts are automatically converted to chat messages. Model version suffixes (`@default`, `@latest`) are automatically stripped.
 
 ### Models
 
@@ -521,7 +468,7 @@ The following table summarizes which providers support which endpoints:
 | Provider                                                                                              | Chat Completions | Completions | Embeddings | Image Generation | Anthropic Messages | Rerank | Tokenize | Notes                                                                                                                |
 | ----------------------------------------------------------------------------------------------------- | :--------------: | :---------: | :--------: | :--------------: | :----------------: | :----: | :------: | -------------------------------------------------------------------------------------------------------------------- |
 | [OpenAI](https://platform.openai.com/docs/api-reference)                                              |        ✅        |     ✅      |     ✅     |        ❌        |         ✅         |   ❌   |    ❌    | OpenAI does not offer a tokenize REST API                                                                            |
-| [AWS Bedrock](https://docs.aws.amazon.com/bedrock/latest/APIReference/)                               |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |   ❌   |    ✅    | Via API translation (embeddings: Titan models only, tokenize: Claude models only)                                    |
+| [AWS Bedrock](https://docs.aws.amazon.com/bedrock/latest/APIReference/)                               |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |   ❌   |    ✅    | Via API translation (embeddings: Titan models only)                                                                  |
 | [Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)                  |        ✅        |     🚧      |     ✅     |        ❌        |         ⚠️         |   ❌   |    ❌    | Via API translation or via [OpenAI-compatible API](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/latest) |
 | [Google Gemini](https://ai.google.dev/gemini-api/docs/openai)                                         |        ✅        |     ⚠️      |     ✅     |        ⚠️        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Groq](https://console.groq.com/docs/openai)                                                          |        ✅        |     ❌      |     ❌     |        ❌        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
@@ -535,7 +482,7 @@ The following table summarizes which providers support which endpoints:
 | [Tencent LLM Knowledge Engine](https://www.tencentcloud.com/document/product/1255/70381)              |        ⚠️        |     ❌      |     ❌     |        ❌        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Tetrate Agent Router Service (TARS)](https://router.tetrate.ai/)                                     |        ⚠️        |     ⚠️      |     ⚠️     |        ❌        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Google Vertex AI](https://cloud.google.com/vertex-ai/docs/reference/rest)                            |        ✅        |     🚧      |     ✅     |        ❌        |         ❌         |   ❌   |    ✅    | Via API translation                                                                                                  |
-| [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |   ❌   |    ✅    | Via API translation; tokenize available in limited regions                                                           |
+| [Anthropic on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude) |        ✅        |     ❌      |     🚧     |        ❌        |         ✅         |   ❌   |    ✅    | Via API translation                                                                                                  |
 | [Anthropic on AWS Bedrock](https://aws.amazon.com/bedrock/anthropic/)                                 |        🚧        |     ❌      |     ❌     |        ❌        |         ✅         |   ❌   |    ✅    | Native Anthropic API                                                                                                 |
 | [SambaNova](https://docs.sambanova.ai/sambastudio/latest/open-ai-api.html)                            |        ✅        |     ⚠️      |     ✅     |        ❌        |         ❌         |   ❌   |    ❌    | Via OpenAI-compatible API                                                                                            |
 | [Anthropic](https://docs.claude.com/en/home)                                                          |        ✅        |     ❌      |     ❌     |        ❌        |         ✅         |   ❌   |    ❌    | Via OpenAI-compatible API and Native Anthropic API                                                                   |

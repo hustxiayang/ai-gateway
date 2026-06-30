@@ -14,7 +14,7 @@ import (
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	cohereschema "github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/apischema/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
@@ -30,7 +30,6 @@ const (
 	eventStreamContentType  = "text/event-stream"
 	openAIBackendError      = "OpenAIBackendError"
 	awsBedrockBackendError  = "AWSBedrockBackendError"
-	gcpVertexAIBackendError = "GCPVertexAIBackendError"
 )
 
 // Translator translates the request and response messages between the client
