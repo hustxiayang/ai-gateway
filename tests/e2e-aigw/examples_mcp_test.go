@@ -78,8 +78,8 @@ func TestMCP_standalone(t *testing.T) {
 			}
 		}
 
-		tomorrow := time.Now().AddDate(0, 0, 1).Format("02/01/2006")
-		dayAfter := time.Now().AddDate(0, 0, 2).Format("02/01/2006")
+		tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("02/01/2006")
+		dayAfter := time.Now().UTC().AddDate(0, 0, 2).Format("02/01/2006")
 
 		type callToolTest struct {
 			toolName string
