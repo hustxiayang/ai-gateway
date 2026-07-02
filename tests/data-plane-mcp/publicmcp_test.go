@@ -88,6 +88,10 @@ func TestPublicMCPServers(t *testing.T) {
 				kiwiTools = append(kiwiTools, tool.Name)
 			}
 		}
+		// We intentionally assert only that expected tools are present rather than an
+		// exact set: kiwi (and github) are third-party MCP servers that add or rename
+		// tools upstream without notice, and pinning the exact set caused recurring CI
+		// churn (see the revert of #2305).
 		require.NotEmpty(t, kiwiTools, "expected at least one tool with prefix %q", "kiwi__")
 		t.Logf("discovered kiwi tools: %v", kiwiTools)
 
@@ -121,6 +125,10 @@ func TestPublicMCPServers(t *testing.T) {
 		type callToolTest struct {
 			toolName string
 			params   map[string]any
+			// expectResults asserts the tool returned a non-empty result set. Kiwi
+			// returns isError=false with zero itineraries for e.g. past dates, so
+			// this is what makes searching a future (tomorrow) date meaningful.
+			expectResults bool
 		}
 		tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("02/01/2006")
 		dayAfter := time.Now().UTC().AddDate(0, 0, 2).Format("02/01/2006")
@@ -129,7 +137,8 @@ func TestPublicMCPServers(t *testing.T) {
 		if kiwiFlightTool != "" {
 			t.Logf("discovered kiwi flight tool: %s", kiwiFlightTool)
 			tests = append(tests, callToolTest{
-				toolName: kiwiFlightTool,
+				toolName:      kiwiFlightTool,
+				expectResults: true,
 				params: map[string]any{
 					"flyFrom":                "LAX",
 					"flyTo":                  "HND",
@@ -171,6 +180,17 @@ func TestPublicMCPServers(t *testing.T) {
 				})
 				require.NoError(t, err)
 				require.False(t, resp.IsError)
+
+				if tc.expectResults {
+					require.NotEmpty(t, resp.Content)
+					text, ok := resp.Content[0].(*mcp.TextContent)
+					require.True(t, ok, "expected text content, got %T", resp.Content[0])
+					var result struct {
+						ResultsCount int `json:"resultsCount"`
+					}
+					require.NoError(t, json.Unmarshal([]byte(text.Text), &result))
+					require.NotZero(t, result.ResultsCount, "expected non-empty results: %s", text.Text)
+				}
 			})
 		}
 	})
