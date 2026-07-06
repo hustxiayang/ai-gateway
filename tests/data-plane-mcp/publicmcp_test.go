@@ -114,13 +114,7 @@ func TestPublicMCPServers(t *testing.T) {
 		// Discover a kiwi flight search tool dynamically since Kiwi may rename tools upstream.
 		listResp, err := session.ListTools(t.Context(), &mcp.ListToolsParams{})
 		require.NoError(t, err)
-		var kiwiFlightTool string
-		for _, tool := range listResp.Tools {
-			if strings.HasPrefix(tool.Name, "kiwi__") && strings.Contains(tool.Name, "flight") {
-				kiwiFlightTool = tool.Name
-				break
-			}
-		}
+		kiwiFlightTool := findKiwiFlightTool(listResp.Tools)
 
 		type callToolTest struct {
 			toolName string
@@ -194,4 +188,16 @@ func TestPublicMCPServers(t *testing.T) {
 			})
 		}
 	})
+}
+
+// findKiwiFlightTool returns the first Kiwi flight-search tool, or "" if none is
+// present. Kiwi may rename tools upstream, so we match by prefix + substring
+// rather than an exact name.
+func findKiwiFlightTool(tools []*mcp.Tool) string {
+	for _, tool := range tools {
+		if strings.HasPrefix(tool.Name, "kiwi__") && strings.Contains(tool.Name, "flight") {
+			return tool.Name
+		}
+	}
+	return ""
 }

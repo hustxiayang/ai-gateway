@@ -70,13 +70,7 @@ func TestMCP_standalone(t *testing.T) {
 		// Discover a kiwi flight search tool dynamically since Kiwi may rename tools upstream.
 		listResp, err := session.ListTools(t.Context(), &mcp.ListToolsParams{})
 		require.NoError(t, err)
-		var kiwiFlightTool string
-		for _, tool := range listResp.Tools {
-			if strings.HasPrefix(tool.Name, kiwiToolPrefix) && strings.Contains(tool.Name, "flight") {
-				kiwiFlightTool = tool.Name
-				break
-			}
-		}
+		kiwiFlightTool := findKiwiFlightTool(listResp.Tools)
 
 		tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("02/01/2006")
 		dayAfter := time.Now().UTC().AddDate(0, 0, 2).Format("02/01/2006")
@@ -219,4 +213,16 @@ func TestMCP_standalone_oauth(t *testing.T) {
 		require.NotEmpty(t, kiwiTools, "expected at least one tool with prefix %q", kiwiToolPrefix)
 		t.Logf("discovered kiwi tools via oauth: %v", kiwiTools)
 	})
+}
+
+// findKiwiFlightTool returns the first Kiwi flight-search tool, or "" if none is
+// present. Kiwi may rename tools upstream, so we match by prefix + substring
+// rather than an exact name.
+func findKiwiFlightTool(tools []*mcp.Tool) string {
+	for _, tool := range tools {
+		if strings.HasPrefix(tool.Name, kiwiToolPrefix) && strings.Contains(tool.Name, "flight") {
+			return tool.Name
+		}
+	}
+	return ""
 }
