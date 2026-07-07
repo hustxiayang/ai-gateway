@@ -98,6 +98,10 @@ func (r *RequestUnion) Validate() error {
 	if r.CompletionRequest == nil && r.ChatRequest == nil {
 		return errors.New("one request type must be set")
 	}
+	if (r.CompletionRequest != nil && r.CompletionRequest.Model == "") ||
+		(r.ChatRequest != nil && r.ChatRequest.Model == "") {
+		return errors.New("model is required")
+	}
 	return nil
 }
 

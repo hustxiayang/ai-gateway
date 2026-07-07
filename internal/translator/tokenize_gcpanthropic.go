@@ -148,7 +148,7 @@ func (o *ToGCPAnthropicV1Tokenize) ResponseBody(_ map[string]string, body io.Rea
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	anthropicResp := &anthropic.MessageTokensCount{}
-	if err = json.NewDecoder(body).Decode(&anthropicResp); err != nil {
+	if err = json.NewDecoder(body).Decode(anthropicResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 

@@ -191,7 +191,7 @@ func (o *ToAWSAnthropicV1Tokenize) ResponseBody(_ map[string]string, body io.Rea
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	bedrockResp := &awsbedrock.CountTokensResponse{}
-	if err = json.NewDecoder(body).Decode(&bedrockResp); err != nil {
+	if err = json.NewDecoder(body).Decode(bedrockResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 

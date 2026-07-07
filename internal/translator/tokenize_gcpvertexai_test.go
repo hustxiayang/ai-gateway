@@ -162,7 +162,7 @@ func TestToGCPVertexAIV1Tokenize_RequestBody(t *testing.T) {
 
 		req := &tokenize.RequestUnion{
 			ChatRequest: &tokenize.ChatRequest{
-				Model: "", // Empty model string should be handled gracefully
+				Model: "", // Empty model is rejected: model is a required field.
 				Messages: []openai.ChatCompletionMessageParamUnion{
 					{
 						OfUser: &openai.ChatCompletionUserMessageParam{
@@ -174,10 +174,9 @@ func TestToGCPVertexAIV1Tokenize_RequestBody(t *testing.T) {
 			},
 		}
 
-		// Should handle empty model gracefully
 		_, _, err := translator.RequestBody(nil, req, false)
-		// Current implementation should work with empty string since Model is now required
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "model is required")
 	})
 
 	t.Run("message conversion error", func(t *testing.T) {

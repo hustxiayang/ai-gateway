@@ -127,7 +127,7 @@ func (o *ToOpenAITokenize) ResponseBody(_ map[string]string, body io.Reader, _ b
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	resp := &tokenize.Response{}
-	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+	if err := json.NewDecoder(body).Decode(resp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 

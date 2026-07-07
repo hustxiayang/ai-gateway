@@ -450,6 +450,73 @@ func TestRequestUnion_HelperMethods(t *testing.T) {
 	})
 }
 
+func TestRequestUnion_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		request RequestUnion
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid completion request",
+			request: RequestUnion{
+				CompletionRequest: &CompletionRequest{Model: "gpt-4", Prompt: "Hello"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid chat request",
+			request: RequestUnion{
+				ChatRequest: &ChatRequest{Model: "gpt-4"},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "no request type set",
+			request: RequestUnion{},
+			wantErr: true,
+			errMsg:  "one request type must be set",
+		},
+		{
+			name: "both request types set",
+			request: RequestUnion{
+				CompletionRequest: &CompletionRequest{Model: "gpt-4", Prompt: "Hello"},
+				ChatRequest:       &ChatRequest{Model: "gpt-4"},
+			},
+			wantErr: true,
+			errMsg:  "only one request type can be set",
+		},
+		{
+			name: "completion request with empty model",
+			request: RequestUnion{
+				CompletionRequest: &CompletionRequest{Prompt: "Hello"},
+			},
+			wantErr: true,
+			errMsg:  "model is required",
+		},
+		{
+			name: "chat request with empty model",
+			request: RequestUnion{
+				ChatRequest: &ChatRequest{},
+			},
+			wantErr: true,
+			errMsg:  "model is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.request.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // Helper functions
 func stringPtr(s string) *string {
 	return &s

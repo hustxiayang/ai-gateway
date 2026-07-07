@@ -162,7 +162,7 @@ func (o *ToGCPVertexAIV1Tokenize) ResponseBody(_ map[string]string, body io.Read
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	gcpResp := &genai.CountTokensResponse{}
-	if err = json.NewDecoder(body).Decode(&gcpResp); err != nil {
+	if err = json.NewDecoder(body).Decode(gcpResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 

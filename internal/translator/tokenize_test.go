@@ -155,18 +155,14 @@ func TestTokenizeTranslator_RequestBody(t *testing.T) {
 
 		req := &tokenize.RequestUnion{
 			CompletionRequest: &tokenize.CompletionRequest{
-				Model:  "", // Empty model string should be handled gracefully
+				Model:  "", // Empty model is rejected: model is a required field.
 				Prompt: "Hello world",
 			},
 		}
 
-		// Should handle empty model string without panic since Model is now required field
-		headers, body, err := translator.RequestBody(nil, req, false)
-
-		require.NoError(t, err)
-		require.Len(t, headers, 1)
-		require.Nil(t, body)
-		require.Empty(t, translator.requestModel) // Empty model should be stored
+		_, _, err := translator.RequestBody(nil, req, false)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "model is required")
 	})
 
 	t.Run("empty model string - chat request", func(t *testing.T) {
@@ -174,17 +170,14 @@ func TestTokenizeTranslator_RequestBody(t *testing.T) {
 
 		req := &tokenize.RequestUnion{
 			ChatRequest: &tokenize.ChatRequest{
-				Model:    "", // Empty model string should be handled gracefully
+				Model:    "", // Empty model is rejected: model is a required field.
 				Messages: []openai.ChatCompletionMessageParamUnion{{}},
 			},
 		}
 
-		headers, body, err := translator.RequestBody(nil, req, false)
-
-		require.NoError(t, err)
-		require.Len(t, headers, 1)
-		require.Nil(t, body)
-		require.Empty(t, translator.requestModel) // Empty model should be stored
+		_, _, err := translator.RequestBody(nil, req, false)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "model is required")
 	})
 
 	t.Run("empty union - no request type set", func(t *testing.T) {

@@ -454,10 +454,10 @@ func TestTokenizeEndpointSpec_ParseBody(t *testing.T) {
 		require.ErrorContains(t, err, "continue_final_message")
 	})
 
-	t.Run("empty object parses as completion", func(t *testing.T) {
-		_, parsed, _, _, err := spec.ParseBody([]byte("{}"), false)
-		require.NoError(t, err)
-		require.NotNil(t, parsed.CompletionRequest)
+	t.Run("empty object rejected - model required", func(t *testing.T) {
+		_, _, _, _, err := spec.ParseBody([]byte("{}"), false)
+		require.ErrorIs(t, err, internalapi.ErrMalformedRequest)
+		require.ErrorContains(t, err, "model is required")
 	})
 
 	t.Run("never streaming", func(t *testing.T) {
