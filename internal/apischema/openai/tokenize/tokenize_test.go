@@ -152,7 +152,7 @@ func TestChatRequest_Validate(t *testing.T) {
 		{
 			name: "valid request",
 			request: ChatRequest{
-				AddGenerationPrompt:  true,
+				AddGenerationPrompt:  boolPtr(true),
 				ContinueFinalMessage: false,
 			},
 			wantErr: false,
