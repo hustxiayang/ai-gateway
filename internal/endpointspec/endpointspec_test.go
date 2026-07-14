@@ -443,7 +443,7 @@ func TestTokenizeEndpointSpec_ParseBody(t *testing.T) {
 					Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
 				}},
 			},
-			AddGenerationPrompt:  true,
+			AddGenerationPrompt:  ptr.To(true),
 			ContinueFinalMessage: true,
 		}
 		body, err := json.Marshal(chatReq)
