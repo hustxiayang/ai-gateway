@@ -75,10 +75,11 @@ type ChatRequest struct {
 
 // Validate checks that the request is valid.
 func (r *ChatRequest) Validate() error {
-	if r.ContinueFinalMessage && r.AddGenerationPrompt {
+	if r.ContinueFinalMessage && r.AddGenerationPrompt != nil && *r.AddGenerationPrompt {
 		return errors.New("cannot set both continue_final_message and add_generation_prompt to true")
 	}
 	return nil
+}
 }
 
 // RequestUnion represents a union of tokenize request types.
