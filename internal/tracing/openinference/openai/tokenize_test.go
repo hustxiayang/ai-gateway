@@ -119,7 +119,7 @@ func TestTokenizeRecorder_RecordRequest(t *testing.T) {
 			req: &tokenize.RequestUnion{
 				ChatRequest: &tokenize.ChatRequest{
 					Model:                "gpt-4",
-					AddGenerationPrompt:  true,
+					AddGenerationPrompt:  boolPtr(true),
 					ContinueFinalMessage: false,
 					AddSpecialTokens:     true,
 					ReturnTokenStrs:      boolPtr(true),
