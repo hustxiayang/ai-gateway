@@ -26,7 +26,7 @@ type CompletionRequest struct {
 
 	// AddSpecialTokens indicates if special tokens (e.g. BOS) will be added to the prompt.
 	// Default is true.
-	AddSpecialTokens bool `json:"add_special_tokens,omitzero"`
+	AddSpecialTokens *bool `json:"add_special_tokens,omitempty"`
 	// ReturnTokenStrs indicates if token strings corresponding to the token ids should be returned.
 	// Default is false.
 	ReturnTokenStrs *bool `json:"return_token_strs,omitempty"`
