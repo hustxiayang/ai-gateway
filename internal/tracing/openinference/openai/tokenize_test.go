@@ -165,7 +165,7 @@ func TestTokenizeRecorder_RecordRequest(t *testing.T) {
 				CompletionRequest: &tokenize.CompletionRequest{
 					Model:            "gpt-3.5-turbo",
 					Prompt:           "Complete this",
-					AddSpecialTokens: false,
+					AddSpecialTokens: boolPtr(false),
 					ReturnTokenStrs:  boolPtr(false),
 				},
 			},
