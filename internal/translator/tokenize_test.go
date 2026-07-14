@@ -456,7 +456,7 @@ func TestTokenizeTranslator_ModelOverride(t *testing.T) {
 		req := &tokenize.RequestUnion{
 			CompletionRequest: &tokenize.CompletionRequest{
 				Model:            "gpt-4",
-				Prompt:           "Test prompt",
+				AddSpecialTokens: ptr.To(true),
 				AddSpecialTokens: true,
 			},
 		}
