@@ -36,7 +36,7 @@ func TestCompletionRequest_JSON(t *testing.T) {
 			expected: CompletionRequest{
 				Prompt:           "Hello",
 				Model:            "gpt-4",
-				AddSpecialTokens: true,
+				AddSpecialTokens: boolPtr(true),
 				ReturnTokenStrs:  boolPtr(true),
 			},
 		},
