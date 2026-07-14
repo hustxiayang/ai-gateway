@@ -42,7 +42,7 @@ type ChatRequest struct {
 	// AddGenerationPrompt indicates if the generation prompt will be added to the chat template.
 	// This is a parameter used by chat template in tokenizer config of the model.
 	// Default is true.
-	AddGenerationPrompt bool `json:"add_generation_prompt,omitzero"`
+	AddGenerationPrompt *bool `json:"add_generation_prompt,omitempty"`
 	// ReturnTokenStrs indicates if token strings corresponding to the token ids should be returned.
 	// Default is false.
 	ReturnTokenStrs *bool `json:"return_token_strs,omitempty"`
