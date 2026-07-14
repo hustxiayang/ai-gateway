@@ -80,7 +80,6 @@ func (r *ChatRequest) Validate() error {
 	}
 	return nil
 }
-}
 
 // RequestUnion represents a union of tokenize request types.
 // This allows the endpoint to handle both completion and chat tokenize requests.

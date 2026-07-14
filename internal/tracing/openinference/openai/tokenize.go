@@ -112,17 +112,25 @@ func buildTokenizeRequestAttributes(req *tokenize.RequestUnion, body string, con
 
 	// Add tokenization-specific attributes
 	if req.CompletionRequest != nil {
+		addSpecialTokens := true
+		if req.CompletionRequest.AddSpecialTokens != nil {
+			addSpecialTokens = *req.CompletionRequest.AddSpecialTokens
+		}
 		attrs = append(attrs,
 			attribute.String("tokenize.request_type", "completion"),
-			attribute.Bool("tokenize.add_special_tokens", req.CompletionRequest.AddSpecialTokens),
+			attribute.Bool("tokenize.add_special_tokens", addSpecialTokens),
 		)
 		if req.CompletionRequest.ReturnTokenStrs != nil {
 			attrs = append(attrs, attribute.Bool("tokenize.return_token_strs", *req.CompletionRequest.ReturnTokenStrs))
 		}
 	} else if req.ChatRequest != nil {
+		addGenerationPrompt := true
+		if req.AddGenerationPrompt != nil {
+			addGenerationPrompt = *req.AddGenerationPrompt
+		}
 		attrs = append(attrs,
 			attribute.String("tokenize.request_type", "chat"),
-			attribute.Bool("tokenize.add_generation_prompt", req.AddGenerationPrompt),
+			attribute.Bool("tokenize.add_generation_prompt", addGenerationPrompt),
 			attribute.Bool("tokenize.continue_final_message", req.ContinueFinalMessage),
 			attribute.Bool("tokenize.add_special_tokens", req.ChatRequest.AddSpecialTokens),
 		)

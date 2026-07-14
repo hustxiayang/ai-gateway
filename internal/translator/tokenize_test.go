@@ -457,7 +457,6 @@ func TestTokenizeTranslator_ModelOverride(t *testing.T) {
 			CompletionRequest: &tokenize.CompletionRequest{
 				Model:            "gpt-4",
 				AddSpecialTokens: ptr.To(true),
-				AddSpecialTokens: true,
 			},
 		}
 
@@ -470,7 +469,8 @@ func TestTokenizeTranslator_ModelOverride(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &newReq))
 		require.Equal(t, "custom-model", newReq.Model)
 		require.Equal(t, "Test prompt", newReq.Prompt)
-		require.True(t, newReq.AddSpecialTokens)
+		require.NotNil(t, newReq.AddSpecialTokens)
+		require.True(t, *newReq.AddSpecialTokens)
 
 		// Verify translator state was updated
 		require.Equal(t, "custom-model", translator.requestModel)
