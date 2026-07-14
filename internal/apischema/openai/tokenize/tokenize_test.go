@@ -169,7 +169,7 @@ func TestChatRequest_Validate(t *testing.T) {
 		{
 			name: "continue final message only",
 			request: ChatRequest{
-				AddGenerationPrompt:  false,
+				AddGenerationPrompt:  boolPtr(false),
 				ContinueFinalMessage: true,
 			},
 			wantErr: false,
