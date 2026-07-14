@@ -160,7 +160,7 @@ func TestChatRequest_Validate(t *testing.T) {
 		{
 			name: "conflicting flags",
 			request: ChatRequest{
-				AddGenerationPrompt:  true,
+				AddGenerationPrompt:  boolPtr(true),
 				ContinueFinalMessage: true,
 			},
 			wantErr: true,
