@@ -75,7 +75,13 @@ type ChatRequest struct {
 
 // Validate checks that the request is valid.
 func (r *ChatRequest) Validate() error {
-	if r.ContinueFinalMessage && r.AddGenerationPrompt != nil && *r.AddGenerationPrompt {
+	// AddGenerationPrompt defaults to true when unset (nil), matching the vLLM
+	// chat template contract, so treat nil as true for the conflict check.
+	addGenerationPrompt := true
+	if r.AddGenerationPrompt != nil {
+		addGenerationPrompt = *r.AddGenerationPrompt
+	}
+	if r.ContinueFinalMessage && addGenerationPrompt {
 		return errors.New("cannot set both continue_final_message and add_generation_prompt to true")
 	}
 	return nil

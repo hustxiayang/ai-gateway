@@ -174,6 +174,16 @@ func TestChatRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			// AddGenerationPrompt unset defaults to true, so it still conflicts.
+			name: "continue final message with add_generation_prompt unset",
+			request: ChatRequest{
+				AddGenerationPrompt:  nil,
+				ContinueFinalMessage: true,
+			},
+			wantErr: true,
+			errMsg:  "cannot set both continue_final_message and add_generation_prompt to true",
+		},
 	}
 
 	for _, tt := range tests {
