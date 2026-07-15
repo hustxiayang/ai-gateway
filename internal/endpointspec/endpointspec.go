@@ -426,37 +426,22 @@ func (TokenizeEndpointSpec) ParseBody(
 	body []byte,
 	_ bool,
 ) (internalapi.OriginalModel, *tokenize.RequestUnion, bool, []byte, error) {
-	// Try to detect if it's a chat or completion request by checking for "messages" field
-	var rawRequest map[string]interface{}
-	if err := json.Unmarshal(body, &rawRequest); err != nil {
-		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /tokenize: %w", internalapi.ErrMalformedRequest, err)
-	}
-
+	// RequestUnion.UnmarshalJSON discriminates chat vs completion by the presence
+	// of a "messages" field, so a single unmarshal is enough here.
 	var req tokenize.RequestUnion
-	var model string
-
-	// Check if this is a chat tokenize request (has "messages" field)
-	if _, hasMessages := rawRequest["messages"]; hasMessages {
-		var chatReq tokenize.ChatRequest
-		if err := json.Unmarshal(body, &chatReq); err != nil {
-			return "", nil, false, nil, fmt.Errorf("%w: failed to parse chat tokenize request: %w", internalapi.ErrMalformedRequest, err)
-		}
-		if err := chatReq.Validate(); err != nil {
-			return "", nil, false, nil, fmt.Errorf("%w: invalid chat tokenize request: %w", internalapi.ErrMalformedRequest, err)
-		}
-		req.ChatRequest = &chatReq
-		model = chatReq.Model
-	} else {
-		var completionReq tokenize.CompletionRequest
-		if err := json.Unmarshal(body, &completionReq); err != nil {
-			return "", nil, false, nil, fmt.Errorf("%w: failed to parse completion tokenize request: %w", internalapi.ErrMalformedRequest, err)
-		}
-		req.CompletionRequest = &completionReq
-		model = completionReq.Model
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", nil, false, nil, fmt.Errorf("%w: failed to parse JSON for /tokenize: %w", internalapi.ErrMalformedRequest, err)
 	}
 
 	if err := req.Validate(); err != nil {
 		return "", nil, false, nil, fmt.Errorf("%w: invalid tokenize request: %w", internalapi.ErrMalformedRequest, err)
+	}
+
+	var model string
+	if req.CompletionRequest != nil {
+		model = req.CompletionRequest.Model
+	} else if req.ChatRequest != nil {
+		model = req.ChatRequest.Model
 	}
 
 	// Tokenize requests are never streaming

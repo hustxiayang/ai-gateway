@@ -356,7 +356,7 @@ curl -H "Content-Type: application/json" \
 - ✅ Model selection via `model` field in request body
 - ✅ Tool/function call tokenization support
 - ✅ Provider fallback and load balancing
-- ✅ Metrics support (request duration, token counts)
+- ✅ Metrics support (request duration)
 
 **Supported Providers:**
 

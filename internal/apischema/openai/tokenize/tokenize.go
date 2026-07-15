@@ -9,6 +9,7 @@ package tokenize
 import (
 	"errors"
 
+	"github.com/tidwall/gjson"
 	"google.golang.org/genai"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -96,6 +97,31 @@ type RequestUnion struct {
 	*ChatRequest `json:",omitzero,inline"`
 }
 
+// UnmarshalJSON selects the request type from the payload: a "messages" field
+// means a chat request, "prompt" (without "messages") means a completion
+// request, and having both is invalid.
+func (r *RequestUnion) UnmarshalJSON(data []byte) error {
+	hasMessages := gjson.GetBytes(data, "messages").Exists()
+	hasPrompt := gjson.GetBytes(data, "prompt").Exists()
+	if hasMessages && hasPrompt {
+		return errors.New("tokenize request must have either 'prompt' or 'messages', not both")
+	}
+	if hasMessages {
+		var chat ChatRequest
+		if err := json.Unmarshal(data, &chat); err != nil {
+			return err
+		}
+		r.ChatRequest = &chat
+		return nil
+	}
+	var completion CompletionRequest
+	if err := json.Unmarshal(data, &completion); err != nil {
+		return err
+	}
+	r.CompletionRequest = &completion
+	return nil
+}
+
 // Validate checks that exactly one request type is set in the union.
 func (r *RequestUnion) Validate() error {
 	if r.CompletionRequest != nil && r.ChatRequest != nil {
@@ -107,6 +133,13 @@ func (r *RequestUnion) Validate() error {
 	if (r.CompletionRequest != nil && r.CompletionRequest.Model == "") ||
 		(r.ChatRequest != nil && r.ChatRequest.Model == "") {
 		return errors.New("model is required")
+	}
+	// Delegate to the active request's own validation so the union is
+	// self-validating for every caller, not just the ParseBody path.
+	if r.ChatRequest != nil {
+		if err := r.ChatRequest.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
