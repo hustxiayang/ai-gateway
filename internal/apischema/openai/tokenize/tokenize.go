@@ -26,7 +26,10 @@ type CompletionRequest struct {
 	Prompt string `json:"prompt"`
 
 	// AddSpecialTokens indicates if special tokens (e.g. BOS) will be added to the prompt.
-	// Default is true.
+	// Default is true: a completion request tokenizes a raw prompt string, so the model's
+	// special tokens are normally wanted. This mirrors vLLM's /tokenize default and is
+	// deliberately the opposite of ChatRequest.AddSpecialTokens (where the chat template
+	// already inserts them).
 	AddSpecialTokens *bool `json:"add_special_tokens,omitempty"`
 	// ReturnTokenStrs indicates if token strings corresponding to the token ids should be returned.
 	// Default is false.
@@ -56,7 +59,9 @@ type ChatRequest struct {
 	// AddSpecialTokens indicates if special tokens (e.g. BOS) will be added to the prompt
 	// on top of what is added by the chat template. For most models, the chat template
 	// takes care of adding the special tokens so this should be set to false.
-	// Default is false.
+	// Default is false (deliberately the opposite of CompletionRequest.AddSpecialTokens)
+	// to avoid doubling the special tokens the chat template already inserts. This mirrors
+	// vLLM's /tokenize default.
 	AddSpecialTokens bool `json:"add_special_tokens,omitzero"`
 	// ChatTemplate is a Jinja template to use for this conversion.
 	// As of transformers v4.44, default chat template is no longer allowed,
@@ -154,70 +159,4 @@ type Response struct {
 	Tokens []int `json:"tokens"`
 	// TokenStrs are the token strings, if requested.
 	TokenStrs []string `json:"token_strs,omitempty"`
-}
-
-// DetokenizeRequest represents a request to detokenize tokens.
-type DetokenizeRequest struct {
-	// Model is the model to use for detokenization.
-	Model *string `json:"model,omitempty"`
-	// Tokens are the token IDs to convert back to text.
-	Tokens []int `json:"tokens"`
-}
-
-// DetokenizeResponse represents the response from a detokenize request.
-type DetokenizeResponse struct {
-	// Prompt is the detokenized text.
-	Prompt string `json:"prompt"`
-}
-
-// TokenizerInfoResponse represents the response containing tokenizer configuration
-// equivalent to tokenizer_config.json
-type TokenizerInfoResponse struct {
-	// TokenizerClass is the class of the tokenizer.
-	TokenizerClass string `json:"tokenizer_class"`
-	// ExtraConfig stores additional configuration fields that may be present
-	// in tokenizer_config.json (equivalent to Pydantic's ConfigDict(extra="allow")).
-	ExtraConfig map[string]interface{} `json:"-"`
-}
-
-// UnmarshalJSON implements custom unmarshaling to handle additional fields
-// in TokenizerInfoResponse (equivalent to Pydantic's ConfigDict(extra="allow")).
-func (r *TokenizerInfoResponse) UnmarshalJSON(data []byte) error {
-	// First unmarshal into a map to capture all fields
-	var allFields map[string]interface{}
-	if err := json.Unmarshal(data, &allFields); err != nil {
-		return err
-	}
-
-	// Extract known fields
-	if tokenizerClass, ok := allFields["tokenizer_class"]; ok {
-		if str, ok := tokenizerClass.(string); ok {
-			r.TokenizerClass = str
-		}
-	}
-
-	// Store any extra fields
-	r.ExtraConfig = make(map[string]interface{})
-	for key, value := range allFields {
-		if key != "tokenizer_class" {
-			r.ExtraConfig[key] = value
-		}
-	}
-
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to include extra fields
-func (r TokenizerInfoResponse) MarshalJSON() ([]byte, error) {
-	// Create a map with all fields
-	result := map[string]interface{}{
-		"tokenizer_class": r.TokenizerClass,
-	}
-
-	// Add extra fields
-	for key, value := range r.ExtraConfig {
-		result[key] = value
-	}
-
-	return json.Marshal(result)
 }
