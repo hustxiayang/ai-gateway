@@ -105,13 +105,14 @@ func (o *ToAWSAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 		o.requestModel = o.modelNameOverride
 	}
 
-	// AWS Bedrock's CountTokens API does not support cross-region inference (CRIS) model IDs
-	// (e.g., "us.anthropic.claude-sonnet-4-6"). Strip the region prefix for count-tokens only.
+	// AWS Bedrock's CountTokens API does not support cross-region inference (CRIS) model IDs.
+	// A CRIS ID prepends a geography prefix (e.g. "us.", "eu.", "apac.", "us-gov.") to the base
+	// model ID, e.g. "apac.anthropic.claude-sonnet-4-6". Anchor on the "anthropic." provider
+	// segment and drop anything before it, so every geography prefix is handled regardless of
+	// length. A bare base ID ("anthropic.claude-...") has the segment at index 0 and is left as-is.
 	pathModel := o.requestModel
-	if i := strings.IndexByte(pathModel, '.'); i >= 0 {
-		if prefix := pathModel[:i]; len(prefix) <= 2 {
-			pathModel = pathModel[i+1:]
-		}
+	if i := strings.Index(pathModel, "anthropic."); i > 0 {
+		pathModel = pathModel[i:]
 	}
 	encodedModelName := url.PathEscape(pathModel)
 	path := fmt.Sprintf("/model/%s/count-tokens", encodedModelName)

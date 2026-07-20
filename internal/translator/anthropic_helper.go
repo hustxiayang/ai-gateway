@@ -1349,6 +1349,17 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 
 // openAIToAnthropicCountTokensParams builds the Anthropic MessageCountTokensParams
 // from an OpenAI-compatible tokenize chat request. Shared by GCP and AWS Anthropic tokenize translators.
+//
+// Only the fields that affect the counted input tokens are mapped: Messages, Model,
+// System, and Tools. Per the Anthropic count_tokens endpoint, the counted input covers
+// system prompts, tools, images, PDFs, and current-turn thinking blocks (all of which
+// arrive via Messages/System/Tools here). The remaining MessageCountTokensParams fields
+// are intentionally omitted because they do not change the returned count:
+//   - CacheControl: a no-op for token counting; caching only happens during message creation.
+//   - Thinking: the thinking config adds no input tokens; only thinking blocks already
+//     present in Messages count.
+//   - OutputConfig: structured outputs constrain decoding (output), not the input prompt.
+//   - ToolChoice: a generation-time control, not counted content.
 func openAIToAnthropicCountTokensParams(chatReq *tokenize.ChatRequest, model internalapi.RequestModel) (*anthropic.MessageCountTokensParams, error) {
 	messages, systemBlocks, err := openAIToAnthropicMessages(chatReq.Messages)
 	if err != nil {
