@@ -1945,11 +1945,12 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather",
 }
 
 func TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingToolCallSplitFinishReason(t *testing.T) {
-	// Gemini 3.x streams the functionCall and the terminal STOP in separate
-	// chunks: the functionCall chunk carries no finishReason, and a trailing
-	// chunk carries finishReason=STOP with an empty text part (no functionCall).
-	// The completion's finish_reason must still be "tool_calls", not "stop".
-	// (Gemini 2.x carried both in a single chunk; that case is covered by
+	// Newer Gemini models (e.g. gemini-3.5-flash, gemini-3.1-flash-lite) stream
+	// the functionCall and the terminal STOP in separate chunks: the functionCall
+	// chunk carries no finishReason, and a trailing chunk carries finishReason=STOP
+	// with an empty text part (no functionCall). The completion's finish_reason
+	// must still be "tool_calls", not "stop". (Older Gemini models carried both in
+	// a single chunk; that case is covered by
 	// TestOpenAIToGCPVertexAITranslatorV1ChatCompletion_StreamingToolCallWithSignature.)
 	translator := NewChatCompletionOpenAIToGCPVertexAITranslator("gemini-3.5-flash").(*openAIToGCPVertexAITranslatorV1ChatCompletion)
 
