@@ -227,10 +227,10 @@ func TestToGCPVertexAIV1Tokenize_ResponseBody(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &openAIResp))
 		require.Equal(t, 42, openAIResp.Count)
 
-		// TODO: Token usage should be extracted from GCP response
-		// This is currently missing but should be implemented
+		// The /tokenize endpoint does not populate token usage metrics,
+		// matching the OpenAI tokenize translator.
 		_, hasTokens := tokenUsage.InputTokens()
-		require.False(t, hasTokens) // Current behavior - should be fixed
+		require.False(t, hasTokens)
 	})
 
 	t.Run("empty response model fallback", func(t *testing.T) {
@@ -629,19 +629,15 @@ func TestToGCPVertexAIV1Tokenize_IdentifiedIssues(t *testing.T) {
 		_, _, tokenUsage, _, err := translator.ResponseBody(nil, bytes.NewReader(responseJSON), false, nil)
 		require.NoError(t, err)
 
-		// Currently, token usage is not extracted from the GCP response
-		// This is an improvement opportunity - should extract TotalTokens as input tokens
+		// The /tokenize endpoint intentionally does not populate token usage
+		// metrics, matching the OpenAI tokenize translator.
 		inputTokens, hasInput := tokenUsage.InputTokens()
 		totalTokens, hasTotal := tokenUsage.TotalTokens()
 
-		require.False(t, hasInput) // Should ideally be true with gcpResp.TotalTokens
-		require.False(t, hasTotal) // Should ideally be true with gcpResp.TotalTokens
+		require.False(t, hasInput)
+		require.False(t, hasTotal)
 		require.Equal(t, uint32(0), inputTokens)
 		require.Equal(t, uint32(0), totalTokens)
-
-		// TODO: Implement token usage extraction:
-		// tokenUsage.SetInputTokens(uint32(gcpResp.TotalTokens))
-		// tokenUsage.SetTotalTokens(uint32(gcpResp.TotalTokens))
 	})
 
 	t.Run("ISSUE RESOLVED: model field is now required", func(t *testing.T) {
