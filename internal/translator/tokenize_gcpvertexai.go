@@ -55,17 +55,11 @@ func (o *ToGCPVertexAIV1Tokenize) tokenizeToGeminiCountToken(tokenizeChatReq *to
 		return nil, fmt.Errorf("error converting tools: %w", err)
 	}
 
-	// Convert []genai.Tool to []*genai.Tool
-	var toolPtrs []*genai.Tool
-	for i := range tools {
-		toolPtrs = append(toolPtrs, &tools[i])
-	}
-
 	// Build the flat CountTokenRequest structure as expected by Vertex AI API
 	gcr := gcp.CountTokenRequest{
 		Contents:          contents,
 		SystemInstruction: systemInstruction,
-		Tools:             toolPtrs,
+		Tools:             tools,
 	}
 
 	// Only include GenerationConfig if MediaResolution is set
