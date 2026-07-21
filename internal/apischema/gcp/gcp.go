@@ -164,7 +164,7 @@ type CountTokenRequest struct {
 	SystemInstruction *genai.Content `json:"systemInstruction,omitempty"`
 
 	// Optional. Code that enables the system to interact with external systems.
-	Tools []*genai.Tool `json:"tools,omitempty"`
+	Tools []genai.Tool `json:"tools,omitempty"`
 
 	// Optional. Configuration that the model uses to generate the response.
 	GenerationConfig *genai.GenerationConfig `json:"generationConfig,omitempty"`
