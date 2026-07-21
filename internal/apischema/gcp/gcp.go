@@ -154,7 +154,9 @@ type EmbedContentUsageMetadata struct {
 
 // CountTokenRequest represents the Vertex AI CountTokens API request.
 // The Vertex AI API expects a flat structure (not nested config).
-// https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/count-tokens
+// The request-body fields (contents, tools, systemInstruction, generationConfig) are
+// documented as optional in the REST API reference:
+// https://cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/projects.locations.publishers.models/countTokens
 type CountTokenRequest struct {
 	// The content to count tokens for.
 	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L858
