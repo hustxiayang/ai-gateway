@@ -57,7 +57,9 @@ func (o *ToGCPAnthropicV1Tokenize) anthropicTokensCountToResponse(anthropicResp 
 
 // RequestBody implements [TokenizeTranslator.RequestBody] for GCP Anthropic.
 // This method translates an OpenAI tokenize request to GCP Anthropic Messages format.
-// TODO: check whether I need to add other fields.
+// Only the fields that affect the token count are mapped (messages, model, system, tools);
+// see openAIToAnthropicCountTokensParams for why the remaining MessageCountTokensParams
+// fields (cache_control, output_config, thinking, tool_choice) are intentionally omitted.
 func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.RequestUnion, _ bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
