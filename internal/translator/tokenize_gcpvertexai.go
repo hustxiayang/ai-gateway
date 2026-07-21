@@ -62,7 +62,10 @@ func (o *ToGCPVertexAIV1Tokenize) tokenizeToGeminiCountToken(tokenizeChatReq *to
 		Tools:             tools,
 	}
 
-	// Only include GenerationConfig if MediaResolution is set
+	// Only forward MediaResolution from GenerationConfig: among generation config
+	// fields, it's the only one that affects the prompt token count, since it controls
+	// how many tokens input media consume. Output settings like MaxOutputTokens don't
+	// affect the CountTokens result, which counts input tokens only.
 	if tokenizeChatReq.MediaResolution != "" {
 		gcr.GenerationConfig = &genai.GenerationConfig{
 			MediaResolution: tokenizeChatReq.MediaResolution,
@@ -74,7 +77,6 @@ func (o *ToGCPVertexAIV1Tokenize) tokenizeToGeminiCountToken(tokenizeChatReq *to
 
 // geminiCountTokenToResponse converts a GCP Gemini CountTokens response to OpenAI tokenize format.
 func (o *ToGCPVertexAIV1Tokenize) geminiCountTokenToResponse(gcpResp *genai.CountTokensResponse) (*tokenize.Response, error) {
-	// only media_resolution is related to the # prompt tokens
 	tokenizeResp := tokenize.Response{
 		Count: int(gcpResp.TotalTokens),
 	}
