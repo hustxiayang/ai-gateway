@@ -93,9 +93,8 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 
 	// GCP Vertex AI's count-tokens endpoint does not accept "@default" or "@latest"
 	// version aliases. Strip them for count-tokens only.
-	if strings.HasSuffix(o.requestModel, "@default") || strings.HasSuffix(o.requestModel, "@latest") {
-		o.requestModel = o.requestModel[:strings.LastIndexByte(o.requestModel, '@')]
-	}
+	o.requestModel = strings.TrimSuffix(o.requestModel, "@default")
+	o.requestModel = strings.TrimSuffix(o.requestModel, "@latest")
 
 	// The GCP Anthropic count-tokens endpoint uses "count-tokens" as a virtual model name
 	// in the path, while the actual Claude model name is specified in the request body.
