@@ -42,22 +42,21 @@ type ToAWSBedrockV1Tokenize struct {
 func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *tokenize.ChatRequest) (*awsbedrock.CountTokensConverseRequest, error) {
 	var converseInput awsbedrock.CountTokensConverseInput
 
-	// Convert Chat Completion messages to Bedrock format
+	// Convert Chat Completion messages to Bedrock format using the shared converters
+	// (see converse_helper.go) so the tokenize path counts exactly what the chat path sends.
 	converseInput.Messages = make([]*awsbedrock.Message, 0, len(tokenizeChatReq.Messages))
 	for i := range tokenizeChatReq.Messages {
 		msg := &tokenizeChatReq.Messages[i]
 		role := msg.ExtractMessgaeRole()
 		switch {
 		case msg.OfUser != nil:
-			userMessage := msg.OfUser
-			bedrockMessage, err := o.openAIMessageToBedrockMessageRoleUser(userMessage, role)
+			bedrockMessage, err := openAIMessageToBedrockMessageRoleUser(msg.OfUser, role)
 			if err != nil {
 				return nil, err
 			}
 			converseInput.Messages = append(converseInput.Messages, bedrockMessage)
 		case msg.OfAssistant != nil:
-			assistantMessage := msg.OfAssistant
-			bedrockMessage, err := o.openAIMessageToBedrockMessageRoleAssistant(assistantMessage, role)
+			bedrockMessage, err := openAIMessageToBedrockMessageRoleAssistant(msg.OfAssistant, role)
 			if err != nil {
 				return nil, err
 			}
@@ -66,14 +65,11 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 			if converseInput.System == nil {
 				converseInput.System = make([]*awsbedrock.SystemContentBlock, 0)
 			}
-			systemMessage := msg.OfSystem
-			err := o.openAIMessageToBedrockMessageRoleSystem(systemMessage, &converseInput.System)
-			if err != nil {
+			if err := openAIMessageToBedrockMessageRoleSystem(msg.OfSystem, &converseInput.System); err != nil {
 				return nil, err
 			}
 		case msg.OfTool != nil:
-			toolMessage := msg.OfTool
-			bedrockMessage, err := o.openAIMessageToBedrockMessageRoleTool(toolMessage, awsbedrock.ConversationRoleUser)
+			bedrockMessage, err := openAIMessageToBedrockMessageRoleTool(msg.OfTool, awsbedrock.ConversationRoleUser)
 			if err != nil {
 				return nil, err
 			}
@@ -83,161 +79,18 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 		}
 	}
 
-	// Convert ToolConfiguration if tools are present
+	// Convert ToolConfiguration if tools are present.
 	if len(tokenizeChatReq.Tools) > 0 {
-		err := o.openAIToolsToBedrockToolConfiguration(tokenizeChatReq, &converseInput)
+		toolConfig, err := openAIToolsToBedrockToolConfig(tokenizeChatReq.Tools, nil, tokenizeChatReq.Model)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert tools: %w", err)
 		}
+		converseInput.ToolConfig = toolConfig
 	}
 
 	req := &awsbedrock.CountTokensConverseRequest{}
 	req.Input.Converse = &converseInput
 	return req, nil
-}
-
-// Helper methods adapted from the existing AWS Bedrock chat completion translator
-func (o *ToAWSBedrockV1Tokenize) openAIMessageToBedrockMessageRoleUser(
-	openAiMessage *openai.ChatCompletionUserMessageParam, role string,
-) (*awsbedrock.Message, error) {
-	if v, ok := openAiMessage.Content.Value.(string); ok {
-		return &awsbedrock.Message{
-			Role: role,
-			Content: []*awsbedrock.ContentBlock{
-				{Text: &v},
-			},
-		}, nil
-	} else if contents, ok := openAiMessage.Content.Value.([]openai.ChatCompletionContentPartUserUnionParam); ok {
-		chatMessage := &awsbedrock.Message{Role: role}
-		chatMessage.Content = make([]*awsbedrock.ContentBlock, 0, len(contents))
-		for i := range contents {
-			contentPart := &contents[i]
-			if contentPart.OfText != nil {
-				textContentPart := contentPart.OfText
-				chatMessage.Content = append(chatMessage.Content, &awsbedrock.ContentBlock{
-					Text: &textContentPart.Text,
-				})
-			}
-			// Note: For tokenization, we skip image content as it adds complexity
-			// and most tokenization use cases are text-only
-		}
-		return chatMessage, nil
-	}
-	return nil, fmt.Errorf("unexpected content type")
-}
-
-func (o *ToAWSBedrockV1Tokenize) openAIMessageToBedrockMessageRoleAssistant(
-	openAiMessage *openai.ChatCompletionAssistantMessageParam, role string,
-) (*awsbedrock.Message, error) {
-	bedrockMessage := &awsbedrock.Message{Role: role}
-	contentBlocks := make([]*awsbedrock.ContentBlock, 0)
-
-	var contentParts []openai.ChatCompletionAssistantMessageParamContent
-	if v, ok := openAiMessage.Content.Value.(string); ok && len(v) > 0 {
-		contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-			Type: openai.ChatCompletionAssistantMessageParamContentTypeText,
-			Text: &v,
-		})
-	} else if singleContent, ok := openAiMessage.Content.Value.(openai.ChatCompletionAssistantMessageParamContent); ok {
-		contentParts = append(contentParts, singleContent)
-	} else if sliceContent, ok := openAiMessage.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent); ok {
-		contentParts = sliceContent
-	}
-
-	for _, content := range contentParts {
-		if content.Type == openai.ChatCompletionAssistantMessageParamContentTypeText {
-			if content.Text != nil {
-				contentBlocks = append(contentBlocks, &awsbedrock.ContentBlock{Text: content.Text})
-			}
-		}
-	}
-
-	bedrockMessage.Content = contentBlocks
-	return bedrockMessage, nil
-}
-
-func (o *ToAWSBedrockV1Tokenize) openAIMessageToBedrockMessageRoleSystem(
-	openAiMessage *openai.ChatCompletionSystemMessageParam, bedrockSystem *[]*awsbedrock.SystemContentBlock,
-) error {
-	if v, ok := openAiMessage.Content.Value.(string); ok {
-		*bedrockSystem = append(*bedrockSystem, &awsbedrock.SystemContentBlock{
-			Text: &v,
-		})
-	} else if contents, ok := openAiMessage.Content.Value.([]openai.ChatCompletionContentPartTextParam); ok {
-		for i := range contents {
-			contentPart := &contents[i]
-			*bedrockSystem = append(*bedrockSystem, &awsbedrock.SystemContentBlock{
-				Text: &contentPart.Text,
-			})
-		}
-	} else {
-		return fmt.Errorf("unexpected content type for system message")
-	}
-	return nil
-}
-
-func (o *ToAWSBedrockV1Tokenize) openAIMessageToBedrockMessageRoleTool(
-	openAiMessage *openai.ChatCompletionToolMessageParam, role string,
-) (*awsbedrock.Message, error) {
-	content := make([]*awsbedrock.ToolResultContentBlock, 0)
-
-	switch v := openAiMessage.Content.Value.(type) {
-	case string:
-		content = []*awsbedrock.ToolResultContentBlock{
-			{
-				Text: &v,
-			},
-		}
-	case []openai.ChatCompletionContentPartTextParam:
-		for i := range v {
-			content = append(content, &awsbedrock.ToolResultContentBlock{
-				Text: &v[i].Text,
-			})
-		}
-	default:
-		return nil, fmt.Errorf("unexpected content type for tool message: %T", openAiMessage.Content.Value)
-	}
-
-	return &awsbedrock.Message{
-		Role: role,
-		Content: []*awsbedrock.ContentBlock{
-			{
-				ToolResult: &awsbedrock.ToolResultBlock{
-					Content:   content,
-					ToolUseID: &openAiMessage.ToolCallID,
-				},
-			},
-		},
-	}, nil
-}
-
-func (o *ToAWSBedrockV1Tokenize) openAIToolsToBedrockToolConfiguration(tokenizeChatReq *tokenize.ChatRequest,
-	converseInput *awsbedrock.CountTokensConverseInput,
-) error {
-	converseInput.ToolConfig = &awsbedrock.ToolConfiguration{}
-	tools := make([]*awsbedrock.Tool, 0, len(tokenizeChatReq.Tools))
-	for i := range tokenizeChatReq.Tools {
-		toolDefinition := &tokenizeChatReq.Tools[i]
-		if toolDefinition.Function != nil {
-			toolName := toolDefinition.Function.Name
-			var toolDesc *string
-			if toolDefinition.Function.Description != "" {
-				toolDesc = &toolDefinition.Function.Description
-			}
-			tool := &awsbedrock.Tool{
-				ToolSpec: &awsbedrock.ToolSpecification{
-					Name:        &toolName,
-					Description: toolDesc,
-					InputSchema: &awsbedrock.ToolInputSchema{
-						JSON: toolDefinition.Function.Parameters,
-					},
-				},
-			}
-			tools = append(tools, tool)
-		}
-	}
-	converseInput.ToolConfig.Tools = tools
-	return nil
 }
 
 // bedrockCountTokensToResponse converts an AWS Bedrock CountTokens response to OpenAI tokenize format.
@@ -288,12 +141,18 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 	// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
 	pathTemplate := "/model/%s/count-tokens"
 	pathModel := o.requestModel
-	// AWS Bedrock's CountTokens API does not support cross-region inference (CRIS) model IDs
-	// (e.g., "us.anthropic.claude-sonnet-4-6" returns "The provided model doesn't support
-	// counting tokens"). Strip the region prefix for count-tokens only.
-	if i := strings.IndexByte(pathModel, '.'); i >= 0 {
-		if prefix := pathModel[:i]; len(prefix) <= 2 {
-			pathModel = pathModel[i+1:]
+	// AWS Bedrock's CountTokens API requires a base foundation-model ID; it rejects
+	// cross-region inference (CRIS) profile IDs (e.g. "us.anthropic.claude-sonnet-4-6",
+	// "apac.amazon.nova-pro", "global.anthropic.claude-...") with "The provided model doesn't
+	// support counting tokens". Inference endpoints (InvokeModel, Converse) require the CRIS ID
+	// and share the same modelNameOverride, so we strip the geography prefix for count-tokens
+	// only. This is provider-agnostic (unlike the Anthropic-specific path) because the Converse
+	// translator also serves Amazon Nova, Meta Llama, etc.
+	// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+	for _, prefix := range []string{"us-gov.", "us.", "eu.", "apac.", "global."} {
+		if rest, ok := strings.CutPrefix(pathModel, prefix); ok {
+			pathModel = rest
+			break
 		}
 	}
 	// URL encode the model name for the path to handle ARNs with special characters
@@ -322,45 +181,7 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 func (o *ToAWSBedrockV1Tokenize) ResponseError(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
-	statusCode := respHeaders[statusHeaderName]
-	var openaiError openai.Error
-	if v, ok := respHeaders[contentTypeHeaderName]; ok && strings.Contains(v, jsonContentType) {
-		var bedrockError awsbedrock.BedrockException
-		if err = json.NewDecoder(body).Decode(&bedrockError); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal error body: %w", err)
-		}
-		openaiError = openai.Error{
-			Type: "error",
-			Error: openai.ErrorType{
-				Type:    respHeaders[awsErrorTypeHeaderName],
-				Message: bedrockError.Message,
-				Code:    &statusCode,
-			},
-		}
-	} else {
-		var buf []byte
-		buf, err = io.ReadAll(body)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
-		}
-		openaiError = openai.Error{
-			Type: "error",
-			Error: openai.ErrorType{
-				Type:    awsBedrockBackendError,
-				Message: string(buf),
-				Code:    &statusCode,
-			},
-		}
-	}
-	newBody, err = json.Marshal(openaiError)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
-	}
-	newHeaders = []internalapi.Header{
-		{contentTypeHeaderName, jsonContentType},
-		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
-	}
-	return
+	return bedrockResponseError(respHeaders, body)
 }
 
 // ResponseHeaders implements [TokenizeTranslator.ResponseHeaders].

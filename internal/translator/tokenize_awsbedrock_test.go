@@ -839,6 +839,41 @@ func TestToAWSBedrockV1Tokenize_CRISPrefixStripping(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, headers[0].Value(), "anthropic.claude-3-haiku-20240307-v1:0")
 	})
+
+	// Provider-agnostic stripping of every CRIS geography prefix, for any provider.
+	crisCases := []struct {
+		name       string
+		model      string
+		wantSub    string // remains after stripping
+		notWantSub string // prefix that must be gone
+	}{
+		{"us. prefix", "us.anthropic.claude-sonnet-4-6", "/model/anthropic.claude-sonnet-4-6/count-tokens", "us.anthropic"},
+		{"eu. prefix", "eu.anthropic.claude-sonnet-4-6", "/model/anthropic.claude-sonnet-4-6/count-tokens", "eu.anthropic"},
+		{"apac. prefix", "apac.anthropic.claude-sonnet-4-6", "/model/anthropic.claude-sonnet-4-6/count-tokens", "apac."},
+		{"us-gov. prefix", "us-gov.anthropic.claude-sonnet-4-6", "/model/anthropic.claude-sonnet-4-6/count-tokens", "us-gov."},
+		{"global. prefix", "global.anthropic.claude-sonnet-4-6", "/model/anthropic.claude-sonnet-4-6/count-tokens", "global."},
+		{"apac. prefix on non-anthropic model", "apac.amazon.nova-pro", "/model/amazon.nova-pro/count-tokens", "apac."},
+	}
+	for _, tc := range crisCases {
+		t.Run(tc.name, func(t *testing.T) {
+			translator := NewTokenizeToAWSBedrockTranslator("").(*ToAWSBedrockV1Tokenize)
+			req := &tokenize.RequestUnion{
+				ChatRequest: &tokenize.ChatRequest{
+					Model: tc.model,
+					Messages: []openai.ChatCompletionMessageParamUnion{
+						{OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hi"},
+						}},
+					},
+				},
+			}
+			headers, _, err := translator.RequestBody(nil, req, false)
+			require.NoError(t, err)
+			require.Contains(t, headers[0].Value(), tc.wantSub)
+			require.NotContains(t, headers[0].Value(), tc.notWantSub)
+		})
+	}
 }
 
 // Benchmark tests for performance
