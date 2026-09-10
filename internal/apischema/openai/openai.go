@@ -1576,8 +1576,7 @@ type PromptTokensDetails struct {
 	AudioTokens int `json:"audio_tokens,omitzero"`
 	// Cached tokens present in the prompt.
 	CachedTokens int `json:"cached_tokens,omitzero"`
-	// Tokens written to the cache. OpenAI names this field cache_write_tokens;
-	// cache_creation_input_tokens is Anthropic's name for the same quantity.
+	// Tokens written to the cache.
 	CacheCreationTokens int `json:"cache_write_tokens,omitzero"`
 }
 
