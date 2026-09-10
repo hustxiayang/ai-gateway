@@ -130,7 +130,7 @@ type LLMRequestCost struct {
 	//
 	// 	* "model == 'llama' ?  input_tokens + output_token * 0.5 : total_tokens"
 	//	* "backend == 'foo.default' ?  input_tokens + output_tokens : total_tokens"
-	//	* "backend == 'bar.default' ?  (input_tokens - cached_input_tokens) + cached_input_tokens * 0.1 + cache_creation_input_tokens * 1.25 + output_tokens : total_tokens"
+	//	* "backend == 'bar.default' ?  (input_tokens - cached_input_tokens - cache_creation_input_tokens) + cached_input_tokens * 0.1 + cache_creation_input_tokens * 1.25 + output_tokens : total_tokens"
 	//	* "input_tokens + output_tokens + total_tokens"
 	//	* "input_tokens * output_tokens"
 	//

@@ -29,7 +29,7 @@ func responsesResponseAttrs(resp *openai.Response) []attribute.KeyValue {
 	if u := resp.Usage; u != nil {
 		attrs = append(attrs, usageAttrs(int(u.InputTokens), int(u.OutputTokens))...)
 		attrs = append(attrs, usageDetailAttrs(
-			int(u.InputTokensDetails.CachedTokens), 0,
+			int(u.InputTokensDetails.CachedTokens), int(u.InputTokensDetails.CacheCreationTokens),
 			int(u.OutputTokensDetails.ReasoningTokens))...)
 	}
 	return attrs

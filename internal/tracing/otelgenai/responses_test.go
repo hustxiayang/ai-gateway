@@ -74,7 +74,7 @@ func TestResponsesResponseAttrs(t *testing.T) {
 			Usage: &openai.ResponseUsage{
 				InputTokens:         100,
 				OutputTokens:        50,
-				InputTokensDetails:  openai.ResponseUsageInputTokensDetails{CachedTokens: 80},
+				InputTokensDetails:  openai.ResponseUsageInputTokensDetails{CachedTokens: 70, CacheCreationTokens: 10},
 				OutputTokensDetails: openai.ResponseUsageOutputTokensDetails{ReasoningTokens: 30},
 			},
 		})...)
@@ -86,7 +86,8 @@ func TestResponsesResponseAttrs(t *testing.T) {
 		attribute.String(ResponseModel, "gpt-5-nano"),
 		attribute.Int(UsageInputTokens, 100),
 		attribute.Int(UsageOutputTokens, 50),
-		attribute.Int(UsageCacheReadInputTokens, 80),
+		attribute.Int(UsageCacheReadInputTokens, 70),
+		attribute.Int(UsageCacheCreationInputTokens, 10),
 		attribute.Int(UsageReasoningOutputTokens, 30),
 	}, span.Attributes)
 }

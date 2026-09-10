@@ -1888,7 +1888,7 @@ func TestPromptTokensDetails(t *testing.T) {
 				"text_tokens": 15,
 				"audio_tokens": 8,
 				"cached_tokens": 384,
-				"cache_creation_input_tokens": 10
+				"cache_write_tokens": 10
 			}`,
 		},
 		{
@@ -1902,7 +1902,7 @@ func TestPromptTokensDetails(t *testing.T) {
 			expected: `{
 				"audio_tokens": 8,
 				"cached_tokens": 384,
-				"cache_creation_input_tokens": 10
+				"cache_write_tokens": 10
 			}`,
 		},
 	}
@@ -1975,7 +1975,7 @@ func TestChatCompletionResponseUsage(t *testing.T) {
 				"prompt_tokens_details": {
 					"audio_tokens": 8,
 					"cached_tokens": 384,
-					"cache_creation_input_tokens": 13
+					"cache_write_tokens": 13
 				}
 			}`,
 		},
@@ -2012,7 +2012,7 @@ func TestChatCompletionResponseUsage(t *testing.T) {
 					"text_tokens": 15,
 					"audio_tokens": 8,
 					"cached_tokens": 384,
-					"cache_creation_input_tokens": 21
+					"cache_write_tokens": 21
 				}
 			}`,
 		},

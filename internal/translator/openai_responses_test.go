@@ -954,6 +954,46 @@ data: [DONE]
 		require.Equal(t, uint32(4), reasoningTokens)
 	})
 
+	t.Run("response.completed carries cache write tokens", func(t *testing.T) {
+		// Regression: OpenAI reports cache writes as input_tokens_details.cache_write_tokens.
+		// The schema previously tagged this field cache_creation_input_tokens (Anthropic's
+		// name), and the streaming path hardcoded zero, so cache writes were silently billed
+		// as ordinary input. Payload shape and values are taken from a real gpt-5.6-sol response.
+		translator := NewResponsesOpenAIToOpenAITranslator("v1", "").(*openAIToOpenAITranslatorV1Responses)
+
+		chunks := []byte(`data: {"type":"response.created","response":{"model":"gpt-5.6-sol"}}
+
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-sol","usage":{"input_tokens":26836,"input_tokens_details":{"cache_write_tokens":3455,"cached_tokens":23378},"output_tokens":125,"output_tokens_details":{"reasoning_tokens":17},"total_tokens":26961}}}
+
+data: [DONE]
+
+`)
+
+		translator.buffered = chunks
+		tokenUsage := translator.extractUsageFromBufferEvent(nil)
+
+		inputTokens, ok := tokenUsage.InputTokens()
+		require.True(t, ok)
+		require.Equal(t, uint32(26836), inputTokens)
+
+		cachedTokens, ok := tokenUsage.CachedInputTokens()
+		require.True(t, ok)
+		require.Equal(t, uint32(23378), cachedTokens)
+
+		cacheCreationTokens, ok := tokenUsage.CacheCreationInputTokens()
+		require.True(t, ok)
+		require.Equal(t, uint32(3455), cacheCreationTokens)
+
+		outputTokens, ok := tokenUsage.OutputTokens()
+		require.True(t, ok)
+		require.Equal(t, uint32(125), outputTokens)
+
+		// input_tokens is inclusive of both cache buckets, so what remains after
+		// subtracting them is the genuinely uncached input the cost expression charges
+		// at the plain input rate.
+		require.Equal(t, uint32(3), inputTokens-cachedTokens-cacheCreationTokens)
+	})
+
 	t.Run("response.failed carries usage when present", func(t *testing.T) {
 		translator := NewResponsesOpenAIToOpenAITranslator("v1", "").(*openAIToOpenAITranslatorV1Responses)
 
