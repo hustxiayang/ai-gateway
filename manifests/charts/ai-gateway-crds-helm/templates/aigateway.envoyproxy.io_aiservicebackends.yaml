@@ -834,6 +834,7 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
+                x-kubernetes-list-type: map
               modelTranslationHints:
                 description: |-
                   ModelTranslationHints declares translation hints for models routed through this backend,
