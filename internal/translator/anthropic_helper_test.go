@@ -827,6 +827,18 @@ func TestOutputConfigAvailable(t *testing.T) {
 			model:     "claude-opus-5",
 			expected:  false,
 		},
+		{
+			name:      "claude-opus-5-5 supported on GCP",
+			apiSchema: filterapi.APISchemaGCPAnthropic,
+			model:     "claude-opus-5-5",
+			expected:  true,
+		},
+		{
+			name:      "claude-opus-5-5 not supported on AWS",
+			apiSchema: filterapi.APISchemaAWSAnthropic,
+			model:     "claude-opus-5-5",
+			expected:  false,
+		},
 		// Unsupported models on either backend.
 		{
 			name:      "claude-3-sonnet not supported on GCP",
@@ -1241,6 +1253,11 @@ func TestEffortAvailable(t *testing.T) {
 		{
 			name:     "claude-opus-5 supported",
 			model:    "claude-opus-5",
+			expected: true,
+		},
+		{
+			name:     "claude-opus-5-5 supported",
+			model:    "claude-opus-5-5",
 			expected: true,
 		},
 		{
