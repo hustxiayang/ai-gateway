@@ -8,6 +8,7 @@ package translator
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -21,6 +22,17 @@ func NewChatCompletionOpenAIToAzureOpenAITranslator(apiVersion string, modelName
 	return &openAIToAzureOpenAITranslatorV1ChatCompletion{
 		apiVersion: apiVersion,
 		openAIToOpenAITranslatorV1ChatCompletion: openAIToOpenAITranslatorV1ChatCompletion{
+			modelNameOverride: modelNameOverride,
+		},
+	}
+}
+
+// NewResponsesOpenAIToAzureOpenAITranslator implements [Factory] for OpenAI to Azure OpenAI translation
+// for responses.
+func NewResponsesOpenAIToAzureOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIResponsesTranslator {
+	return &openAIToAzureOpenAITranslatorV1Responses{
+		apiVersion: apiVersion,
+		openAIToOpenAITranslatorV1Responses: openAIToOpenAITranslatorV1Responses{
 			modelNameOverride: modelNameOverride,
 		},
 	}
@@ -54,9 +66,42 @@ func (o *openAIToAzureOpenAITranslatorV1ChatCompletion) RequestBody(raw []byte, 
 		o.stream = true
 	}
 
-	// On retry, the path might have changed to a different provider. So, this will enesure that the path is always set to OpenAI.
+	// On retry, the path might have changed to a different provider. So, this will ensure that the path is always set to OpenAI.
 	if forceBodyMutation {
 		newHeaders = append(newHeaders, internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(raw))})
 	}
 	return
+}
+
+// openAIToAzureOpenAITranslatorV1Responses adapts OpenAI Responses requests for Azure OpenAI Service.
+type openAIToAzureOpenAITranslatorV1Responses struct {
+	apiVersion string
+	openAIToOpenAITranslatorV1Responses
+}
+
+// RequestBody implements [OpenAIResponsesTranslator.RequestBody].
+func (o *openAIToAzureOpenAITranslatorV1Responses) RequestBody(raw []byte, req *openai.ResponseRequest, forceBodyMutation bool) (
+	newHeaders []internalapi.Header, newBody []byte, err error,
+) {
+	newHeaders, newBody, err = o.openAIToOpenAITranslatorV1Responses.RequestBody(raw, req, forceBodyMutation)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	path := newHeaders[0].Value()
+	if path == "" {
+		path = "/openai/responses"
+	}
+	newHeaders[0] = internalapi.Header{pathHeaderName, appendAzureOpenAIAPIVersion(path, o.apiVersion)}
+	return
+}
+
+func appendAzureOpenAIAPIVersion(path, apiVersion string) string {
+	separator := "?"
+	if strings.Contains(path, "?") && !strings.HasSuffix(path, "?") && !strings.HasSuffix(path, "&") {
+		separator = "&"
+	} else if strings.HasSuffix(path, "?") || strings.HasSuffix(path, "&") {
+		separator = ""
+	}
+	return path + separator + "api-version=" + apiVersion
 }

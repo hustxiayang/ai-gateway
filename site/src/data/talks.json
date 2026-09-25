@@ -1,5 +1,21 @@
 [
     {
+        "date": "2026-03-25",
+        "title": "The Future of AI Traffic: What's New in Envoy AI Gateway 2026",
+        "url": "https://kccnceu2026.sched.com/event/372ab7dc653c2138e0485e5ed7e3456a?iframe=no",
+        "event": "EnvoyCon Europe 2026",
+        "speaker": "Xiaolin Lin (Bloomberg)",
+        "description": "In 2025, we crossed a major milestone — Envoy AI Gateway went from vision to production-ready reality. Now, we're just getting started. This talk looks ahead to what's coming in 2026: new capabilities and the next frontier of AI traffic management. Come learn what we built, what we learned along the way, and where we're taking it next."
+    },
+    {
+        "date": "2026-03-23",
+        "title": "Scaling LLMs at Bloomberg Using Envoy AI Gateway: A Hybrid Cloud Approach",
+        "url": "https://colocatedeventseu2026.sched.com/event/2DY8Z/scaling-llms-at-bloomberg-using-envoy-ai-gateway-a-hybrid-cloud-approach-xiaolin-lin-bloomberg",
+        "event": "KubeCon Europe 2026",
+        "speaker": "Xiaolin Lin (Bloomberg), Aaron Choo (Bloomberg)",
+        "description": "This session examines how financial institutions navigate the complex security and governance requirements of GenAI by building resilient infrastructure that spans cloud and on-premise environments. It details Bloomberg's production implementation of the Envoy AI Gateway, showcasing how features like intelligent routing and secure authentication enable the safe, scalable delivery of real-time AI traffic."
+    },
+    {
         "date": "2025-11-13",
         "title": "Inference Awakens: Tools for the Age of GenAI",
         "url": "https://www.youtube.com/watch?v=nlTk5q3MPZ4",
@@ -12,7 +28,7 @@
         "title": "Evolution of Envoy AI Gateway",
         "url": "https://www.youtube.com/watch?v=oXlnhRKPXhA",
         "event": "EnvoyCon North America 2025",
-        "speaker": "Yan Avlasov (Google), Takeshi Yoneda (Google)",
+        "speaker": "Yan Avlasov (Google), Takeshi Yoneda (Tetrate)",
         "description": "In this talk we will explore use, configuration and inner workings of the new features in Envoy AI Gateway."
     },
     {

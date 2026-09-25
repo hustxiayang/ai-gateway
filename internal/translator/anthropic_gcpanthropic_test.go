@@ -15,6 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
@@ -122,25 +123,14 @@ func TestAnthropicToGCPAnthropicTranslator_ComprehensiveMarshalling(t *testing.T
 		TopP:          func() *float64 { v := 0.95; return &v }(),
 		StopSequences: []string{"Human:", "Assistant:"},
 		System:        &anthropic.SystemPrompt{Text: "You are a helpful weather assistant."},
-		Tools: []anthropic.Tool{
-			{
+		Tools: []anthropic.ToolUnion{
+			{Tool: &anthropic.Tool{
 				Name:        "get_weather",
 				Description: "Get current weather information",
-				InputSchema: anthropic.ToolInputSchema{
-					Type: "object",
-					Properties: map[string]any{
-						"location": map[string]any{
-							"type":        "string",
-							"description": "City name",
-						},
-					},
-					Required: []string{"location"},
-				},
-			},
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"location":{"type":"string","description":"City name"}},"required":["location"]}`),
+			}},
 		},
-		ToolChoice: ptr.To(anthropic.ToolChoice(map[string]any{
-			"type": "auto",
-		})),
+		ToolChoice: &anthropic.ToolChoice{Auto: &anthropic.ToolChoiceAuto{Type: "auto"}},
 	}
 
 	raw, err := json.Marshal(originalReq)
@@ -348,22 +338,15 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_FieldPassthrough(t *testi
 		StopSequences: []string{"Human:", "Assistant:"},
 		Stream:        false,
 		System:        &anthropic.SystemPrompt{Text: "You are a helpful assistant"},
-		Tools: []anthropic.Tool{
-			{
+		Tools: []anthropic.ToolUnion{
+			{Tool: &anthropic.Tool{
 				Name:        "get_weather",
 				Description: "Get weather info",
-				InputSchema: anthropic.ToolInputSchema{
-					Type: "object",
-					Properties: map[string]any{
-						"location": map[string]any{"type": "string"},
-					},
-				},
-			},
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}}}`),
+			}},
 		},
-		ToolChoice: ptr.To(anthropic.ToolChoice(map[string]any{
-			"type": "auto",
-		})),
-		Metadata: &anthropic.MessagesMetadata{UserID: ptr.To("test123")},
+		ToolChoice: &anthropic.ToolChoice{Auto: &anthropic.ToolChoiceAuto{Type: "auto"}},
+		Metadata:   &anthropic.MessagesMetadata{UserID: ptr.To("test123")},
 	}
 
 	raw, err := json.Marshal(parsedReq)
@@ -410,6 +393,112 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_FieldPassthrough(t *testi
 
 	// Verify anthropic_version is added from the backend configuration.
 	require.Equal(t, "2023-06-01", modifiedReq["anthropic_version"])
+}
+
+func TestAnthropicToGCPAnthropicTranslator_HeaderValueFilter(t *testing.T) {
+	parsedReq := &anthropic.MessagesRequest{
+		Model: "claude-3-sonnet-20240229",
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		requestHeaders map[string]string
+		filterHeader   string
+		filterMode     string
+		filterValues   []string
+		wantBetaHeader string
+		wantOverwrite  bool
+	}{
+		{
+			name:           "no anthropic-beta header sent",
+			requestHeaders: map[string]string{},
+			filterHeader:   "anthropic-beta",
+			filterMode:     "Denylist",
+			filterValues:   []string{"thinking-token-count-2026-05-13"},
+			wantOverwrite:  false,
+		},
+		{
+			name:           "no filter configured leaves header untouched",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20,thinking-token-count-2026-05-13"},
+			wantOverwrite:  false,
+		},
+		{
+			name:           "denylist drops the unsupported value",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20,thinking-token-count-2026-05-13"},
+			filterHeader:   "anthropic-beta",
+			filterMode:     "Denylist",
+			filterValues:   []string{"thinking-token-count-2026-05-13"},
+			wantBetaHeader: "advanced-tool-use-2025-11-20",
+			wantOverwrite:  true,
+		},
+		{
+			name:           "denylist with no matching value leaves header untouched",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20"},
+			filterHeader:   "anthropic-beta",
+			filterMode:     "Denylist",
+			filterValues:   []string{"thinking-token-count-2026-05-13"},
+			wantOverwrite:  false,
+		},
+		{
+			name:           "allowlist keeps only the sanctioned value",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20,thinking-token-count-2026-05-13"},
+			filterHeader:   "anthropic-beta",
+			filterMode:     "Allowlist",
+			filterValues:   []string{"advanced-tool-use-2025-11-20"},
+			wantBetaHeader: "advanced-tool-use-2025-11-20",
+			wantOverwrite:  true,
+		},
+		{
+			// The setter is called for every configured filter, so it must ignore headers it does
+			// not forward itself rather than applying someone else's value list to anthropic-beta.
+			name:           "filter on a different header is ignored",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20,thinking-token-count-2026-05-13"},
+			filterHeader:   "x-some-other-header",
+			filterMode:     "Denylist",
+			filterValues:   []string{"thinking-token-count-2026-05-13"},
+			wantOverwrite:  false,
+		},
+		{
+			// Header names are case-insensitive, so a filter configured as Anthropic-Beta must still
+			// reach the anthropic-beta handling here.
+			name:           "filter header name matching is case-insensitive",
+			requestHeaders: map[string]string{"anthropic-beta": "advanced-tool-use-2025-11-20,thinking-token-count-2026-05-13"},
+			filterHeader:   "Anthropic-Beta",
+			filterMode:     "Denylist",
+			filterValues:   []string{"thinking-token-count-2026-05-13"},
+			wantBetaHeader: "advanced-tool-use-2025-11-20",
+			wantOverwrite:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "")
+			tr.(RequestHeadersSetter).SetRequestHeaders(tt.requestHeaders)
+			if tt.filterHeader != "" {
+				tr.(HeaderValueFilterSetter).SetHeaderValueFilter(tt.filterHeader, tt.filterMode, tt.filterValues)
+			}
+
+			headerMutation, _, err := tr.RequestBody(nil, parsedReq, false)
+			require.NoError(t, err)
+
+			var betaHeader *internalapi.Header
+			for i := range headerMutation {
+				if headerMutation[i].Key() == anthropicBetaHeaderName {
+					betaHeader = &headerMutation[i]
+				}
+			}
+			if tt.wantOverwrite {
+				require.NotNil(t, betaHeader, "expected anthropic-beta header to be overwritten")
+				assert.Equal(t, tt.wantBetaHeader, betaHeader.Value())
+			} else {
+				require.Nil(t, betaHeader, "anthropic-beta header should not be overwritten")
+			}
+		})
+	}
 }
 
 func TestAnthropicToGCPAnthropicTranslator_ResponseHeaders(t *testing.T) {
@@ -467,7 +556,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_ZeroTokenUsage(t *testin
 	_, _, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, true, nil)
 	require.NoError(t, err)
 
-	expected := tokenUsageFrom(0, 0, 0, 0, 0)
+	expected := tokenUsageFrom(0, 0, 0, 0, 0, -1)
 	assert.Equal(t, expected, tokenUsage)
 }
 
@@ -482,31 +571,31 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 			name:          "regular streaming chunk without usage",
 			chunk:         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" to me.\"}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1),
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
 		},
 		{
 			name:          "message_delta chunk with token usage",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":84}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(0, 0, 0, 84, 84),
+			expectedUsage: tokenUsageFrom(0, 0, 0, 84, 84, -1),
 		},
 		{
 			name:          "message_stop chunk without usage",
 			chunk:         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1),
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
 		},
 		{
 			name:          "invalid json chunk",
 			chunk:         "event: invalid\ndata: {\"invalid\": \"json\"}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1),
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
 		},
 		{
 			name:          "message_delta with decimal output_tokens",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42.0}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(0, 0, 0, 42, 42),
+			expectedUsage: tokenUsageFrom(0, 0, 0, 42, 42, -1),
 		},
 	}
 
@@ -545,12 +634,12 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 		{
 			name:          "message_delta without usage field",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
-			expectedUsage: tokenUsageFrom(0, 0, 0, 0, 0),
+			expectedUsage: tokenUsageFrom(0, 0, 0, 0, 0, -1),
 		},
 		{
 			name:          "invalid json in data",
 			chunk:         "event: message_start\ndata: {invalid json}\n\n",
-			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1),
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
 		},
 	}
 
@@ -570,7 +659,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 	}
 }
 
-func tokenUsageFrom(in, cachedInput, cacheCreationInput, out, total int32) metrics.TokenUsage {
+func tokenUsageFrom(in, cachedInput, cacheCreationInput, out, total, reasoning int32) metrics.TokenUsage {
 	var usage metrics.TokenUsage
 	if in >= 0 {
 		usage.SetInputTokens(uint32(in))
@@ -586,6 +675,9 @@ func tokenUsageFrom(in, cachedInput, cacheCreationInput, out, total int32) metri
 	}
 	if total >= 0 {
 		usage.SetTotalTokens(uint32(total))
+	}
+	if reasoning >= 0 {
+		usage.SetReasoningTokens(uint32(reasoning))
 	}
 	return usage
 }

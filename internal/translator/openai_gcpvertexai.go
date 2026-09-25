@@ -7,9 +7,12 @@ package translator
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -20,6 +23,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
+	"github.com/envoyproxy/ai-gateway/internal/redaction"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
@@ -78,6 +82,16 @@ type openAIToGCPVertexAITranslatorV1ChatCompletion struct {
 	bufferedBody      []byte // Buffer for incomplete JSON chunks.
 	requestModel      internalapi.RequestModel
 	toolCallIndex     int64
+	// streamedToolCall records whether any tool call has been emitted so far in
+	// the streaming response. Newer Gemini models (e.g. gemini-3.5-flash,
+	// gemini-3.1-flash-lite) stream the terminal STOP on a separate chunk that no
+	// longer carries the functionCall part, so the finish_reason must be derived
+	// from the whole stream, not just the current chunk.
+	streamedToolCall bool
+	// Redaction configuration for debug logging
+	debugLogEnabled bool
+	enableRedaction bool
+	logger          *slog.Logger
 }
 
 // RequestBody implements [OpenAIChatCompletionTranslator.RequestBody] for GCP Gemini.
@@ -104,7 +118,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) RequestBody(_ []byte, op
 	}
 	gcpReq, err := o.openAIMessageToGeminiMessage(openAIReq, o.requestModel)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error converting OpenAI request to Gemini request: %w", err)
+		return nil, nil, err
 	}
 	newBody, err = json.Marshal(gcpReq)
 	if err != nil {
@@ -158,6 +172,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseBody(_ map[strin
 		return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error converting GCP response to OpenAI format: %w", err)
 	}
 
+	// Redact and log response when enabled
+	if o.debugLogEnabled && o.enableRedaction && o.logger != nil {
+		redactedResp := o.RedactBody(openAIResp)
+		if jsonBody, marshalErr := json.Marshal(redactedResp); marshalErr == nil {
+			o.logger.Debug("response body processing", slog.Any("response", string(jsonBody)))
+		}
+	}
+
 	// Marshal the OpenAI response.
 	newBody, err = json.Marshal(openAIResp)
 	if err != nil {
@@ -165,12 +187,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseBody(_ map[strin
 	}
 
 	// Update token usage if available.
-	if gcpResp.UsageMetadata != nil {
-		tokenUsage.SetInputTokens(uint32(gcpResp.UsageMetadata.PromptTokenCount))              //nolint:gosec
-		tokenUsage.SetOutputTokens(uint32(gcpResp.UsageMetadata.CandidatesTokenCount))         //nolint:gosec
-		tokenUsage.SetTotalTokens(uint32(gcpResp.UsageMetadata.TotalTokenCount))               //nolint:gosec
-		tokenUsage.SetCachedInputTokens(uint32(gcpResp.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
-		// Gemini does not return cache creation input tokens; Skipping setCacheCreationInputTokens.
+	tokenUsage.SetInputTokens(uint32(openAIResp.Usage.PromptTokens))      //nolint:gosec
+	tokenUsage.SetOutputTokens(uint32(openAIResp.Usage.CompletionTokens)) //nolint:gosec
+	tokenUsage.SetTotalTokens(uint32(openAIResp.Usage.TotalTokens))       //nolint:gosec
+	if openAIResp.Usage.PromptTokensDetails != nil {
+		tokenUsage.SetCachedInputTokens(uint32(openAIResp.Usage.PromptTokensDetails.CachedTokens)) //nolint:gosec
+	}
+	if openAIResp.Usage.CompletionTokensDetails != nil {
+		tokenUsage.SetReasoningTokens(uint32(openAIResp.Usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
 	}
 
 	if span != nil {
@@ -231,18 +255,11 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 				span.RecordResponseChunk(usageChunk)
 			}
 
-			if chunk.UsageMetadata.PromptTokenCount >= 0 {
-				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CandidatesTokenCount >= 0 {
-				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.TotalTokenCount >= 0 {
-				tokenUsage.SetTotalTokens(uint32(chunk.UsageMetadata.TotalTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CachedContentTokenCount >= 0 {
-				tokenUsage.SetCachedInputTokens(uint32(chunk.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
-			}
+			tokenUsage.SetInputTokens(uint32(usage.PromptTokens))                                //nolint:gosec
+			tokenUsage.SetOutputTokens(uint32(usage.CompletionTokens))                           //nolint:gosec
+			tokenUsage.SetTotalTokens(uint32(usage.TotalTokens))                                 //nolint:gosec
+			tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))      //nolint:gosec
+			tokenUsage.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
 		}
 	}
 
@@ -250,6 +267,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 		// Add the [DONE] marker to indicate end of stream as per OpenAI API specification.
 		newBody = append(newBody, sseDoneFullLine...)
 	}
+
+	// If no chunks were parsed (data is buffered for next call), return an empty
+	// body slice instead of nil. This prevents Envoy from passing through the original Gemini
+	// format body unchanged in STREAMED mode, which would cause both formats to appear in the response.
+	if newBody == nil {
+		newBody = []byte{}
+	}
+
 	return
 }
 
@@ -289,8 +314,11 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) parseGCPStreamingChunks(
 			continue
 		}
 
-		// Remove "data: " prefix from SSE format if present.
-		line := bytes.TrimPrefix(part, sseDataPrefix)
+		// Remove the "data:" field prefix from SSE format if present.
+		line, ok := cutSSEDataPrefix(part)
+		if !ok {
+			line = part
+		}
 
 		// Try to parse as JSON.
 		var chunk genai.GenerateContentResponse
@@ -313,7 +341,9 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) parseGCPStreamingChunks(
 func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGeminiPartsStream(
 	toolCalls []openai.ChatCompletionChunkChoiceDeltaToolCall, parts []*genai.Part,
 	argsMarshaller json.Marshaler,
-) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, error) {
+) ([]openai.ChatCompletionChunkChoiceDeltaToolCall, string, error) {
+	var signatureBuilder strings.Builder
+
 	for _, part := range parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
@@ -322,7 +352,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGemi
 		// Convert function call arguments to JSON string.
 		args, err := argsMarshaller(part.FunctionCall.Args)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal function arguments: %w", err)
+			return nil, "", fmt.Errorf("failed to marshal function arguments: %w", err)
 		}
 
 		// Generate a random ID for the tool call.
@@ -340,14 +370,19 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) extractToolCallsFromGemi
 		// a new toolCall
 		o.toolCallIndex++
 
+		// Extract ThoughtSignature if present (only the first one)
+		if part.ThoughtSignature != nil && signatureBuilder.Len() == 0 {
+			signatureBuilder.WriteString(base64.StdEncoding.EncodeToString(part.ThoughtSignature))
+		}
+
 		toolCalls = append(toolCalls, toolCall)
 	}
 
 	if len(toolCalls) == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 
-	return toolCalls, nil
+	return toolCalls, signatureBuilder.String(), nil
 }
 
 // geminiCandidatesToOpenAIStreamingChoices converts Gemini candidates to OpenAI streaming choices.
@@ -373,7 +408,7 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			}
 
 			// Extract thought summary and text from parts for streaming (delta).
-			thoughtSummary, content := extractTextAndThoughtSummaryFromGeminiParts(candidate.Content.Parts, responseMode)
+			thoughtSummary, content, signature := extractTextAndThoughtSummaryFromGeminiParts(candidate.Content.Parts, responseMode)
 			if thoughtSummary != "" {
 				delta.ReasoningContent = &openai.StreamReasoningContent{
 					Text: thoughtSummary,
@@ -385,15 +420,48 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			}
 
 			// Extract tool calls if any.
-			toolCalls, err = o.extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts, json.Marshal)
+			var toolCallSignature string
+			toolCalls, toolCallSignature, err = o.extractToolCallsFromGeminiPartsStream(toolCalls, candidate.Content.Parts, json.Marshal)
 			if err != nil {
 				return nil, fmt.Errorf("error extracting tool calls: %w", err)
 			}
 			delta.ToolCalls = toolCalls
 
+			// Thought signatures (from thought parts or tool-call parts; the model cannot
+			// respond with both) are not representable in the plain-string
+			// reasoning_content, so they are surfaced via thinking_blocks instead.
+			if toolCallSignature != "" {
+				signature = toolCallSignature
+			}
+			if signature != "" {
+				delta.ThinkingBlocks = []openai.ThinkingBlock{{
+					Type: "thinking", Thinking: thoughtSummary, Signature: signature,
+				}}
+			}
+
 			choice.Delta = delta
+		} else {
+			choice.Delta = &openai.ChatCompletionResponseChunkChoiceDelta{}
 		}
+
+		// Track whether a tool call has been streamed at any point in the response.
+		if len(toolCalls) > 0 {
+			o.streamedToolCall = true
+		}
+
 		choice.FinishReason = geminiFinishReasonToOpenAI(candidate.FinishReason, toolCalls)
+		// Newer Gemini models (e.g. gemini-3.5-flash, gemini-3.1-flash-lite) stream
+		// the terminal STOP on a separate chunk whose parts no longer contain the
+		// functionCall (e.g. an empty text part), so the per-chunk toolCalls slice
+		// is empty and geminiFinishReasonToOpenAI maps it to "stop". If a tool call
+		// was streamed in an earlier chunk, the correct OpenAI finish_reason for the
+		// completion is still "tool_calls". Older Gemini models carried the
+		// functionCall and STOP in the same chunk, so this only affects the newer
+		// split-chunk shape.
+		if choice.FinishReason == openai.ChatCompletionChoicesFinishReasonStop && o.streamedToolCall {
+			choice.FinishReason = openai.ChatCompletionChoicesFinishReasonToolCalls
+		}
+
 		choices = append(choices, choice)
 	}
 
@@ -460,19 +528,19 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) openAIMessageToGeminiMes
 	// Convert OpenAI tools to Gemini tools.
 	tools, err := openAIToolsToGeminiTools(openAIReq.Tools, parametersJSONSchemaAvailable)
 	if err != nil {
-		return nil, fmt.Errorf("error converting tools: %w", err)
+		return nil, fmt.Errorf("invalid tools: %w", err)
 	}
 
 	// Convert tool config.
 	toolConfig, err := openAIToolChoiceToGeminiToolConfig(openAIReq.ToolChoice)
 	if err != nil {
-		return nil, fmt.Errorf("error converting tool choice: %w", err)
+		return nil, fmt.Errorf("invalid tool configs: %w", err)
 	}
 
 	// Convert generation config.
 	generationConfig, responseMode, err := openAIReqToGeminiGenerationConfig(openAIReq, requestModel)
 	if err != nil {
-		return nil, fmt.Errorf("error converting generation config: %w", err)
+		return nil, fmt.Errorf("invalid generation configs: %w", err)
 	}
 	o.responseMode = responseMode
 
@@ -538,10 +606,9 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiResponseToOpenAIMe
 	return openaiResp, nil
 }
 
-// ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
-// Translate GCP Vertex AI exceptions to OpenAI error type.
-// GCP error responses typically contain JSON with error details or plain text error messages.
-func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
+// convertGCPVertexAIErrorToOpenAI converts GCP Vertex AI error responses to OpenAI error format.
+// This is a shared function used by both chat completion and embedding translators.
+func convertGCPVertexAIErrorToOpenAI(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
 	var buf []byte
@@ -585,4 +652,83 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeader
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 	}
 	return
+}
+
+// ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
+// Translate GCP Vertex AI exceptions to OpenAI error type.
+// GCP error responses typically contain JSON with error details or plain text error messages.
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
+	newHeaders []internalapi.Header, newBody []byte, err error,
+) {
+	return convertGCPVertexAIErrorToOpenAI(respHeaders, body)
+}
+
+// SetRedactionConfig implements [ResponseRedactor.SetRedactionConfig].
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) SetRedactionConfig(debugLogEnabled, enableRedaction bool, logger *slog.Logger) {
+	o.debugLogEnabled = debugLogEnabled
+	o.enableRedaction = enableRedaction
+	o.logger = logger
+}
+
+// RedactBody implements [ResponseRedactor.RedactBody].
+// Creates a redacted copy of the response for safe logging without modifying the original.
+// Reuses the same redaction logic as the OpenAI translator since GCP Vertex AI responses
+// are converted to OpenAI format.
+func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) RedactBody(resp *openai.ChatCompletionResponse) *openai.ChatCompletionResponse {
+	if resp == nil {
+		return nil
+	}
+
+	// Create a shallow copy of the response
+	redacted := *resp
+
+	// Redact choices (contains AI-generated content)
+	if len(resp.Choices) > 0 {
+		redacted.Choices = make([]openai.ChatCompletionResponseChoice, len(resp.Choices))
+		for i := range resp.Choices {
+			redactedChoice := resp.Choices[i]
+			redactedChoice.Message = redactGCPResponseMessage(&resp.Choices[i].Message)
+			redacted.Choices[i] = redactedChoice
+		}
+	}
+
+	return &redacted
+}
+
+// redactGCPResponseMessage redacts sensitive content from a GCP Vertex AI response message
+// that has been converted to OpenAI format.
+func redactGCPResponseMessage(msg *openai.ChatCompletionResponseChoiceMessage) openai.ChatCompletionResponseChoiceMessage {
+	redactedMsg := *msg
+
+	// Redact message content (AI-generated text)
+	if msg.Content != nil {
+		redactedContent := redaction.RedactString(*msg.Content)
+		redactedMsg.Content = &redactedContent
+	}
+
+	// Redact tool call arguments (may contain data derived from user messages).
+	// Function name is kept — it is the tool API name, not user data.
+	if len(msg.ToolCalls) > 0 {
+		redactedMsg.ToolCalls = make([]openai.ChatCompletionMessageToolCallParam, len(msg.ToolCalls))
+		for i, tc := range msg.ToolCalls {
+			redactedToolCall := tc
+			redactedToolCall.Function.Arguments = redaction.RedactString(tc.Function.Arguments)
+			redactedMsg.ToolCalls[i] = redactedToolCall
+		}
+	}
+
+	// Redact audio data if present
+	if msg.Audio != nil {
+		redactedAudio := *msg.Audio
+		redactedAudio.Data = redaction.RedactString(msg.Audio.Data)
+		redactedAudio.Transcript = redaction.RedactString(msg.Audio.Transcript)
+		redactedMsg.Audio = &redactedAudio
+	}
+
+	// Redact reasoning content if present (GCP-specific extended thinking)
+	if msg.ReasoningContent != nil {
+		redactedMsg.ReasoningContent = redactReasoningContent(msg.ReasoningContent)
+	}
+
+	return redactedMsg
 }

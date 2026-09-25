@@ -69,6 +69,15 @@ var (
 
 	//go:embed testdata/anthropic.yaml
 	anthropicYAML string
+
+	//go:embed testdata/anthropic-prefix.yaml
+	anthropicPrefixYAML string
+
+	//go:embed testdata/openai-otel.yaml
+	openaiOTELYAML string
+
+	//go:embed testdata/openai-otel-ip.yaml
+	openaaiOTELIPYAML string
 )
 
 func TestWriteConfig(t *testing.T) {
@@ -93,8 +102,77 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "OpenAI",
 					Version:     "",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openaiDefaultYAML,
+		},
+		{
+			name: "OpenAI with OTEL access logging",
+			input: ConfigData{
+				Backends: []Backend{
+					{
+						Name:     "openai",
+						Hostname: "api.openai.com",
+						Port:     443,
+						NeedsTLS: true,
+					},
+					{
+						Name:        "otel",
+						Hostname:    "otel-collector.monitoring",
+						Port:        443,
+						NeedsTLS:    true,
+						IsTelemetry: true,
+					},
+				},
+				OpenAI: &OpenAIConfig{
+					BackendName: "openai",
+					SchemaName:  "OpenAI",
+					Version:     "",
+				},
+				OTELLog: &otelLogConfig{
+					Exporter:    "otlp",
+					BackendName: "otel",
+					Headers: []otelHeader{
+						{Name: "Authorization", Value: "ApiKey fake-key"},
+					},
+					Resources: []otelResourceAttr{
+						{Key: "deployment.environment", Value: "production"},
+						{Key: "service.name", Value: "ai-gateway-service"},
+						{Key: "service.version", Value: "1.2.3"},
+					},
+				},
+			},
+			expected: openaiOTELYAML,
+		},
+		{
+			name: "OpenAI and OTEL IPs",
+			input: ConfigData{
+				Backends: []Backend{
+					{
+						Name:     "openai",
+						IP:       "127.0.0.1",
+						Port:     11434,
+						NeedsTLS: false,
+					},
+					{
+						Name:        "otel",
+						IP:          "127.0.0.1",
+						Port:        4317,
+						NeedsTLS:    false,
+						IsTelemetry: true,
+					},
+				},
+				OpenAI: &OpenAIConfig{
+					BackendName: "openai",
+					SchemaName:  "OpenAI",
+					Version:     "",
+				},
+				OTELLog: &otelLogConfig{
+					Exporter:    "otlp",
+					BackendName: "otel",
+				},
+			},
+			expected: openaaiOTELIPYAML,
 		},
 		{
 			name: "Azure OpenAI",
@@ -112,6 +190,7 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "AzureOpenAI",
 					Version:     "2024-02-15-preview",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: azureOpenAIYAML,
 		},
@@ -131,6 +210,7 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "OpenAI",
 					Version:     "",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: ollamaLocalYAML,
 		},
@@ -150,6 +230,7 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "OpenAI",
 					Version:     "",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: tarsYAML,
 		},
@@ -169,6 +250,7 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "OpenAI",
 					Version:     "api/v1",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openrouterYAML,
 		},
@@ -188,6 +270,7 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "OpenAI",
 					Version:     "v1/openai/v1",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: llamastackYAML,
 		},
@@ -208,6 +291,7 @@ func TestWriteConfig(t *testing.T) {
 					Version:        "",
 					OrganizationID: "org-test123",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openaiWithOrgYAML,
 		},
@@ -228,6 +312,7 @@ func TestWriteConfig(t *testing.T) {
 					Version:     "",
 					ProjectID:   "proj_test456",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openaiWithProjectYAML,
 		},
@@ -249,6 +334,7 @@ func TestWriteConfig(t *testing.T) {
 					OrganizationID: "org-test123",
 					ProjectID:      "proj_test456",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openaiWithOrgAndProjectYAML,
 		},
@@ -270,6 +356,7 @@ func TestWriteConfig(t *testing.T) {
 					OrganizationID: "org-test123",
 					ProjectID:      "proj_test456",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: azureOpenAIWithOrgAndProjectYAML,
 		},
@@ -291,9 +378,8 @@ func TestWriteConfig(t *testing.T) {
 				},
 				Debug:        true,
 				EnvoyVersion: "1.35.0",
+				OTELLog:      &otelLogConfig{Exporter: "console"},
 			},
-			// TODO: raise issue in EG to allow doing effectively this:
-			// "--component-log-level ext_proc:trace,http:debug,connection:debug"
 			expected: debugYAML,
 		},
 		{
@@ -313,6 +399,7 @@ func TestWriteConfig(t *testing.T) {
 						Path:        "/",
 					},
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: kiwiYAML,
 		},
@@ -346,6 +433,7 @@ func TestWriteConfig(t *testing.T) {
 						IncludeTools: []string{"issue_read", "list_issues"},
 					},
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: openaiGithubYAML,
 		},
@@ -365,8 +453,29 @@ func TestWriteConfig(t *testing.T) {
 					SchemaName:  "Anthropic",
 					Version:     "",
 				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
 			},
 			expected: anthropicYAML,
+		},
+		{
+			name: "Anthropic (path prefix)",
+			input: ConfigData{
+				Backends: []Backend{
+					{
+						Name:     "anthropic",
+						Hostname: "api.anthropic.com",
+						Port:     443,
+						NeedsTLS: true,
+					},
+				},
+				Anthropic: &AnthropicConfig{
+					BackendName: "anthropic",
+					SchemaName:  "Anthropic",
+					Version:     "api/v1",
+				},
+				OTELLog: &otelLogConfig{Exporter: "console"},
+			},
+			expected: anthropicPrefixYAML,
 		},
 	}
 
@@ -449,6 +558,11 @@ func TestParseURL(t *testing.T) {
 		{
 			name:          "unsupported scheme",
 			baseURL:       "ftp://example.com",
+			expectedError: fmt.Errorf("invalid base URL: unsupported scheme \"ftp\""),
+		},
+		{
+			name:          "unsupported scheme with explicit port",
+			baseURL:       "ftp://example.com:21",
 			expectedError: fmt.Errorf("invalid base URL: unsupported scheme \"ftp\""),
 		},
 	}

@@ -41,27 +41,39 @@ spec:
   logging:
     level:
       default: debug
+      # Keep these two components out of the blanket debug level: at debug
+      # they each dump the full request headers (including the Authorization
+      # header the extproc injects with the backend API key) to the log.
+      http: info
+      ext_proc: info
   telemetry:
     accessLog:
       settings:
-        - sinks:
+        - matches:
+            # MCP metadata only exists on backend-listener requests, which do not carry /mcp paths.
+            # Match LLM by x-ai-eg-model and MCP by x-ai-eg-mcp-backend.
+            - "request.headers['x-ai-eg-model'] != ''"
+          sinks:
             - type: File
               file:
                 path: /dev/stdout
           format:
             type: JSON
             json:
-              # LLM specific fields. The properties in the dynamic metadata
-              # expressions must match the ones defined in the AIGatewayRoute
-              # llmRequestCosts field.
-              genai_model_name: "%REQ(X-AI-EG-MODEL)%"
-              genai_model_name_override: "%DYNAMIC_METADATA(io.envoy.ai_gateway:model_name_override)%"
-              genai_backend_name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:backend_name)%"
-              genai_tokens_input: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_input_token)%"
-              genai_tokens_output: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_output_token)%"
-              # A few default fields
+              # LLM specific fields. Dynamic metadata expressions must match
+              # the ones defined in the AIGatewayRoute llmRequestCosts field or
+              # header-mapped attributes via OTEL_*_REQUEST_HEADER_ATTRIBUTES.
+              gen_ai.request.model: "%REQ(X-AI-EG-MODEL)%"
+              gen_ai.response.model: "%DYNAMIC_METADATA(io.envoy.ai_gateway:response_model)%"
+              gen_ai.provider.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:backend_name)%"
+              gen_ai.usage.input_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_input_token)%"
+              gen_ai.usage.output_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_output_token)%"
+              gen_ai.usage.reasoning_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_reasoning_token)%"
+              session.id: "%DYNAMIC_METADATA(io.envoy.ai_gateway:session.id)%"
+              # Common fields
               start_time: "%START_TIME%"
               method: "%REQ(:METHOD)%"
+              request.path: "%REQ(:PATH)%"
               x-envoy-origin-path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
               response_code: "%RESPONSE_CODE%"
               connection_termination_details: "%CONNECTION_TERMINATION_DETAILS%"
@@ -69,6 +81,8 @@ spec:
               bytes_received: "%BYTES_RECEIVED%"
               bytes_sent: "%BYTES_SENT%"
               duration: "%DURATION%"
+              x-envoy-upstream-service-time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+              x-forwarded-for: "%REQ(X-FORWARDED-FOR)%"
               user-agent: "%REQ(USER-AGENT)%"
               x-request-id: "%REQ(X-REQUEST-ID)%"
               upstream_host: "%UPSTREAM_HOST%"
@@ -76,8 +90,45 @@ spec:
               upstream_local_address: "%UPSTREAM_LOCAL_ADDRESS%"
               downstream_local_address: "%DOWNSTREAM_LOCAL_ADDRESS%"
               downstream_remote_address: "%DOWNSTREAM_REMOTE_ADDRESS%"
+        - matches:
+            - "request.headers['x-ai-eg-mcp-backend'] != ''"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
+          format:
+            type: JSON
+            json:
+              # MCP specific fields
+              jsonrpc.request.id: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_request_id)%"
+              mcp.session.id: "%REQ(MCP-SESSION-ID)%"
+              mcp.method.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_method)%"
+              mcp.tool.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_tool_name)%"
+              session.id: "%DYNAMIC_METADATA(io.envoy.ai_gateway:session.id)%"
+              mcp.provider.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_backend)%"
+              # Common fields
+              start_time: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              request.path: "%REQ(:PATH)%"
+              x-envoy-origin-path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              response_code: "%RESPONSE_CODE%"
+              connection_termination_details: "%CONNECTION_TERMINATION_DETAILS%"
+              upstream_transport_failure_reason: "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
+              bytes_received: "%BYTES_RECEIVED%"
+              bytes_sent: "%BYTES_SENT%"
+              duration: "%DURATION%"
+              x-envoy-upstream-service-time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+              x-forwarded-for: "%REQ(X-FORWARDED-FOR)%"
+              user-agent: "%REQ(USER-AGENT)%"
+              x-request-id: "%REQ(X-REQUEST-ID)%"
+              upstream_host: "%UPSTREAM_HOST%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              upstream_local_address: "%UPSTREAM_LOCAL_ADDRESS%"
+              downstream_local_address: "%DOWNSTREAM_LOCAL_ADDRESS%"
+              downstream_remote_address: "%DOWNSTREAM_REMOTE_ADDRESS%"
+
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: aigw-run
@@ -105,6 +156,8 @@ spec:
       type: InputToken
     - metadataKey: llm_output_token
       type: OutputToken
+    - metadataKey: llm_reasoning_token
+      type: ReasoningToken
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: Backend
@@ -117,7 +170,7 @@ spec:
         hostname: api.openai.com
         port: 443
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIServiceBackend
 metadata:
   name: openai
@@ -173,7 +226,7 @@ type: Opaque
 stringData:
   apiKey: ${OPENAI_API_KEY}
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: BackendSecurityPolicy
 metadata:
   name: openai-apikey

@@ -6,56 +6,124 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	fake2 "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	"sigs.k8s.io/yaml"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/rotators"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 )
+
+// requireLLMRequestCostsEqual asserts two LLMRequestCost slices are equal, printing a go-cmp diff on failure.
+func requireLLMRequestCostsEqual(t *testing.T, want, got []filterapi.LLMRequestCost) {
+	t.Helper()
+	// Compare as sets (order-agnostic) since map iteration order is non-deterministic.
+	less := func(a, b filterapi.LLMRequestCost) bool {
+		if a.RouteName != b.RouteName {
+			return a.RouteName < b.RouteName
+		}
+		return a.MetadataKey < b.MetadataKey
+	}
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(less)); diff != "" {
+		t.Fatalf("LLMRequestCosts not equal (-want +got):\n%s", diff)
+	}
+}
+
+// newTestGatewayController builds a GatewayController for tests, deriving the
+// extproc builder from the given image/logLevel/sidecar via the same
+// newExtProcBuilder NewGatewayController uses. It mirrors the pre-refactor
+// NewGatewayController signature so existing tests read cleanly.
+func newTestGatewayController(c client.Client, kube kubernetes.Interface, logger logr.Logger, ns, extProcImage, extProcLogLevel string, standAlone bool, uuidFn func() string, extProcAsSideCar bool) *GatewayController {
+	opts := &Options{
+		ExtProcImage:                           extProcImage,
+		ExtProcLogLevel:                        extProcLogLevel,
+		UDSPath:                                "/tmp/extproc.sock",
+		RootPrefix:                             "/",
+		ExtProcMaxRecvMsgSize:                  512 * 1024 * 1024,
+		MCPSessionEncryptionSeed:               "seed",
+		MCPSessionEncryptionIterations:         100,
+		MCPFallbackSessionEncryptionSeed:       "fallback",
+		MCPFallbackSessionEncryptionIterations: 200,
+	}
+	return NewGatewayController(c, kube, logger, ns, standAlone, uuidFn, opts, extProcAsSideCar)
+}
+
+func requireFilterConfigFromBundle(t *testing.T, kube kubernetes.Interface, namespace, gatewayName, gatewayNamespace string) filterapi.Config {
+	t.Helper()
+
+	configName := FilterConfigBundleIndexSecretName(gatewayName, gatewayNamespace)
+	secret, err := kube.CoreV1().Secrets(namespace).Get(t.Context(), configName, metav1.GetOptions{})
+	require.NoError(t, err)
+	indexRaw := ""
+	ok := false
+	if b, exists := secret.Data[FilterConfigBundleIndexKey]; exists {
+		indexRaw = string(b)
+		ok = true
+	} else if s, exists := secret.StringData[FilterConfigBundleIndexKey]; exists {
+		indexRaw = s
+		ok = true
+	}
+	require.True(t, ok)
+	index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+	require.NoError(t, err)
+
+	cfg, err := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+		partSecret, getErr := kube.CoreV1().Secrets(namespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		if b, exists := partSecret.Data[FilterConfigBundlePartKey]; exists {
+			return b, nil
+		}
+		if b, exists := partSecret.StringData[FilterConfigBundlePartKey]; exists {
+			return []byte(b), nil
+		}
+		return nil, fmt.Errorf("missing key %q in part secret %s", FilterConfigBundlePartKey, part.Name)
+	})
+	require.NoError(t, err)
+	return *cfg
+}
 
 func TestGatewayController_Reconcile(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	fakeKube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	c := NewGatewayController(fakeClient, fakeKube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, fakeKube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const namespace = "ns"
 	t.Run("not found must be non error", func(t *testing.T) {
 		res, err := c.Reconcile(t.Context(), ctrl.Request{})
-		require.NoError(t, err)
-		require.Equal(t, ctrl.Result{}, res)
-	})
-	t.Run("gw found but no attached aigw route", func(t *testing.T) {
-		err := fakeClient.Create(t.Context(), &gwapiv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: namespace},
-			Spec:       gwapiv1.GatewaySpec{},
-		})
-		require.NoError(t, err)
-
-		res, err := c.Reconcile(t.Context(), ctrl.Request{
-			NamespacedName: client.ObjectKey{Name: "gw", Namespace: namespace},
-		})
 		require.NoError(t, err)
 		require.Equal(t, ctrl.Result{}, res)
 	})
@@ -73,22 +141,22 @@ func TestGatewayController_Reconcile(t *testing.T) {
 			Group: ptr.To(gwapiv1a2.Group("gateway.networking.k8s.io")),
 		},
 	}
-	for _, aigwRoute := range []*aigv1a1.AIGatewayRoute{
+	for _, aigwRoute := range []*aigv1b1.AIGatewayRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: namespace},
-			Spec: aigv1a1.AIGatewayRouteSpec{
+			Spec: aigv1b1.AIGatewayRouteSpec{
 				ParentRefs: targets,
-				Rules: []aigv1a1.AIGatewayRouteRule{
-					{BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}},
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}},
 				},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route2", Namespace: namespace},
-			Spec: aigv1a1.AIGatewayRouteSpec{
+			Spec: aigv1b1.AIGatewayRouteSpec{
 				ParentRefs: targets,
-				Rules: []aigv1a1.AIGatewayRouteRule{
-					{BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{{Name: "orange"}}},
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "orange"}}},
 				},
 			},
 		},
@@ -97,16 +165,16 @@ func TestGatewayController_Reconcile(t *testing.T) {
 		require.NoError(t, err)
 	}
 	// We also need to create corresponding AIServiceBackends.
-	for _, aigwRoute := range []*aigv1a1.AIServiceBackend{
+	for _, aigwRoute := range []*aigv1b1.AIServiceBackend{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: namespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](namespace)},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: namespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](namespace)},
 			},
 		},
@@ -145,7 +213,14 @@ func TestGatewayController_Reconcile(t *testing.T) {
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
 			Template: corev1.PodTemplateSpec{},
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			UpdatedReplicas:    1,
+			ReadyReplicas:      1,
+			AvailableReplicas:  1,
 		},
 	}
 	_, err = fakeKube.AppsV1().Deployments(namespace).Create(t.Context(), deployment, metav1.CreateOptions{})
@@ -156,31 +231,124 @@ func TestGatewayController_Reconcile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, res)
 	secret, err := fakeKube.CoreV1().Secrets(namespace).
-		Get(t.Context(), FilterConfigSecretPerGatewayName(okGwName, namespace), metav1.GetOptions{})
+		Get(t.Context(), FilterConfigBundleIndexSecretName(okGwName, namespace), metav1.GetOptions{})
 	require.NoError(t, err)
 	require.NotNil(t, secret)
+}
+
+func TestGatewayController_Reconcile_GatewayConfigImageOverrideNoWorkloadPatch(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	fakeKube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+
+	const (
+		gwName      = "gc-image-gw"
+		namespace   = "ns"
+		egNamespace = "envoy-gateway-system"
+		globalImage = "docker.io/envoyproxy/ai-gateway-extproc:latest"
+	)
+	opts := newTestExtProcOptions(globalImage, "info")
+	c := NewGatewayController(fakeClient, fakeKube, ctrl.Log, egNamespace, false, func() string { return "uuid" }, opts, true)
+
+	gatewayConfig := testGatewayConfig.DeepCopy()
+	gatewayConfig.Namespace = namespace
+	require.NoError(t, fakeClient.Create(t.Context(), gatewayConfig))
+
+	require.NoError(t, fakeClient.Create(t.Context(), &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gwName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				GatewayConfigAnnotationKey: gatewayConfig.Name,
+			},
+		},
+	}))
+
+	parentRefs := []gwapiv1a2.ParentReference{{Name: gwName}}
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: namespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			ParentRefs: parentRefs,
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend"}}},
+			},
+		},
+	}))
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "backend", Namespace: namespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "service", Namespace: ptr.To[gwapiv1.Namespace](namespace)},
+		},
+	}))
+
+	input := extProcContainerInput{gatewayConfig: gatewayConfig}
+	desiredImage := c.extProcImage(input)
+	desiredHash := c.extProcContainerHash(input)
+	labels := map[string]string{
+		egOwningGatewayNameLabel:      gwName,
+		egOwningGatewayNamespaceLabel: namespace,
+	}
+	_, err := fakeKube.CoreV1().Pods(egNamespace).Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-pod", Namespace: egNamespace, Labels: labels},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+			{Name: extProcContainerName, Image: desiredImage, Args: []string{"-logLevel", "info"}},
+		}},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = fakeKube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-deployment", Namespace: egNamespace, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{extProcConfigHashAnnotationKey: desiredHash},
+			}},
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+			ReadyReplicas:      1,
+			AvailableReplicas:  1,
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	beforeActions := len(fakeKube.Actions())
+	res, err := c.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKey{Name: gwName, Namespace: namespace}})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, res)
+
+	for _, action := range fakeKube.Actions()[beforeActions:] {
+		require.Falsef(t, action.GetVerb() == "patch" && action.GetResource().Resource == "deployments",
+			"reconcile should not patch workload when GatewayConfig image and template hash are current: %#v", action)
+	}
+	deployment, err := fakeKube.AppsV1().Deployments(egNamespace).Get(t.Context(), "gw-deployment", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, desiredHash, deployment.Spec.Template.Annotations[extProcConfigHashAnnotationKey])
+	_, exists := deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+	require.False(t, exists)
 }
 
 func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const gwNamespace = "ns"
-	routes := []aigv1a1.AIGatewayRoute{
+	routes := []aigv1b1.AIGatewayRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
-			Spec: aigv1a1.AIGatewayRouteSpec{
-				Rules: []aigv1a1.AIGatewayRouteRule{
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
 					{
-						BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
 							{Name: "apple"},
 							{Name: "invalid-bsp-backend"},  // This should be ignored as the BSP is invalid.
 							{Name: "non-existent-backend"}, // This should be ignored as the backend does not exist.
 						},
-						Matches: []aigv1a1.AIGatewayRouteRuleMatch{
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
 							{
 								Headers: []gwapiv1.HTTPHeaderMatch{
 									{
@@ -192,35 +360,35 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 						},
 					},
 				},
-				LLMRequestCosts: []aigv1a1.LLMRequestCost{
-					{MetadataKey: "foo", Type: aigv1a1.LLMRequestCostTypeInputToken},
-					{MetadataKey: "bar", Type: aigv1a1.LLMRequestCostTypeOutputToken},
-					{MetadataKey: "baz", Type: aigv1a1.LLMRequestCostTypeTotalToken},
-					{MetadataKey: "qux", Type: aigv1a1.LLMRequestCostTypeCachedInputToken},
-					{MetadataKey: "zoo", Type: aigv1a1.LLMRequestCostTypeCacheCreationInputToken},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					{MetadataKey: "foo", Type: aigv1b1.LLMRequestCostTypeInputToken},
+					{MetadataKey: "bar", Type: aigv1b1.LLMRequestCostTypeOutputToken},
+					{MetadataKey: "baz", Type: aigv1b1.LLMRequestCostTypeTotalToken},
+					{MetadataKey: "qux", Type: aigv1b1.LLMRequestCostTypeCachedInputToken},
+					{MetadataKey: "zoo", Type: aigv1b1.LLMRequestCostTypeCacheCreationInputToken},
 				},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route2", Namespace: gwNamespace},
-			Spec: aigv1a1.AIGatewayRouteSpec{
-				Rules: []aigv1a1.AIGatewayRouteRule{
-					{BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{{Name: "orange"}}},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "orange"}}},
 				},
-				LLMRequestCosts: []aigv1a1.LLMRequestCost{
-					{MetadataKey: "foo", Type: aigv1a1.LLMRequestCostTypeInputToken}, // This should be ignored as it has the duplicate key.
-					{MetadataKey: "cat", Type: aigv1a1.LLMRequestCostTypeCEL, CEL: ptr.To(`backend == 'foo.default' ?  input_tokens + output_tokens : total_tokens`)},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					{MetadataKey: "foo", Type: aigv1b1.LLMRequestCostTypeInputToken}, // Same metadataKey as route1; scoped to this route in filter config.
+					{MetadataKey: "cat", Type: aigv1b1.LLMRequestCostTypeCEL, CEL: ptr.To(`backend == 'foo.default' ?  input_tokens + output_tokens : total_tokens`)},
 				},
 			},
 		},
 	}
 	// We also need to create corresponding AIServiceBackends.
-	for _, aigwRoute := range []*aigv1a1.AIServiceBackend{
+	for _, aigwRoute := range []*aigv1b1.AIServiceBackend{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
-				HeaderMutation: &aigv1a1.HTTPHeaderMutation{Set: []gwapiv1.HTTPHeader{
+				HeaderMutation: &aigv1b1.HTTPHeaderMutation{Set: []gwapiv1.HTTPHeader{
 					// Header name should be normalized to lowercase in the filter config.
 					{Name: "X-Foo", Value: "foo"},
 				}, Remove: []string{"x-Bar"}},
@@ -228,13 +396,13 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: gwNamespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "invalid-bsp-backend", Namespace: gwNamespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
 			},
 		},
@@ -244,11 +412,11 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	}
 
 	// Create a BackendSecurityPolicy that is invalid (missing secret ref).
-	err := fakeClient.Create(t.Context(), &aigv1a1.BackendSecurityPolicy{
+	err := fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "invalid-bsp", Namespace: gwNamespace},
-		Spec: aigv1a1.BackendSecurityPolicySpec{
-			Type: aigv1a1.BackendSecurityPolicyTypeAPIKey,
-			APIKey: &aigv1a1.BackendSecurityPolicyAPIKey{
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type: aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			APIKey: &aigv1b1.BackendSecurityPolicyAPIKey{
 				SecretRef: &gwapiv1.SecretObjectReference{Name: "non-existent-secret"},
 			},
 			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
@@ -264,25 +432,63 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 
 	for range 2 { // Reconcile twice to make sure the secret update path is working.
 		const someNamespace = "some-namespace"
-		configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-		err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid")
+		configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
+		effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
 		require.NoError(t, err)
+		require.True(t, effective, "expected filter config to be effective")
 
 		secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
 		require.NoError(t, err)
-		configStr, ok := secret.StringData[FilterConfigKeyInSecret]
+		indexRaw := ""
+		ok := false
+		if b, exists := secret.Data[FilterConfigBundleIndexKey]; exists {
+			indexRaw = string(b)
+			ok = true
+		} else if s, exists := secret.StringData[FilterConfigBundleIndexKey]; exists {
+			indexRaw = s
+			ok = true
+		}
 		require.True(t, ok)
-		var fc filterapi.Config
-		require.NoError(t, yaml.Unmarshal([]byte(configStr), &fc))
+		index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+		require.NoError(t, err)
+		cfg, err := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+			partSecret, getErr := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+			if getErr != nil {
+				return nil, getErr
+			}
+			if b, exists := partSecret.Data[FilterConfigBundlePartKey]; exists {
+				return b, nil
+			}
+			if b, exists := partSecret.StringData[FilterConfigBundlePartKey]; exists {
+				return []byte(b), nil
+			}
+			return nil, fmt.Errorf("missing key %q in part secret %s", FilterConfigBundlePartKey, part.Name)
+		})
+		require.NoError(t, err)
+		fc := *cfg
 		require.Equal(t, "dev", fc.Version)
-		require.Len(t, fc.LLMRequestCosts, 6)
-		require.Equal(t, filterapi.LLMRequestCostTypeInputToken, fc.LLMRequestCosts[0].Type)
-		require.Equal(t, filterapi.LLMRequestCostTypeOutputToken, fc.LLMRequestCosts[1].Type)
-		require.Equal(t, filterapi.LLMRequestCostTypeTotalToken, fc.LLMRequestCosts[2].Type)
-		require.Equal(t, filterapi.LLMRequestCostTypeCachedInputToken, fc.LLMRequestCosts[3].Type)
-		require.Equal(t, filterapi.LLMRequestCostTypeCacheCreationInputToken, fc.LLMRequestCosts[4].Type)
-		require.Equal(t, filterapi.LLMRequestCostTypeCEL, fc.LLMRequestCosts[5].Type)
-		require.Equal(t, `backend == 'foo.default' ?  input_tokens + output_tokens : total_tokens`, fc.LLMRequestCosts[5].CEL)
+		wantLLMRequestCosts := []filterapi.LLMRequestCost{
+			{MetadataKey: "foo", RouteName: "ns/route1", Type: filterapi.LLMRequestCostTypeInputToken},
+			{MetadataKey: "bar", RouteName: "ns/route1", Type: filterapi.LLMRequestCostTypeOutputToken},
+			{MetadataKey: "baz", RouteName: "ns/route1", Type: filterapi.LLMRequestCostTypeTotalToken},
+			{MetadataKey: "qux", RouteName: "ns/route1", Type: filterapi.LLMRequestCostTypeCachedInputToken},
+			{MetadataKey: "zoo", RouteName: "ns/route1", Type: filterapi.LLMRequestCostTypeCacheCreationInputToken},
+			{MetadataKey: "foo", RouteName: "ns/route2", Type: filterapi.LLMRequestCostTypeInputToken},
+			{
+				MetadataKey: "cat",
+				RouteName:   "ns/route2",
+				Type:        filterapi.LLMRequestCostTypeCEL,
+				CEL:         `backend == 'foo.default' ?  input_tokens + output_tokens : total_tokens`,
+			},
+		}
+		requireLLMRequestCostsEqual(t, wantLLMRequestCosts, fc.LLMRequestCosts)
+
+		catProg, err := llmcostcel.NewProgram(wantLLMRequestCosts[6].CEL)
+		require.NoError(t, err)
+		catVal, err := llmcostcel.EvaluateProgram(catProg, "model", "foo.default", "ns/route2", 3, 0, 0, 4, 7, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(7), catVal)
+
 		require.Len(t, fc.Models, 1)
 		require.Equal(t, "mymodel", fc.Models[0].Name)
 
@@ -294,31 +500,360 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	}
 }
 
+// TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels verifies that mixing routes
+// with and without Spec.Hostnames produces a filter config where:
+//   - each per-host list contains the host's own models AND every unscoped model (so the unscoped
+//     route's models remain visible on host-matched /v1/models requests), and
+//   - UnscopedModels is populated separately so unmatched hosts can fall back to it without leaking
+//     host-scoped models.
+func TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "scoped-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Hostnames: []gwapiv1.Hostname{"api.example.com"},
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "scoped-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "unscoped-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				// No Hostnames -> "unscoped": its models apply to every host.
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "orange"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "unscoped-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, b := range []*aigv1b1.AIServiceBackend{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+	} {
+		require.NoError(t, fakeClient.Create(t.Context(), b))
+	}
+
+	const someNamespace = "some-namespace"
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-hostname", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective, "expected filter config to be effective")
+
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw-hostname", gwNamespace)
+
+	// Global Models list still contains every model (used as fallback when no ModelsByHost is configured).
+	require.ElementsMatch(t,
+		[]string{"scoped-model", "unscoped-model"},
+		[]string{fc.Models[0].Name, fc.Models[1].Name},
+	)
+
+	// UnscopedModels only holds the route-without-hostnames contribution.
+	require.Len(t, fc.UnscopedModels, 1)
+	require.Equal(t, "unscoped-model", fc.UnscopedModels[0].Name)
+
+	// ModelsByHost["api.example.com"] should have BOTH the scoped model and the merged-in unscoped
+	// model — otherwise the unscoped route's models would silently disappear on host-matched requests.
+	require.Contains(t, fc.ModelsByHost, "api.example.com")
+	gotHostModels := make([]string, 0, len(fc.ModelsByHost["api.example.com"]))
+	for _, m := range fc.ModelsByHost["api.example.com"] {
+		gotHostModels = append(gotHostModels, m.Name)
+	}
+	require.ElementsMatch(t, []string{"scoped-model", "unscoped-model"}, gotHostModels)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUnscopedModelsEmpty
+// regression-locks the gate added to avoid duplicating Models into UnscopedModels when no route is
+// hostname-scoped. Without the gate, every existing golden YAML that didn't expect an
+// `unscopedModels:` field would break (as Test_translate did when this gate was missing).
+func TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUnscopedModelsEmpty(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-only-unscoped", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				// No Hostnames — and no other route adds Hostnames either.
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}},
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+							{Headers: []gwapiv1.HTTPHeaderMatch{
+								{Name: internalapi.ModelNameHeaderKeyDefault, Value: "lone-model"},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}))
+
+	const someNamespace = "some-namespace"
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-unscoped-only", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective)
+
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw-unscoped-only", gwNamespace)
+
+	require.Len(t, fc.Models, 1)
+	require.Equal(t, "lone-model", fc.Models[0].Name)
+	// Critical: with no scoped routes, ModelsByHost must be empty AND UnscopedModels must stay nil
+	// so it's omitted from the marshalled YAML (omitempty).
+	require.Empty(t, fc.ModelsByHost)
+	require.Nil(t, fc.UnscopedModels)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostAggregation verifies that
+// routes sharing the same metadataKey each get their own filter-config row (scoped by routeName).
+func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostAggregation(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	// Create two routes with DIFFERENT CEL expressions for the SAME metadataKey.
+	// This is the core scenario of Issue #1688.
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "free-model-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "free-backend"}}},
+				},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					// Free model: cost is always 0
+					{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeCEL, CEL: ptr.To("0")},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "paid-model-route", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "paid-backend"}}},
+				},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					// Paid model: cost calculation based on tokens
+					{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeCEL, CEL: ptr.To("input_tokens + output_tokens")},
+				},
+			},
+		},
+	}
+
+	// Create corresponding AIServiceBackends.
+	for _, backend := range []*aigv1b1.AIServiceBackend{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "free-backend", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "paid-backend", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		},
+	} {
+		err := fakeClient.Create(t.Context(), backend)
+		require.NoError(t, err)
+	}
+
+	const someNamespace = "some-namespace"
+
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective, "expected filter config to be effective")
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+
+	// Verify we have two backends and one filter-config row per route (same metadataKey).
+	require.Len(t, fc.Backends, 2, "expected 2 backends")
+	wantLLMRequestCosts := []filterapi.LLMRequestCost{
+		{
+			MetadataKey: "billing_charges",
+			RouteName:   "ns/free-model-route",
+			Type:        filterapi.LLMRequestCostTypeCEL,
+			CEL:         "0",
+		},
+		{
+			MetadataKey: "billing_charges",
+			RouteName:   "ns/paid-model-route",
+			Type:        filterapi.LLMRequestCostTypeCEL,
+			CEL:         "input_tokens + output_tokens",
+		},
+	}
+	requireLLMRequestCostsEqual(t, wantLLMRequestCosts, fc.LLMRequestCosts)
+
+	freeProg, err := llmcostcel.NewProgram(wantLLMRequestCosts[0].CEL)
+	require.NoError(t, err)
+	val, err := llmcostcel.EvaluateProgram(freeProg, "model", "free-backend", "ns/free-model-route", 10, 0, 0, 5, 15, 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), val)
+	paidProg, err := llmcostcel.NewProgram(wantLLMRequestCosts[1].CEL)
+	require.NoError(t, err)
+	val, err = llmcostcel.EvaluateProgram(paidProg, "model", "paid-backend", "ns/paid-model-route", 10, 0, 0, 5, 15, 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(15), val)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostAggregation_DuplicateMetadataKey
+// verifies that duplicate metadata keys keep "last definition wins" semantics.
+func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostAggregation_DuplicateMetadataKey(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-with-duplicate-metadata", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "test-backend"}}},
+				},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeInputToken},
+					{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeOutputToken},
+				},
+			},
+		},
+	}
+
+	err := fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	})
+	require.NoError(t, err)
+
+	const someNamespace = "some-namespace"
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective, "expected filter config to be effective")
+
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+	// Controller deduplicates same (metadataKey, routeName): last definition wins.
+	wantLLMRequestCosts := []filterapi.LLMRequestCost{
+		{
+			MetadataKey: "billing_charges",
+			RouteName:   "ns/route-with-duplicate-metadata",
+			Type:        filterapi.LLMRequestCostTypeOutputToken,
+		},
+	}
+	requireLLMRequestCostsEqual(t, wantLLMRequestCosts, fc.LLMRequestCosts)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression tests that invalid CEL
+// expressions in LLMRequestCosts cause an error during reconciliation.
+func TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-with-invalid-cel", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "test-backend"}}},
+				},
+				LLMRequestCosts: []aigv1b1.LLMRequestCost{
+					// Invalid CEL expression - syntax error
+					{MetadataKey: "cost", Type: aigv1b1.LLMRequestCostTypeCEL, CEL: ptr.To("invalid syntax (((")},
+				},
+			},
+		},
+	}
+
+	// Create the backend
+	err := fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	})
+	require.NoError(t, err)
+
+	const someNamespace = "some-namespace"
+	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid CEL expression")
+}
+
 func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const gwNamespace = "ns"
 	now := metav1.Now()
 
 	// Create routes: one active, one being deleted.
-	routes := []aigv1a1.AIGatewayRoute{
+	routes := []aigv1b1.AIGatewayRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "active-route",
 				Namespace:         gwNamespace,
 				DeletionTimestamp: nil, // Active route.
 			},
-			Spec: aigv1a1.AIGatewayRouteSpec{
-				Rules: []aigv1a1.AIGatewayRouteRule{
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
 					{
-						BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
 							{Name: "apple"},
 						},
-						Matches: []aigv1a1.AIGatewayRouteRuleMatch{
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
 							{
 								Headers: []gwapiv1.HTTPHeaderMatch{
 									{
@@ -338,13 +873,13 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 				Namespace:         gwNamespace,
 				DeletionTimestamp: &now, // Route being deleted.
 			},
-			Spec: aigv1a1.AIGatewayRouteSpec{
-				Rules: []aigv1a1.AIGatewayRouteRule{
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
 					{
-						BackendRefs: []aigv1a1.AIGatewayRouteRuleBackendRef{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
 							{Name: "orange"},
 						},
-						Matches: []aigv1a1.AIGatewayRouteRuleMatch{
+						Matches: []aigv1b1.AIGatewayRouteRuleMatch{
 							{
 								Headers: []gwapiv1.HTTPHeaderMatch{
 									{
@@ -361,16 +896,16 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 	}
 
 	// Create AIServiceBackends for both routes.
-	for _, backend := range []*aigv1a1.AIServiceBackend{
+	for _, backend := range []*aigv1b1.AIServiceBackend{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: gwNamespace},
-			Spec: aigv1a1.AIServiceBackendSpec{
+			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend2", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
 			},
 		},
@@ -380,20 +915,43 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 	}
 
 	const someNamespace = "some-namespace"
-	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
+	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
 	// Reconcile filter config secret.
-	err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid")
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
 	require.NoError(t, err)
+	require.True(t, effective, "expected filter config to be effective")
 
 	// Verify the secret was created and only contains data from the active route.
 	secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
 	require.NoError(t, err)
-	configStr, ok := secret.StringData[FilterConfigKeyInSecret]
+	indexRaw := ""
+	ok := false
+	if b, exists := secret.Data[FilterConfigBundleIndexKey]; exists {
+		indexRaw = string(b)
+		ok = true
+	} else if s, exists := secret.StringData[FilterConfigBundleIndexKey]; exists {
+		indexRaw = s
+		ok = true
+	}
 	require.True(t, ok)
-
-	var fc filterapi.Config
-	require.NoError(t, yaml.Unmarshal([]byte(configStr), &fc))
+	index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+	require.NoError(t, err)
+	cfg, err := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+		partSecret, getErr := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		if b, exists := partSecret.Data[FilterConfigBundlePartKey]; exists {
+			return b, nil
+		}
+		if b, exists := partSecret.StringData[FilterConfigBundlePartKey]; exists {
+			return []byte(b), nil
+		}
+		return nil, fmt.Errorf("missing key %q in part secret %s", FilterConfigBundlePartKey, part.Name)
+	})
+	require.NoError(t, err)
+	fc := *cfg
 
 	// Should only have one model (from the active route), not two (deleted route should be skipped).
 	require.Len(t, fc.Models, 1)
@@ -408,27 +966,26 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const namespace = "ns"
-	for _, bsp := range []*aigv1a1.BackendSecurityPolicy{
+	for _, bsp := range []*aigv1b1.BackendSecurityPolicy{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "bsp-apikey", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeAPIKey,
-				APIKey: &aigv1a1.BackendSecurityPolicyAPIKey{
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAPIKey,
+				APIKey: &aigv1b1.BackendSecurityPolicyAPIKey{
 					SecretRef: &gwapiv1.SecretObjectReference{Name: "api-key-secret"},
 				},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "aws-credentials-file", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeAWSCredentials,
-				AWSCredentials: &aigv1a1.BackendSecurityPolicyAWSCredentials{
-					CredentialsFile: &aigv1a1.AWSCredentialsFile{
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+				AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{
+					CredentialsFile: &aigv1b1.AWSCredentialsFile{
 						SecretRef: &gwapiv1.SecretObjectReference{Name: "aws-credentials-file-secret"},
 					},
 				},
@@ -436,18 +993,18 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "aws-oidc", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeAWSCredentials,
-				AWSCredentials: &aigv1a1.BackendSecurityPolicyAWSCredentials{
-					OIDCExchangeToken: &aigv1a1.AWSOIDCExchangeToken{},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+				AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{
+					OIDCExchangeToken: &aigv1b1.AWSOIDCExchangeToken{},
 				},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "aws-default-chain", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeAWSCredentials,
-				AWSCredentials: &aigv1a1.BackendSecurityPolicyAWSCredentials{
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+				AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{
 					Region: "us-west-2",
 					// No CredentialsFile or OIDCExchangeToken - uses default credential chain
 				},
@@ -455,17 +1012,17 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "azure-oidc", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type:             aigv1a1.BackendSecurityPolicyTypeAzureCredentials,
-				AzureCredentials: &aigv1a1.BackendSecurityPolicyAzureCredentials{},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type:             aigv1b1.BackendSecurityPolicyTypeAzureCredentials,
+				AzureCredentials: &aigv1b1.BackendSecurityPolicyAzureCredentials{},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "gcp-sa-key-file", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeGCPCredentials,
-				GCPCredentials: &aigv1a1.BackendSecurityPolicyGCPCredentials{
-					CredentialsFile: &aigv1a1.GCPCredentialsFile{
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+				GCPCredentials: &aigv1b1.BackendSecurityPolicyGCPCredentials{
+					CredentialsFile: &aigv1b1.GCPCredentialsFile{
 						SecretRef: &gwapiv1.SecretObjectReference{Name: "gcp-sa-key-file"},
 					},
 				},
@@ -473,20 +1030,30 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "gcp-wif", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeGCPCredentials,
-				GCPCredentials: &aigv1a1.BackendSecurityPolicyGCPCredentials{
-					WorkloadIdentityFederationConfig: &aigv1a1.GCPWorkloadIdentityFederationConfig{
-						OIDCExchangeToken: aigv1a1.GCPOIDCExchangeToken{},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+				GCPCredentials: &aigv1b1.BackendSecurityPolicyGCPCredentials{
+					WorkloadIdentityFederationConfig: &aigv1b1.GCPWorkloadIdentityFederationConfig{
+						OIDCExchangeToken: aigv1b1.GCPOIDCExchangeToken{},
 					},
 				},
 			},
 		},
 		{
+			ObjectMeta: metav1.ObjectMeta{Name: "gcp-adc", Namespace: namespace},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+				GCPCredentials: &aigv1b1.BackendSecurityPolicyGCPCredentials{
+					ProjectName: "test-project",
+					Region:      "us-central1",
+				},
+			},
+		},
+		{
 			ObjectMeta: metav1.ObjectMeta{Name: "bsp-anthropic-apikey", Namespace: namespace},
-			Spec: aigv1a1.BackendSecurityPolicySpec{
-				Type: aigv1a1.BackendSecurityPolicyTypeAnthropicAPIKey,
-				AnthropicAPIKey: &aigv1a1.BackendSecurityPolicyAnthropicAPIKey{
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey,
+				AnthropicAPIKey: &aigv1b1.BackendSecurityPolicyAnthropicAPIKey{
 					SecretRef: &gwapiv1.SecretObjectReference{Name: "api-key-secret"},
 				},
 			},
@@ -568,6 +1135,15 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 			},
 		},
 		{
+			bspName: "gcp-adc",
+			exp: &filterapi.BackendAuth{
+				GCPAuth: &filterapi.GCPAuth{
+					Region:      "us-central1",
+					ProjectName: "test-project",
+				},
+			},
+		},
+		{
 			bspName: "bsp-anthropic-apikey",
 			exp: &filterapi.BackendAuth{
 				AnthropicAPIKey: &filterapi.AnthropicAPIKeyAuth{Key: "thisisapikey"},
@@ -575,7 +1151,7 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 		},
 	} {
 		t.Run(tc.bspName, func(t *testing.T) {
-			bsp := &aigv1a1.BackendSecurityPolicy{}
+			bsp := &aigv1b1.BackendSecurityPolicy{}
 			err := fakeClient.Get(t.Context(), client.ObjectKey{
 				Name:      tc.bspName,
 				Namespace: namespace,
@@ -590,8 +1166,8 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 
 func TestGatewayController_bspToFilterAPIBackendAuth_ErrorCases(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
-	c := NewGatewayController(fakeClient, fake2.NewClientset(), ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, fake2.NewClientset(), ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -599,17 +1175,17 @@ func TestGatewayController_bspToFilterAPIBackendAuth_ErrorCases(t *testing.T) {
 	tests := []struct {
 		name          string
 		bspName       string
-		bsp           *aigv1a1.BackendSecurityPolicy
+		bsp           *aigv1b1.BackendSecurityPolicy
 		expectedError string
 	}{
 		{
 			name:    "api key type with missing secret",
 			bspName: "api-key-bsp",
-			bsp: &aigv1a1.BackendSecurityPolicy{
+			bsp: &aigv1b1.BackendSecurityPolicy{
 				ObjectMeta: metav1.ObjectMeta{Name: "api-key-bsp", Namespace: namespace},
-				Spec: aigv1a1.BackendSecurityPolicySpec{
-					Type: aigv1a1.BackendSecurityPolicyTypeAPIKey,
-					APIKey: &aigv1a1.BackendSecurityPolicyAPIKey{
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeAPIKey,
+					APIKey: &aigv1b1.BackendSecurityPolicyAPIKey{
 						SecretRef: &gwapiv1.SecretObjectReference{
 							Name: "missing-secret",
 						},
@@ -621,13 +1197,13 @@ func TestGatewayController_bspToFilterAPIBackendAuth_ErrorCases(t *testing.T) {
 		{
 			name:    "aws credentials with credentials file missing secret",
 			bspName: "aws-creds-file-bsp",
-			bsp: &aigv1a1.BackendSecurityPolicy{
+			bsp: &aigv1b1.BackendSecurityPolicy{
 				ObjectMeta: metav1.ObjectMeta{Name: "aws-creds-file-bsp", Namespace: namespace},
-				Spec: aigv1a1.BackendSecurityPolicySpec{
-					Type: aigv1a1.BackendSecurityPolicyTypeAWSCredentials,
-					AWSCredentials: &aigv1a1.BackendSecurityPolicyAWSCredentials{
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+					AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{
 						Region: "us-west-2",
-						CredentialsFile: &aigv1a1.AWSCredentialsFile{
+						CredentialsFile: &aigv1b1.AWSCredentialsFile{
 							SecretRef: &gwapiv1.SecretObjectReference{
 								Name: "missing-aws-secret",
 							},
@@ -649,10 +1225,329 @@ func TestGatewayController_bspToFilterAPIBackendAuth_ErrorCases(t *testing.T) {
 	}
 }
 
+func TestResolveCredentialOverride(t *testing.T) {
+	truePtr := ptr.To(true)
+	falsePtr := ptr.To(false)
+
+	t.Run("nil override returns nil", func(t *testing.T) {
+		result, err := resolveCredentialOverride(aigv1b1.BackendSecurityPolicyTypeAPIKey, nil, true)
+		require.NoError(t, err)
+		require.Nil(t, result)
+	})
+
+	t.Run("fromRequestHeaders default header for APIKey", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-aigw-api-key", result.HeaderName)
+		require.Equal(t, []string{"x-aigw-api-key"}, result.InputHeadersToRemove)
+		require.True(t, result.FallbackToConfigured)
+	})
+
+	t.Run("fromRequestHeaders custom header name", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{
+					Header:               "X-My-Key",
+					FallbackToConfigured: falsePtr,
+				},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-my-key", result.HeaderName, "header name should be lowercased")
+		require.False(t, result.FallbackToConfigured)
+	})
+
+	t.Run("fromRequestHeaders default header for AnthropicAPIKey", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-aigw-anthropic-api-key", result.HeaderName)
+	})
+
+	t.Run("fromDynamicMetadata", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromDynamicMetadata: &aigv1b1.CredentialOverrideFromDynamicMetadata{
+					Namespace:            "envoy.filters.http.ext_authz",
+					Key:                  "upstream_key",
+					FallbackToConfigured: truePtr,
+				},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "envoy.filters.http.ext_authz", result.DynamicMetadataNamespace)
+		require.Equal(t, "upstream_key", result.DynamicMetadataKey)
+		require.True(t, result.FallbackToConfigured)
+		require.Empty(t, result.InputHeadersToRemove, "dynamic metadata source has no strip header")
+	})
+
+	t.Run("fromDynamicMetadata default key for GCPCredentials", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromDynamicMetadata: &aigv1b1.CredentialOverrideFromDynamicMetadata{
+					Namespace: "my.filter",
+				},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-aigw-gcp-access-token", result.DynamicMetadataKey)
+	})
+
+	t.Run("fromRequestHeaders for AWSCredentials derives three headers from a prefix", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		// HeaderName is the prefix; backendauth derives the same three names.
+		require.Equal(t, "x-aigw-aws-", result.HeaderName)
+		require.Equal(t, []string{
+			"x-aigw-aws-access-key-id",
+			"x-aigw-aws-secret-access-key",
+			"x-aigw-aws-session-token",
+		}, result.InputHeadersToRemove)
+	})
+
+	t.Run("fromRequestHeaders for AWSCredentials honours a custom prefix", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{Header: "X-Tenant-AWS-"},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-tenant-aws-", result.HeaderName, "prefix is lowercased like any header name")
+		require.Equal(t, []string{
+			"x-tenant-aws-access-key-id",
+			"x-tenant-aws-secret-access-key",
+			"x-tenant-aws-session-token",
+		}, result.InputHeadersToRemove)
+	})
+
+	t.Run("fromDynamicMetadata default key for AWSCredentials is not the header prefix", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromDynamicMetadata: &aigv1b1.CredentialOverrideFromDynamicMetadata{Namespace: "my.filter"},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		// The metadata value is one struct holding all three inputs, so it is a key, not a prefix.
+		require.Equal(t, "x-aigw-aws-credentials", result.DynamicMetadataKey)
+		require.Empty(t, result.InputHeadersToRemove)
+	})
+
+	t.Run("fallbackToConfigured=true with no static credential returns error", func(t *testing.T) {
+		_, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{
+					FallbackToConfigured: truePtr,
+				},
+			},
+			false, // no static credential
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "fallbackToConfigured=true requires a static credential")
+	})
+
+	t.Run("fallbackToConfigured=false with no static credential is valid", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{
+					FallbackToConfigured: falsePtr,
+				},
+			},
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.False(t, result.FallbackToConfigured)
+	})
+}
+
+func TestGatewayController_bspToFilterAPIBackendAuth_WithOverride(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const namespace = "ns"
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "bsp-with-override", Namespace: namespace},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type: aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			APIKey: &aigv1b1.BackendSecurityPolicyAPIKey{
+				SecretRef: &gwapiv1.SecretObjectReference{Name: "api-key-secret"},
+			},
+			CredentialOverride: &aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+		},
+	}))
+	_, err := kube.CoreV1().Secrets(namespace).Create(t.Context(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-key-secret", Namespace: namespace},
+		StringData: map[string]string{apiKeyInSecret: "thisisapikey"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	bsp := &aigv1b1.BackendSecurityPolicy{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKey{Name: "bsp-with-override", Namespace: namespace}, bsp))
+
+	auth, err := c.bspToFilterAPIBackendAuth(t.Context(), bsp)
+	require.NoError(t, err)
+	require.NotNil(t, auth.APIKey)
+	require.Equal(t, "thisisapikey", auth.APIKey.Key)
+	require.NotNil(t, auth.CredentialOverride)
+	require.Equal(t, "x-aigw-api-key", auth.CredentialOverride.HeaderName)
+	require.Equal(t, []string{"x-aigw-api-key"}, auth.CredentialOverride.InputHeadersToRemove)
+	require.True(t, auth.CredentialOverride.FallbackToConfigured)
+}
+
+func TestStripCredentialOverrideInputHeaders(t *testing.T) {
+	awsOverride := func() *filterapi.BackendAuth {
+		return &filterapi.BackendAuth{
+			AWSAuth: &filterapi.AWSAuth{Region: "us-east-1"},
+			CredentialOverride: &filterapi.CredentialOverride{
+				HeaderName: "x-aigw-aws-",
+				InputHeadersToRemove: []string{
+					"x-aigw-aws-access-key-id",
+					"x-aigw-aws-secret-access-key",
+					"x-aigw-aws-session-token",
+				},
+			},
+		}
+	}
+
+	t.Run("AWS strips all three credential headers", func(t *testing.T) {
+		b := &filterapi.Backend{Auth: awsOverride()}
+		stripCredentialOverrideInputHeaders(b)
+		require.NotNil(t, b.HeaderMutation)
+		require.Equal(t, []string{
+			"x-aigw-aws-access-key-id",
+			"x-aigw-aws-secret-access-key",
+			"x-aigw-aws-session-token",
+		}, b.HeaderMutation.Remove)
+	})
+
+	t.Run("appends to an existing remove list rather than replacing it", func(t *testing.T) {
+		b := &filterapi.Backend{
+			Auth:           awsOverride(),
+			HeaderMutation: &filterapi.HTTPHeaderMutation{Remove: []string{"x-user-supplied"}},
+		}
+		stripCredentialOverrideInputHeaders(b)
+		require.Equal(t, []string{
+			"x-user-supplied",
+			"x-aigw-aws-access-key-id",
+			"x-aigw-aws-secret-access-key",
+			"x-aigw-aws-session-token",
+		}, b.HeaderMutation.Remove)
+	})
+
+	t.Run("single-valued for non-AWS types", func(t *testing.T) {
+		b := &filterapi.Backend{Auth: &filterapi.BackendAuth{
+			APIKey: &filterapi.APIKeyAuth{Key: "static"},
+			CredentialOverride: &filterapi.CredentialOverride{
+				HeaderName:           "x-aigw-api-key",
+				InputHeadersToRemove: []string{"x-aigw-api-key"},
+			},
+		}}
+		stripCredentialOverrideInputHeaders(b)
+		require.Equal(t, []string{"x-aigw-api-key"}, b.HeaderMutation.Remove)
+	})
+
+	t.Run("metadata source strips nothing", func(t *testing.T) {
+		// Out-of-band credential: no header to remove, no HeaderMutation to materialize.
+		b := &filterapi.Backend{Auth: &filterapi.BackendAuth{
+			AWSAuth: &filterapi.AWSAuth{Region: "us-east-1"},
+			CredentialOverride: &filterapi.CredentialOverride{
+				DynamicMetadataNamespace: "envoy.filters.http.ext_authz",
+				DynamicMetadataKey:       "x-aigw-aws-credentials",
+			},
+		}}
+		stripCredentialOverrideInputHeaders(b)
+		require.Nil(t, b.HeaderMutation)
+	})
+
+	t.Run("no auth and no override are no-ops", func(t *testing.T) {
+		b := &filterapi.Backend{}
+		stripCredentialOverrideInputHeaders(b)
+		require.Nil(t, b.HeaderMutation)
+
+		b = &filterapi.Backend{Auth: &filterapi.BackendAuth{APIKey: &filterapi.APIKeyAuth{Key: "static"}}}
+		stripCredentialOverrideInputHeaders(b)
+		require.Nil(t, b.HeaderMutation)
+	})
+}
+
+func TestGatewayController_bspToFilterAPIBackendAuth_AWSWithOverride(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const namespace = "ns"
+
+	// No credentialsFile and no OIDC: the extproc uses the default credential chain. This is the
+	// IRSA shape, with no Secret for the controller to read, so it also covers fallbackToConfigured
+	// defaulting to true without one.
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "aws-irsa-with-override", Namespace: namespace},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type:           aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+			AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{Region: "us-east-1"},
+			CredentialOverride: &aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromDynamicMetadata: &aigv1b1.CredentialOverrideFromDynamicMetadata{
+					Namespace: "envoy.filters.http.ext_authz",
+				},
+			},
+		},
+	}))
+
+	bsp := &aigv1b1.BackendSecurityPolicy{}
+	require.NoError(t, fakeClient.Get(t.Context(),
+		client.ObjectKey{Name: "aws-irsa-with-override", Namespace: namespace}, bsp))
+
+	auth, err := c.bspToFilterAPIBackendAuth(t.Context(), bsp)
+	require.NoError(t, err)
+	require.NotNil(t, auth.AWSAuth)
+	require.Equal(t, "us-east-1", auth.AWSAuth.Region)
+	require.Empty(t, auth.AWSAuth.CredentialFileLiteral)
+	// The AWS branch used to return before the override was projected.
+	require.NotNil(t, auth.CredentialOverride)
+	require.Equal(t, "envoy.filters.http.ext_authz", auth.CredentialOverride.DynamicMetadataNamespace)
+	require.Equal(t, "x-aigw-aws-credentials", auth.CredentialOverride.DynamicMetadataKey)
+	require.True(t, auth.CredentialOverride.FallbackToConfigured)
+}
+
 func TestGatewayController_GetSecretData_ErrorCases(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
-	c := NewGatewayController(fakeClient, fake2.NewClientset(), ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, fake2.NewClientset(), ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	ctx := context.Background()
 	namespace := "test-namespace"
@@ -662,6 +1557,99 @@ func TestGatewayController_GetSecretData_ErrorCases(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "secrets \"missing-secret\" not found")
 	require.Empty(t, result)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_BailsOnContextCanceled pins that a cancelled
+// context aborts the reconcile instead of publishing a filter config in which the backend has no
+// credentials. Skipping the backend, as an unresolvable policy does, would look identical on the wire
+// but silently strip auth from live traffic until something triggers another reconcile.
+func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextCanceled(t *testing.T) {
+	const gwNamespace, configNamespace = "ns", "some-namespace"
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	// Fail only the credential read. Failing every Secret Get would also break the config-bundle
+	// write and the reconcile would error regardless, which would make this test pass vacuously.
+	kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if get, ok := a.(k8stesting.GetAction); ok && get.GetName() == "api-key" {
+			return true, nil, context.Canceled
+		}
+		return false, nil, nil
+	})
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}))
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "bsp", Namespace: gwNamespace},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type:   aigv1b1.BackendSecurityPolicyTypeAPIKey,
+			APIKey: &aigv1b1.BackendSecurityPolicyAPIKey{SecretRef: &gwapiv1.SecretObjectReference{Name: "api-key"}},
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+				{Kind: "AIServiceBackend", Group: "aigateway.envoyproxy.io", Name: "apple"},
+			},
+		},
+	}))
+
+	routes := []aigv1b1.AIGatewayRoute{{
+		ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{
+			{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}},
+		}},
+	}}
+
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil)
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
+		FilterConfigBundleIndexSecretName("gw", gwNamespace), metav1.GetOptions{})
+	require.Error(t, getErr, "no filter config may be published when the credential could not be read")
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_BailsOnContextDeadlineReadingBackend is the same
+// invariant one step earlier: an interrupted read of the AIServiceBackend must not publish a config
+// with that backend silently missing. Reads of AIServiceBackend go through the cached client, so this
+// is the rare unsynced-informer case rather than a network call, hence the interceptor.
+func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextDeadlineReadingBackend(t *testing.T) {
+	const gwNamespace, configNamespace = "ns", "some-namespace"
+	inner, ok := requireNewFakeClientWithIndexes(t).(client.WithWatch)
+	require.True(t, ok)
+	fakeClient := interceptor.NewClient(inner, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isBackend := obj.(*aigv1b1.AIServiceBackend); isBackend {
+				return context.DeadlineExceeded
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	require.NoError(t, inner.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}))
+
+	routes := []aigv1b1.AIGatewayRoute{{
+		ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{
+			{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}},
+		}},
+	}}
+
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
+		FilterConfigBundleIndexSecretName("gw", gwNamespace), metav1.GetOptions{})
+	require.Error(t, getErr, "no filter config may be published when the backend could not be read")
 }
 
 func TestGatewayController_annotateGatewayPods(t *testing.T) {
@@ -676,8 +1664,9 @@ func TestGatewayController_annotateGatewayPods(t *testing.T) {
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
 	const v2Container = "ai-gateway-extproc:v2"
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-		v2Container, false, nil, true)
+	const logLevel = "info"
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		v2Container, logLevel, false, nil, true)
 	t.Run("pod with extproc", func(t *testing.T) {
 		pod, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -685,18 +1674,50 @@ func TestGatewayController_annotateGatewayPods(t *testing.T) {
 				Namespace: egNamespace,
 				Labels:    labels,
 			},
-			Spec: corev1.PodSpec{
-				// This indicates that the pod has extproc.
-				Containers: []corev1.Container{{Name: mutationNamePrefix + "foo"}},
-			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: c.image},
+			}},
 		}, metav1.CreateOptions{})
 		require.NoError(t, err)
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, nil, "some-uuid")
+		hasEffectiveRoute := true
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, nil, "some-uuid", hasEffectiveRoute, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
 		annotated, err := kube.CoreV1().Pods(egNamespace).Get(t.Context(), "pod1", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", annotated.Annotations[aigatewayUUIDAnnotationKey])
+
+		// We also need to create a parent deployment for the pod.
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "foo-dep",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// Since it has already a sidecar container, passing the hasEffectiveRoute=false should result in adding an annotation to the deployment.
+		hasEffectiveRoute = false
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "another-uuid", hasEffectiveRoute, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Check the deployment's pod template has the annotation.
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "foo-dep", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "another-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
 	})
 
 	t.Run("pod without extproc", func(t *testing.T) {
@@ -717,12 +1738,34 @@ func TestGatewayController_annotateGatewayPods(t *testing.T) {
 				Namespace: egNamespace,
 				Labels:    labels,
 			},
-			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
 		}, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid")
+		// When there's no effective route, this should not add the annotation to the deployment.
+		hasEffectiveRoute := false
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", hasEffectiveRoute, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists := deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
+
+		// When there's an effective route, this should add the annotation to the deployment.
+		hasEffectiveRoute = true
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", hasEffectiveRoute, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
 		// Check the deployment's pod template has the annotation.
 		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
@@ -752,15 +1795,25 @@ func TestGatewayController_annotateGatewayPods(t *testing.T) {
 				Namespace: egNamespace,
 				Labels:    labels,
 			},
-			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
 		}, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid")
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", true, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
 		// Check the deployment's pod template has the annotation.
-		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment2", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
 
@@ -770,13 +1823,611 @@ func TestGatewayController_annotateGatewayPods(t *testing.T) {
 		require.NoError(t, err)
 
 		// Call annotateGatewayPods again but the deployment's pod template should not be updated again.
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid")
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", true, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
-		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment2", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
 	})
+
+	t.Run("pod with extproc but different log level", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod4",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{
+				// The old v1 container image is used here to simulate the pod without extproc.
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-log-level", "debug"}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// We also need to create a parent deployment for the pod.
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment3",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", true, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Check the deployment's pod template has the annotation.
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment3", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+
+		// Simulate the pod's container args is updated to the new log level.
+		pod.Spec.Containers[0].Args = []string{"-log-level", logLevel}
+		pod, err = kube.CoreV1().Pods(egNamespace).Update(t.Context(), pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		// Call annotateGatewayPods again but the deployment's pod template should not be updated again.
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", true, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment3", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("pod with extproc but missing mcpAddr", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod5",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel, "-adminPort", "1064"}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment4",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// Call with needMCP=true - should trigger rollout due to missing -mcpAddr
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "some-uuid", true, true, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Check the deployment's pod template has the annotation (rollout triggered).
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment4", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+
+		// Simulate new pod created after rollout with -mcpAddr present
+		pod.Spec.InitContainers[0].Args = []string{"-logLevel", logLevel, "-mcpAddr", ":9856", "-adminPort", "1064"}
+		pod, err = kube.CoreV1().Pods(egNamespace).Update(t.Context(), pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		// Call annotateGatewayPods again - should NOT trigger another rollout
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "another-uuid", true, true, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Deployment annotation should remain unchanged (no new rollout)
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment4", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("deployment rollout in progress should requeue", func(t *testing.T) {
+		// Create pod with sidecar
+		podWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-with-sidecar",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// Create pod without sidecar
+		podWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-without-sidecar",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment-inconsistent",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+		// Simulate rollout in progress.
+		deployment.Generation = 2
+		deployment.Status.ObservedGeneration = 1
+
+		// Call with rollout in progress - should requeue.
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*podWithSidecar, *podWithoutSidecar},
+			[]appsv1.Deployment{*deployment},
+			nil,
+			"some-uuid",
+			true,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{RequeueAfter: 5 * time.Second}, result)
+
+		// Deployment should NOT be updated during inconsistent state
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment-inconsistent", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists := deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists, "deployment should not be updated when pods are inconsistent")
+	})
+
+	t.Run("inconsistent pods without rollout should force rollout", func(t *testing.T) {
+		podWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-with-sidecar-force",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		podWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-without-sidecar-force",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment-force-rollout",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*podWithSidecar, *podWithoutSidecar},
+			[]appsv1.Deployment{*deployment},
+			nil,
+			"force-rollout-uuid",
+			true,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment-force-rollout", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "force-rollout-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("terminating pods are ignored for consistency and annotation", func(t *testing.T) {
+		now := metav1.Now()
+		terminatingPodWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "pod-terminating-sidecar",
+				Namespace:         egNamespace,
+				Labels:            labels,
+				DeletionTimestamp: &now,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), terminatingPodWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		activePodWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-active-without-sidecar",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), activePodWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		deployment, err := kube.AppsV1().Deployments(egNamespace).Create(t.Context(), &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment-ignore-terminating",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: ptr.To(int32(1)),
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+			},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: 1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+				AvailableReplicas:  1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// Since terminating pod is ignored, active pods are consistent (without sidecar),
+		// so no forced rollout should happen when there are no effective routes.
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*terminatingPodWithSidecar, *activePodWithoutSidecar},
+			[]appsv1.Deployment{*deployment},
+			nil,
+			"ignore-terminating-uuid",
+			false,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Terminating pod should not be patched.
+		terminatingPodWithSidecar, err = kube.CoreV1().Pods(egNamespace).Get(t.Context(), "pod-terminating-sidecar", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists := terminatingPodWithSidecar.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
+
+		// Deployment should not roll out in this case.
+		deployment, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "deployment-ignore-terminating", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists = deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
+	})
+
+	t.Run("rollout in progress checks deployment status", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			deployments []appsv1.Deployment
+			expected    bool
+		}{
+			{
+				name: "observed generation behind generation requeues",
+				deployments: []appsv1.Deployment{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "dep", Generation: 2},
+						Spec:       appsv1.DeploymentSpec{Replicas: ptr.To(int32(1))},
+						Status: appsv1.DeploymentStatus{
+							ObservedGeneration: 1,
+							UpdatedReplicas:    1,
+							ReadyReplicas:      1,
+							AvailableReplicas:  1,
+						},
+					},
+				},
+				expected: true,
+			},
+			{
+				name: "old-template pods still present requeues",
+				deployments: []appsv1.Deployment{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "dep", Generation: 1},
+						Spec:       appsv1.DeploymentSpec{Replicas: ptr.To(int32(2))},
+						Status: appsv1.DeploymentStatus{
+							ObservedGeneration: 1,
+							Replicas:           3,
+							UpdatedReplicas:    2,
+							ReadyReplicas:      3,
+							AvailableReplicas:  3,
+						},
+					},
+				},
+				expected: true,
+			},
+			{
+				name: "fully ready deployment does not requeue",
+				deployments: []appsv1.Deployment{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "dep", Generation: 1},
+						Spec:       appsv1.DeploymentSpec{Replicas: ptr.To(int32(2))},
+						Status: appsv1.DeploymentStatus{
+							ObservedGeneration: 1,
+							UpdatedReplicas:    2,
+							ReadyReplicas:      2,
+							AvailableReplicas:  2,
+						},
+					},
+				},
+				expected: false,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := isRolloutInProgress(tt.deployments, nil)
+				require.Equal(t, tt.expected, got)
+			})
+		}
+	})
+}
+
+// TestGatewayController_checkPodHasSideCar exercises both the init-container
+// (extProcAsSideCar=true) and the regular-container (extProcAsSideCar=false)
+// branches of checkPodHasSideCar, plus the logLevel mismatch, missing -mcpAddr,
+// and GatewayConfig-resolved image signals.
+func TestGatewayController_checkPodHasSideCar(t *testing.T) {
+	egNamespace := "envoy-gateway-system"
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+
+	const image = "docker.io/envoyproxy/ai-gateway-extproc:latest"
+	const logLevel = "info"
+
+	extProcContainer := func(args ...string) corev1.Container {
+		return corev1.Container{Name: extProcContainerName, Image: image, Args: args}
+	}
+
+	t.Run("sidecar mode: matches", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, true)
+		pod := &corev1.Pod{
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{extProcContainer("-logLevel", logLevel)}},
+		}
+		hasSideCar := c.checkPodHasSideCar(pod, false, c.image)
+		require.True(t, hasSideCar)
+	})
+
+	t.Run("sidecar mode: logLevel mismatch triggers rollout", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, true)
+		pod := &corev1.Pod{Spec: corev1.PodSpec{InitContainers: []corev1.Container{extProcContainer("-logLevel", "debug")}}}
+		hasSideCar := c.checkPodHasSideCar(pod, false, c.image)
+		require.False(t, hasSideCar, "logLevel mismatch must clear hasSideCar")
+	})
+
+	t.Run("sidecar mode: uses GatewayConfig resolved image", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, true)
+		input := extProcContainerInput{gatewayConfig: testGatewayConfig}
+		desiredImage := c.extProcImage(input)
+		pod := &corev1.Pod{Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+			{Name: extProcContainerName, Image: desiredImage, Args: []string{"-logLevel", logLevel}},
+		}}}
+		hasSideCar := c.checkPodHasSideCar(pod, false, desiredImage)
+		require.True(t, hasSideCar)
+
+		hasSideCar = c.checkPodHasSideCar(pod, false, image)
+		require.False(t, hasSideCar, "global image must not be used when GatewayConfig resolves a different image")
+	})
+
+	t.Run("container mode: matches", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, false)
+		pod := &corev1.Pod{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{extProcContainer("-logLevel", logLevel)}},
+		}
+		hasSideCar := c.checkPodHasSideCar(pod, false, c.image)
+		require.True(t, hasSideCar)
+	})
+
+	t.Run("container mode: needMCP without -mcpAddr triggers rollout", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, false)
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{extProcContainer("-logLevel", logLevel)}}}
+		hasSideCar := c.checkPodHasSideCar(pod, true, c.image)
+		require.False(t, hasSideCar, "missing -mcpAddr when MCP is needed must trigger rollout")
+	})
+
+	t.Run("container mode: needMCP with -mcpAddr keeps sidecar", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, false)
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{
+			extProcContainer("-logLevel", logLevel, "-mcpAddr", ":808"),
+		}}}
+		hasSideCar := c.checkPodHasSideCar(pod, true, c.image)
+		require.True(t, hasSideCar, "with -mcpAddr present the sidecar is up to date")
+	})
+
+	t.Run("container mode: logLevel mismatch triggers rollout", func(t *testing.T) {
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, egNamespace, image, logLevel, false, nil, false)
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{extProcContainer("-logLevel", "debug")}}}
+		hasSideCar := c.checkPodHasSideCar(pod, false, c.image)
+		require.False(t, hasSideCar, "logLevel mismatch must clear hasSideCar")
+	})
+}
+
+func TestGatewayController_annotateGatewayPods_ConfigHashDrift(t *testing.T) {
+	egNamespace := "envoy-gateway-system"
+	gwName, gwNamespace := "gw", "ns"
+	labels := map[string]string{
+		egOwningGatewayNameLabel:      gwName,
+		egOwningGatewayNamespaceLabel: gwNamespace,
+	}
+
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+
+	const image = "docker.io/envoyproxy/ai-gateway-extproc:latest"
+	opts := newTestExtProcOptions(image, "info")
+	baseBuilder := newExtProcBuilder(opts, true, ctrl.Log)
+	c := NewGatewayController(fakeClient, kube, ctrl.Log, egNamespace, false, func() string { return "test-uuid" }, opts, true)
+	baseHash := baseBuilder.extProcContainerHash(extProcContainerInput{})
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod-current", Namespace: egNamespace, Labels: labels,
+		},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+			{Name: extProcContainerName, Image: image, Args: []string{"-logLevel", "info"}},
+		}},
+	}
+	_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dep-current", Namespace: egNamespace, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}},
+		},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1, Replicas: 1},
+	}
+	_, err = kube.AppsV1().Deployments(egNamespace).Create(t.Context(), deployment, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// The reconciler writes the desired hash to the pod template so Kubernetes
+	// rolls the workload when injected extproc config changes.
+	result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*deployment}, nil, "uuid-1", true, false, c.image, baseHash)
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+	dep, err := kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "dep-current", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, baseHash, dep.Spec.Template.Annotations[extProcConfigHashAnnotationKey])
+	_, rolled := dep.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+	require.False(t, rolled, "hash-only rollout should not update the UUID rollout trigger")
+
+	// A current template hash should not trigger another template update.
+	result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*dep}, nil, "uuid-2", true, false, c.image, baseHash)
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+	dep, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "dep-current", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, baseHash, dep.Spec.Template.Annotations[extProcConfigHashAnnotationKey])
+	_, rolled = dep.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+	require.False(t, rolled, "current template hash must not trigger UUID rollout")
+
+	// Simulate a controller restart with a changed flag: the desired hash now
+	// differs from the workload template hash.
+	changedOpts := newTestExtProcOptions(image, "info")
+	changedOpts.ExtProcExtraEnvVars = "OTEL_SERVICE_NAME=ai-gateway"
+	changedBuilder := newExtProcBuilder(changedOpts, true, ctrl.Log)
+	desiredHash := changedBuilder.extProcContainerHash(extProcContainerInput{})
+	require.NotEqual(t, baseHash, desiredHash)
+
+	result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, []appsv1.Deployment{*dep}, nil, "uuid-3", true, false, c.image, desiredHash)
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+	dep, err = kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "dep-current", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, desiredHash, dep.Spec.Template.Annotations[extProcConfigHashAnnotationKey],
+		"hash drift must update the template hash so Kubernetes rolls the workload")
+	_, rolled = dep.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+	require.False(t, rolled, "hash drift is handled by the template hash, not the UUID rollout trigger")
+
+	podWithoutSidecar := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-no-sidecar", Namespace: egNamespace, Labels: labels},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy", Image: "envoyproxy/envoy"}}},
+	}
+	_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithoutSidecar, metav1.CreateOptions{})
+	require.NoError(t, err)
+	deployment3 := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dep-mixed-drift", Namespace: egNamespace, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{extProcConfigHashAnnotationKey: baseHash},
+			}},
+		},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1, Replicas: 1},
+	}
+	_, err = kube.AppsV1().Deployments(egNamespace).Create(t.Context(), deployment3, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	result, err = c.annotateGatewayPods(t.Context(),
+		[]corev1.Pod{*podWithoutSidecar, *pod},
+		[]appsv1.Deployment{*deployment3},
+		nil,
+		"uuid-4",
+		true,
+		false,
+		c.image,
+		desiredHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+	dep3, err := kube.AppsV1().Deployments(egNamespace).Get(t.Context(), "dep-mixed-drift", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "uuid-4", dep3.Spec.Template.Annotations[aigatewayUUIDAnnotationKey],
+		"mixed pod state must keep using the UUID rollout trigger")
+	require.Equal(t, desiredHash, dep3.Spec.Template.Annotations[extProcConfigHashAnnotationKey],
+		"mixed pod state plus hash drift should update both template rollout annotations")
+}
+
+// newTestExtProcOptions returns the Options the gateway controller tests use to
+// build a GatewayController. Keeping one Options source makes the controller's
+// internal hash and the test's desired hash identical.
+func newTestExtProcOptions(image, logLevel string) *Options {
+	return &Options{
+		ExtProcImage:                           image,
+		ExtProcLogLevel:                        logLevel,
+		UDSPath:                                "/tmp/extproc.sock",
+		RootPrefix:                             "/",
+		ExtProcMaxRecvMsgSize:                  512 * 1024 * 1024,
+		MCPSessionEncryptionSeed:               "seed",
+		MCPSessionEncryptionIterations:         100,
+		MCPFallbackSessionEncryptionSeed:       "fallback",
+		MCPFallbackSessionEncryptionIterations: 200,
+	}
 }
 
 func TestGatewayController_annotateDaemonSetGatewayPods(t *testing.T) {
@@ -791,8 +2442,9 @@ func TestGatewayController_annotateDaemonSetGatewayPods(t *testing.T) {
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
 	const v2Container = "ai-gateway-extproc:v2"
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-		v2Container, false, nil, true)
+	const logLevel = "info"
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		v2Container, logLevel, false, nil, true)
 
 	t.Run("pod without extproc", func(t *testing.T) {
 		pod, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), &corev1.Pod{
@@ -816,13 +2468,54 @@ func TestGatewayController_annotateDaemonSetGatewayPods(t *testing.T) {
 		}, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid")
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid", true, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
 		// Check the deployment's pod template has the annotation.
 		deployment, err := kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("current sidecar with desired hash patches daemonset template hash only", func(t *testing.T) {
+		pod, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-current-hash",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: c.image, Args: []string{"-logLevel", logLevel}},
+			}},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		dss, err := kube.AppsV1().DaemonSets(egNamespace).Create(t.Context(), &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "daemonset-current-hash",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+			Status: appsv1.DaemonSetStatus{
+				ObservedGeneration:     1,
+				CurrentNumberScheduled: 1,
+				UpdatedNumberScheduled: 1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		const desiredHash = "daemonset-desired-hash"
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "uuid-hash", true, false, c.image, desiredHash)
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		dss, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "daemonset-current-hash", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, desiredHash, dss.Spec.Template.Annotations[extProcConfigHashAnnotationKey])
+		_, exists := dss.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
 	})
 
 	t.Run("pod with extproc but old version", func(t *testing.T) {
@@ -851,11 +2544,12 @@ func TestGatewayController_annotateDaemonSetGatewayPods(t *testing.T) {
 		}, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid")
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid", true, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
 		// Check the deployment's pod template has the annotation.
-		deployment, err := kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
+		deployment, err := kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment2", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
 
@@ -865,41 +2559,443 @@ func TestGatewayController_annotateDaemonSetGatewayPods(t *testing.T) {
 		require.NoError(t, err)
 
 		// Call annotateGatewayPods again, but the deployment's pod template should not be updated again.
-		err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid")
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid", true, false, c.image, "")
 		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
 
-		deployment, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment1", metav1.GetOptions{})
+		deployment, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment2", metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("pod with extproc but different log level", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod4",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{
+				// The old v1 container image is used here to simulate the pod without extproc.
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-log-level", "debug"}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// We also need to create a parent DaemonSet for the pod.
+		dss, err := kube.AppsV1().DaemonSets(egNamespace).Create(t.Context(), &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deployment3",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid", true, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		// Check the deployment's pod template has the annotation.
+		deployment, err := kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment3", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+
+		// Simulate the pod's container log level is updated to the new version.
+		pod.Spec.Containers[0].Args = []string{"-log-level", logLevel}
+		pod, err = kube.CoreV1().Pods(egNamespace).Update(t.Context(), pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		// Call annotateGatewayPods again, but the deployment's pod template should not be updated again.
+		result, err = c.annotateGatewayPods(t.Context(), []corev1.Pod{*pod}, nil, []appsv1.DaemonSet{*dss}, "some-uuid", true, false, c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		deployment, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "deployment3", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "some-uuid", deployment.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("daemonset rollout in progress should requeue", func(t *testing.T) {
+		podWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-sidecar-requeue",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		podWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-no-sidecar-requeue",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		dss, err := kube.AppsV1().DaemonSets(egNamespace).Create(t.Context(), &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "ds-inconsistent-requeue",
+				Namespace:  egNamespace,
+				Labels:     labels,
+				Generation: 2,
+			},
+			Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+			Status: appsv1.DaemonSetStatus{
+				ObservedGeneration: 1,
+			},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*podWithSidecar, *podWithoutSidecar},
+			nil,
+			[]appsv1.DaemonSet{*dss},
+			"uuid-requeue",
+			true,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{RequeueAfter: 5 * time.Second}, result)
+	})
+
+	t.Run("inconsistent pods without rollout should force rollout daemonset", func(t *testing.T) {
+		podWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-sidecar-force",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		podWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-no-sidecar-force",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), podWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		dss, err := kube.AppsV1().DaemonSets(egNamespace).Create(t.Context(), &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ds-force-rollout",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*podWithSidecar, *podWithoutSidecar},
+			nil,
+			[]appsv1.DaemonSet{*dss},
+			"uuid-force",
+			true,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		dss, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "ds-force-rollout", metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "uuid-force", dss.Spec.Template.Annotations[aigatewayUUIDAnnotationKey])
+	})
+
+	t.Run("terminating pods are ignored for consistency and annotation daemonset", func(t *testing.T) {
+		now := metav1.Now()
+		terminatingPodWithSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "pod-ds-terminating-sidecar",
+				Namespace:         egNamespace,
+				Labels:            labels,
+				DeletionTimestamp: &now,
+			},
+			Spec: corev1.PodSpec{InitContainers: []corev1.Container{
+				{Name: extProcContainerName, Image: v2Container, Args: []string{"-logLevel", logLevel}},
+			}},
+		}
+		_, err := kube.CoreV1().Pods(egNamespace).Create(t.Context(), terminatingPodWithSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		activePodWithoutSidecar := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-ds-active-no-sidecar",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+		}
+		_, err = kube.CoreV1().Pods(egNamespace).Create(t.Context(), activePodWithoutSidecar, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		dss, err := kube.AppsV1().DaemonSets(egNamespace).Create(t.Context(), &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ds-ignore-terminating",
+				Namespace: egNamespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{}}},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		result, err := c.annotateGatewayPods(t.Context(),
+			[]corev1.Pod{*terminatingPodWithSidecar, *activePodWithoutSidecar},
+			nil,
+			[]appsv1.DaemonSet{*dss},
+			"uuid-ignore-terminating",
+			false,
+			false,
+			c.image, "")
+		require.NoError(t, err)
+		require.Equal(t, ctrl.Result{}, result)
+
+		terminatingPodWithSidecar, err = kube.CoreV1().Pods(egNamespace).Get(t.Context(), "pod-ds-terminating-sidecar", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists := terminatingPodWithSidecar.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
+
+		dss, err = kube.AppsV1().DaemonSets(egNamespace).Get(t.Context(), "ds-ignore-terminating", metav1.GetOptions{})
+		require.NoError(t, err)
+		_, exists = dss.Spec.Template.Annotations[aigatewayUUIDAnnotationKey]
+		require.False(t, exists)
+	})
+
+	t.Run("rollout in progress checks daemonset status", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			daemonSets []appsv1.DaemonSet
+			expected   bool
+		}{
+			{
+				name: "observed generation zero is ignored",
+				daemonSets: []appsv1.DaemonSet{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "ds", Generation: 2},
+						Status: appsv1.DaemonSetStatus{
+							ObservedGeneration:     0,
+							DesiredNumberScheduled: 1,
+							UpdatedNumberScheduled: 0,
+							NumberReady:            0,
+							NumberAvailable:        0,
+						},
+					},
+				},
+				expected: false,
+			},
+			{
+				name: "observed generation behind generation requeues",
+				daemonSets: []appsv1.DaemonSet{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "ds", Generation: 2},
+						Status: appsv1.DaemonSetStatus{
+							ObservedGeneration:     1,
+							DesiredNumberScheduled: 1,
+							UpdatedNumberScheduled: 1,
+							NumberReady:            1,
+							NumberAvailable:        1,
+						},
+					},
+				},
+				expected: true,
+			},
+			{
+				name: "old-template daemonset pods still present requeues",
+				daemonSets: []appsv1.DaemonSet{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "ds", Generation: 1},
+						Status: appsv1.DaemonSetStatus{
+							ObservedGeneration:     1,
+							DesiredNumberScheduled: 2,
+							CurrentNumberScheduled: 3,
+							UpdatedNumberScheduled: 2,
+							NumberReady:            3,
+							NumberAvailable:        3,
+						},
+					},
+				},
+				expected: true,
+			},
+			{
+				name: "fully ready daemonset does not requeue",
+				daemonSets: []appsv1.DaemonSet{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "ds", Generation: 1},
+						Status: appsv1.DaemonSetStatus{
+							ObservedGeneration:     1,
+							DesiredNumberScheduled: 2,
+							UpdatedNumberScheduled: 2,
+							NumberReady:            2,
+							NumberAvailable:        2,
+						},
+					},
+				},
+				expected: false,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := isRolloutInProgress(nil, tt.daemonSets)
+				require.Equal(t, tt.expected, got)
+			})
+		}
 	})
 }
 
 func Test_schemaToFilterAPI(t *testing.T) {
 	for i, tc := range []struct {
-		in       aigv1a1.VersionedAPISchema
+		in       aigv1b1.VersionedAPISchema
 		expected filterapi.VersionedAPISchema
 	}{
 		{
-			// Backward compatible case.
-			in:       aigv1a1.VersionedAPISchema{Name: aigv1a1.APISchemaOpenAI, Version: ptr.To("v123")},
-			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v123", Version: "v123"},
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v1"},
 		},
 		{
-			// Backward compatible case.
-			in:       aigv1a1.VersionedAPISchema{Name: aigv1a1.APISchemaOpenAI},
-			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v1", Version: "v1"},
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI, Prefix: ptr.To("v1/foo")},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v1/foo"},
 		},
 		{
-			in:       aigv1a1.VersionedAPISchema{Name: aigv1a1.APISchemaOpenAI, Prefix: ptr.To("v1/foo")},
-			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI, Prefix: "v1/foo", Version: "v1/foo"},
-		},
-		{
-			in:       aigv1a1.VersionedAPISchema{Name: aigv1a1.APISchemaAWSBedrock},
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAWSBedrock},
 			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSBedrock},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAWSOpenAI},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSOpenAI, Prefix: "openai/v1"},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaTypeSafe},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaTypeSafe, Version: "v1"},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaTypeSafe, Version: ptr.To("v2")},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaTypeSafe, Version: "v2"},
+		},
+		{
+			in: aigv1b1.VersionedAPISchema{
+				Name:   aigv1b1.APISchemaAWSOpenAI,
+				Prefix: ptr.To("custom/v1"),
+			},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAWSOpenAI, Prefix: "custom/v1"},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAnthropic},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "v1"},
+		},
+		{
+			in:       aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaAnthropic, Prefix: ptr.To("gateway/v1")},
+			expected: filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic, Prefix: "gateway/v1"},
 		},
 	} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			require.Equal(t, tc.expected, schemaToFilterAPI(tc.in, ctrl.Log))
+			require.Equal(t, tc.expected, schemaToFilterAPI(tc.in))
+		})
+	}
+}
+
+func Test_headerValueFiltersToFilterAPI(t *testing.T) {
+	for i, tc := range []struct {
+		name     string
+		in       []aigv1b1.HTTPHeaderValueFilter
+		expected []filterapi.HTTPHeaderValueFilter
+	}{
+		{
+			name:     "nil",
+			in:       nil,
+			expected: nil,
+		},
+		{
+			name:     "empty",
+			in:       []aigv1b1.HTTPHeaderValueFilter{},
+			expected: nil,
+		},
+		{
+			name: "denylist",
+			in: []aigv1b1.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   aigv1b1.HTTPHeaderValueFilterModeDenylist,
+				Values: []string{"thinking-token-count-2026-05-13"},
+			}},
+			expected: []filterapi.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   "Denylist",
+				Values: []string{"thinking-token-count-2026-05-13"},
+			}},
+		},
+		{
+			name: "allowlist",
+			in: []aigv1b1.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   aigv1b1.HTTPHeaderValueFilterModeAllowlist,
+				Values: []string{"advanced-tool-use-2025-11-20"},
+			}},
+			expected: []filterapi.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   "Allowlist",
+				Values: []string{"advanced-tool-use-2025-11-20"},
+			}},
+		},
+		{
+			// Header names are case-insensitive; the data plane matches on the lower-cased form.
+			name: "header name is lower-cased",
+			in: []aigv1b1.HTTPHeaderValueFilter{{
+				Name:   "Anthropic-Beta",
+				Mode:   aigv1b1.HTTPHeaderValueFilterModeDenylist,
+				Values: []string{"a"},
+			}},
+			expected: []filterapi.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   "Denylist",
+				Values: []string{"a"},
+			}},
+		},
+		{
+			// The CRD defaults Mode, but an object persisted without it must not silently disable
+			// the filter.
+			name: "empty mode defaults to Denylist",
+			in: []aigv1b1.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Values: []string{"a"},
+			}},
+			expected: []filterapi.HTTPHeaderValueFilter{{
+				Name:   "anthropic-beta",
+				Mode:   "Denylist",
+				Values: []string{"a"},
+			}},
+		},
+		{
+			name: "multiple headers",
+			in: []aigv1b1.HTTPHeaderValueFilter{
+				{Name: "anthropic-beta", Mode: aigv1b1.HTTPHeaderValueFilterModeDenylist, Values: []string{"a"}},
+				{Name: "x-custom", Mode: aigv1b1.HTTPHeaderValueFilterModeAllowlist, Values: []string{"b"}},
+			},
+			expected: []filterapi.HTTPHeaderValueFilter{
+				{Name: "anthropic-beta", Mode: "Denylist", Values: []string{"a"}},
+				{Name: "x-custom", Mode: "Allowlist", Values: []string{"b"}},
+			},
+		},
+	} {
+		t.Run(strconv.Itoa(i)+"/"+tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expected, headerValueFiltersToFilterAPI(tc.in))
 		})
 	}
 }
@@ -909,15 +3005,16 @@ func TestGatewayController_backendWithMaybeBSP(t *testing.T) {
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
 	const v2Container = "ai-gateway-extproc:v2"
-	c := NewGatewayController(fakeClient, kube, ctrl.Log, v2Container, false, nil, true)
+	const logLevel = "info"
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system", v2Container, logLevel, false, nil, true)
 
 	_, _, err := c.backendWithMaybeBSP(t.Context(), "foo", "bar")
 	require.ErrorContains(t, err, `aiservicebackends.aigateway.envoyproxy.io "bar" not found`)
 
 	// Create AIServiceBackend without BSP.
-	backend := &aigv1a1.AIServiceBackend{
+	backend := &aigv1b1.AIServiceBackend{
 		ObjectMeta: metav1.ObjectMeta{Name: "bar", Namespace: "foo"},
-		Spec:       aigv1a1.AIServiceBackendSpec{},
+		Spec:       aigv1b1.AIServiceBackendSpec{},
 	}
 	require.NoError(t, fakeClient.Create(t.Context(), backend))
 
@@ -928,9 +3025,9 @@ func TestGatewayController_backendWithMaybeBSP(t *testing.T) {
 
 	// Create a new BSP for the existing backend, referencing the backend by name.
 	const bspName = "bsp-bar"
-	bspObj := &aigv1a1.BackendSecurityPolicy{
+	bspObj := &aigv1b1.BackendSecurityPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: bspName, Namespace: backend.Namespace},
-		Spec: aigv1a1.BackendSecurityPolicySpec{
+		Spec: aigv1b1.BackendSecurityPolicySpec{
 			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
 				{Name: gwapiv1.ObjectName(backend.Name), Kind: aiServiceBackendKind, Group: aiServiceBackendGroup},
 			},
@@ -947,9 +3044,9 @@ func TestGatewayController_backendWithMaybeBSP(t *testing.T) {
 	require.Equal(t, bspName, bsp.Name, "should return the correct BSP name")
 
 	// Create a new BSP that has the same target ref, and one that does not exist.
-	bspWithTargetRefs := &aigv1a1.BackendSecurityPolicy{
+	bspWithTargetRefs := &aigv1b1.BackendSecurityPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "bsp-bar-target-refs", Namespace: backend.Namespace},
-		Spec: aigv1a1.BackendSecurityPolicySpec{
+		Spec: aigv1b1.BackendSecurityPolicySpec{
 			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
 				{Name: gwapiv1.ObjectName(backend.Name), Kind: aiServiceBackendKind, Group: aiServiceBackendGroup},
 				{Name: gwapiv1.ObjectName("non-existent-backend"), Kind: aiServiceBackendKind, Group: aiServiceBackendGroup},
@@ -968,20 +3065,20 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", false, nil, true)
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const gwNamespace = "ns"
 	// Two routes with different CreationTimestamp for deterministic order.
-	mcpRoutes := []aigv1a1.MCPRoute{
+	mcpRoutes := []aigv1b1.MCPRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-old", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour))},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
 						Name: gwapiv1.ObjectName("backendA"),
 					},
-					ToolSelector: &aigv1a1.MCPToolFilter{
+					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolA"},
 					},
 				}},
@@ -989,12 +3086,12 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-new", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour))},
-			Spec: aigv1a1.MCPRouteSpec{
-				BackendRefs: []aigv1a1.MCPRouteBackendRef{{
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
 						Name: gwapiv1.ObjectName("backendB"),
 					},
-					ToolSelector: &aigv1a1.MCPToolFilter{
+					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolB"},
 					},
 				}},
@@ -1004,29 +3101,349 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 
 	// Reconcile to produce the Secret with only MCP routes.
 	const someNamespace = "some-namespace"
-	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-	err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, nil, mcpRoutes, "mcp-uuid")
-	require.NoError(t, err)
+	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
-	// Read back and verify MCPConfig fields.
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, nil, "mcp-uuid", nil, nil)
+	require.NoError(t, err)
+	require.False(t, effective) // No MCP routes, so not effective.
+	effective, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective)
+
+	// Read back and verify MCPConfig fields from the bundle.
 	secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
 	require.NoError(t, err)
-	configStr, ok := secret.StringData[FilterConfigKeyInSecret]
+	indexRaw := ""
+	ok := false
+	if b, exists := secret.Data[FilterConfigBundleIndexKey]; exists {
+		indexRaw = string(b)
+		ok = true
+	} else if s, exists := secret.StringData[FilterConfigBundleIndexKey]; exists {
+		indexRaw = s
+		ok = true
+	}
 	require.True(t, ok)
+	index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+	require.NoError(t, err)
+	cfg, err := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+		partSecret, getErr := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		if b, exists := partSecret.Data[FilterConfigBundlePartKey]; exists {
+			return b, nil
+		}
+		if b, exists := partSecret.StringData[FilterConfigBundlePartKey]; exists {
+			return []byte(b), nil
+		}
+		return nil, fmt.Errorf("missing key %q in part secret %s", FilterConfigBundlePartKey, part.Name)
+	})
+	require.NoError(t, err)
 
-	var fc filterapi.Config
-	require.NoError(t, yaml.Unmarshal([]byte(configStr), &fc))
-	require.Equal(t, "mcp-uuid", fc.UUID)
-	require.NotNil(t, fc.MCPConfig)
-	require.Equal(t, "http://127.0.0.1:"+strconv.Itoa(internalapi.MCPBackendListenerPort), fc.MCPConfig.BackendListenerAddr)
+	require.Equal(t, "mcp-uuid", cfg.UUID)
+	require.NotNil(t, cfg.MCPConfig)
+	require.Equal(t, "http://127.0.0.1:"+strconv.Itoa(internalapi.MCPBackendListenerPort), cfg.MCPConfig.BackendListenerAddr)
+}
+
+func TestGatewayController_writeFilterConfigBundleShards(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	namespace := "ns"
+	gatewayName := "cfg-gw"
+	gatewayNamespace := "cfg-ns"
+	payload := append([]byte(strings.Repeat("x", filterConfigBundlePartSizeBytes*2+10)), []byte("中文字符")...)
+	err := c.writeFilterConfigBundle(t.Context(), gatewayName, gatewayNamespace, namespace, payload, "uuid-1")
+	require.NoError(t, err)
+
+	indexSecretName := FilterConfigBundleIndexSecretName(gatewayName, gatewayNamespace)
+	indexSecret, err := kube.CoreV1().Secrets(namespace).Get(t.Context(), indexSecretName, metav1.GetOptions{})
+	require.NoError(t, err)
+	indexRaw, ok := indexSecret.StringData[FilterConfigBundleIndexKey]
+	if !ok {
+		if b, exists := indexSecret.Data[FilterConfigBundleIndexKey]; exists {
+			indexRaw = string(b)
+			ok = true
+		}
+	}
+	require.True(t, ok)
+	index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+	require.NoError(t, err)
+	require.Len(t, index.Parts, 3)
+
+	var reassembled bytes.Buffer
+	for _, part := range index.Parts {
+		s, getErr := kube.CoreV1().Secrets(namespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+		require.NoError(t, getErr)
+		chunk, partOK := s.Data[FilterConfigBundlePartKey]
+		require.True(t, partOK)
+		_, stringDataOK := s.StringData[FilterConfigBundlePartKey]
+		require.False(t, stringDataOK)
+		reassembled.Write(chunk)
+	}
+	require.Equal(t, payload, reassembled.Bytes())
+	_, err = kube.CoreV1().Secrets(namespace).Get(t.Context(),
+		filterConfigBundlePartSecretName(gatewayName, gatewayNamespace, maxFilterConfigBundleSlots-1), metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestGatewayController_writeFilterConfigBundleShards_Overflow(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	payload := []byte(strings.Repeat("x", filterConfigBundlePartSizeBytes*(maxFilterConfigBundleSlots+1)))
+	err := c.writeFilterConfigBundle(t.Context(), "cfg-gw", "cfg-ns", "ns", payload, "uuid-1")
+	require.ErrorContains(t, err, "exceeds max supported slots")
+}
+
+func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
+	mcpRoutes := []aigv1b1.MCPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name: gwapiv1.ObjectName("backend"),
+					},
+					ToolSelector: &aigv1b1.MCPToolFilter{
+						Include:      []string{"toolA"},
+						Exclude:      []string{"toolB"},
+						ExcludeRegex: []string{"^secret.*"},
+					},
+				}},
+			},
+		},
+	}
+
+	mc, effective := mcpConfig(mcpRoutes)
+	require.True(t, effective)
+	require.NotNil(t, mc)
+	require.Len(t, mc.Routes, 1)
+	require.Len(t, mc.Routes[0].Backends, 1)
+	ts := mc.Routes[0].Backends[0].ToolSelector
+	require.NotNil(t, ts)
+	require.Equal(t, []string{"toolA"}, ts.Include)
+	require.Equal(t, []string{"toolB"}, ts.Exclude)
+	require.Equal(t, []string{"^secret.*"}, ts.ExcludeRegex)
+}
+
+func Test_mcpConfig_PromptSelector(t *testing.T) {
+	mcpRoutes := []aigv1b1.MCPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name: gwapiv1.ObjectName("backend"),
+					},
+					PromptSelector: &aigv1b1.MCPPromptFilter{
+						Include:      []string{"greeting"},
+						Exclude:      []string{"farewell"},
+						ExcludeRegex: []string{"^secret.*"},
+					},
+				}},
+			},
+		},
+	}
+
+	mc, effective := mcpConfig(mcpRoutes)
+	require.True(t, effective)
+	require.NotNil(t, mc)
+	require.Len(t, mc.Routes, 1)
+	require.Len(t, mc.Routes[0].Backends, 1)
+	ps := mc.Routes[0].Backends[0].PromptSelector
+	require.NotNil(t, ps)
+	require.Equal(t, []string{"greeting"}, ps.Include)
+	require.Equal(t, []string{"farewell"}, ps.Exclude)
+	require.Equal(t, []string{"^secret.*"}, ps.ExcludeRegex)
+}
+
+func Test_mcpConfig_ForwardHeaders(t *testing.T) {
+	renamed := "X-Backend-Auth"
+	mcpRoutes := []aigv1b1.MCPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{
+					{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Name: gwapiv1.ObjectName("backendA"),
+						},
+						ForwardHeaders: []aigv1b1.MCPHeaderForward{
+							{Name: "X-Api-Key"},
+							{Name: "Authorization", BackendHeader: &renamed},
+						},
+					},
+					{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Name: gwapiv1.ObjectName("backendB"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	mc, effective := mcpConfig(mcpRoutes)
+	require.True(t, effective)
+	require.NotNil(t, mc)
+	require.Len(t, mc.Routes, 1)
+	require.Len(t, mc.Routes[0].Backends, 2)
+
+	backendA := mc.Routes[0].Backends[0]
+	require.Equal(t, "backendA", backendA.Name)
+	require.Len(t, backendA.ForwardHeaders, 2)
+	require.Equal(t, filterapi.MCPHeaderForward{Name: "X-Api-Key"}, backendA.ForwardHeaders[0])
+	require.Equal(t, filterapi.MCPHeaderForward{Name: "Authorization", BackendHeader: "X-Backend-Auth"}, backendA.ForwardHeaders[1])
+
+	backendB := mc.Routes[0].Backends[1]
+	require.Equal(t, "backendB", backendB.Name)
+	require.Empty(t, backendB.ForwardHeaders)
+}
+
+func Test_mcpConfig_BackendSelector(t *testing.T) {
+	t.Run("unset means no selector", func(t *testing.T) {
+		mcpRoutes := []aigv1b1.MCPRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+				Spec: aigv1b1.MCPRouteSpec{
+					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+					}},
+				},
+			},
+		}
+
+		mc, effective := mcpConfig(mcpRoutes)
+		require.True(t, effective)
+		require.Nil(t, mc.Routes[0].BackendSelector)
+	})
+
+	t.Run("rules and default action are translated", func(t *testing.T) {
+		mcpRoutes := []aigv1b1.MCPRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+				Spec: aigv1b1.MCPRouteSpec{
+					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+					}},
+					BackendSelector: &aigv1b1.MCPBackendSelector{
+						DefaultAction: ptr.To(egv1a1.AuthorizationActionDeny),
+						Rules: []aigv1b1.MCPBackendSelectorRule{
+							{CEL: ptr.To(`request.mcp.backend in request.auth.jwt.claims.mcp_backends`)},
+						},
+					},
+				},
+			},
+		}
+
+		mc, effective := mcpConfig(mcpRoutes)
+		require.True(t, effective)
+		sel := mc.Routes[0].BackendSelector
+		require.NotNil(t, sel)
+		require.Equal(t, filterapi.AuthorizationActionDeny, sel.DefaultAction)
+		require.Len(t, sel.Rules, 1)
+		require.Equal(t, filterapi.AuthorizationActionAllow, sel.Rules[0].Action) // Action defaults to Allow.
+		require.Equal(t, `request.mcp.backend in request.auth.jwt.claims.mcp_backends`, *sel.Rules[0].CEL)
+	})
+
+	t.Run("defaultAction defaults to deny when unset", func(t *testing.T) {
+		mcpRoutes := []aigv1b1.MCPRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+				Spec: aigv1b1.MCPRouteSpec{
+					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+					}},
+					BackendSelector: &aigv1b1.MCPBackendSelector{},
+				},
+			},
+		}
+
+		mc, _ := mcpConfig(mcpRoutes)
+		require.Equal(t, filterapi.AuthorizationActionDeny, mc.Routes[0].BackendSelector.DefaultAction)
+		require.Empty(t, mc.Routes[0].BackendSelector.Rules)
+	})
+}
+
+func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
+	newRoute := func(sp *aigv1b1.MCPRouteSecurityPolicy) []aigv1b1.MCPRoute {
+		return []aigv1b1.MCPRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: sp,
+					BackendRefs: []aigv1b1.MCPRouteBackendRef{
+						{BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backendA")}},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("forwards the api-key client-id header to backends", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("x-mcp-client-id")},
+		}))
+		require.True(t, effective)
+		require.Len(t, mc.Routes, 1)
+		// Mirrors the OAuth claim-to-header bridge: the injected caller id must be
+		// forwarded to backends so it reaches the MCP request-attribute plumbing.
+		require.Equal(t, []string{"x-mcp-client-id"}, mc.Routes[0].ForwardHeaders)
+	})
+
+	t.Run("no client-id header configured", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			APIKeyAuth: &egv1a1.APIKeyAuth{},
+		}))
+		require.True(t, effective)
+		require.Len(t, mc.Routes, 1)
+		require.Empty(t, mc.Routes[0].ForwardHeaders)
+	})
+
+	t.Run("empty client-id header is ignored", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("")},
+		}))
+		require.True(t, effective)
+		require.Len(t, mc.Routes, 1)
+		require.Empty(t, mc.Routes[0].ForwardHeaders)
+	})
+
+	t.Run("no security policy", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(nil))
+		require.True(t, effective)
+		require.Len(t, mc.Routes, 1)
+		require.Empty(t, mc.Routes[0].ForwardHeaders)
+	})
+
+	t.Run("oauth and api-key both configured with the same header are not duplicated", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			OAuth: &aigv1b1.MCPRouteOAuth{
+				ClaimToHeaders: []egv1a1.ClaimToHeader{
+					{Claim: "sub", Header: "x-mcp-client-id"},
+				},
+			},
+			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("x-mcp-client-id")},
+		}))
+		require.True(t, effective)
+		require.Len(t, mc.Routes, 1)
+		require.Equal(t, []string{"x-mcp-client-id"}, mc.Routes[0].ForwardHeaders)
+	})
 }
 
 func Test_mergeHeaderMutations(t *testing.T) {
 	tests := []struct {
 		name         string
-		routeLevel   *aigv1a1.HTTPHeaderMutation
-		backendLevel *aigv1a1.HTTPHeaderMutation
-		expected     *aigv1a1.HTTPHeaderMutation
+		routeLevel   *aigv1b1.HTTPHeaderMutation
+		backendLevel *aigv1b1.HTTPHeaderMutation
+		expected     *aigv1b1.HTTPHeaderMutation
 	}{
 		{
 			name:         "both nil",
@@ -1037,38 +3454,38 @@ func Test_mergeHeaderMutations(t *testing.T) {
 		{
 			name:       "route nil, backend has values",
 			routeLevel: nil,
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Backend-Header", Value: "backend-value"}},
 				Remove: []string{"Backend-Remove"},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Backend-Header", Value: "backend-value"}},
 				Remove: []string{"Backend-Remove"},
 			},
 		},
 		{
 			name: "route has values, backend nil",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Route-Header", Value: "route-value"}},
 				Remove: []string{"Route-Remove"},
 			},
 			backendLevel: nil,
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Route-Header", Value: "route-value"}},
 				Remove: []string{"Route-Remove"},
 			},
 		},
 		{
 			name: "no conflicts - different headers",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Route-Header", Value: "route-value"}},
 				Remove: []string{"Route-Remove"},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{{Name: "Backend-Header", Value: "backend-value"}},
 				Remove: []string{"Backend-Remove"},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{
 					{Name: "Backend-Header", Value: "backend-value"},
 					{Name: "Route-Header", Value: "route-value"},
@@ -1078,57 +3495,57 @@ func Test_mergeHeaderMutations(t *testing.T) {
 		},
 		{
 			name: "route overrides backend for same header name",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "X-Custom", Value: "route-value"}},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "X-Custom", Value: "backend-value"}},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "X-Custom", Value: "route-value"}},
 			},
 		},
 		{
 			name: "case insensitive header name conflicts",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "x-custom", Value: "route-value"}},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "X-CUSTOM", Value: "backend-value"}},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{{Name: "x-custom", Value: "route-value"}},
 			},
 		},
 		{
 			name: "remove operations are combined and deduplicated",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Remove: []string{"X-Remove", "x-shared"},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Remove: []string{"X-Backend-Remove", "X-SHARED"},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Remove: []string{"x-backend-remove", "x-remove", "x-shared"},
 			},
 		},
 		{
 			name: "complex merge scenario",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{
 					{Name: "X-Route-Only", Value: "route-only"},
 					{Name: "X-Override", Value: "route-wins"},
 				},
 				Remove: []string{"X-Route-Remove", "x-shared-remove"},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{
 					{Name: "X-Backend-Only", Value: "backend-only"},
 					{Name: "x-override", Value: "backend-loses"},
 				},
 				Remove: []string{"X-Backend-Remove", "X-SHARED-REMOVE"},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set: []gwapiv1.HTTPHeader{
 					{Name: "X-Backend-Only", Value: "backend-only"},
 					{Name: "X-Override", Value: "route-wins"},
@@ -1139,15 +3556,15 @@ func Test_mergeHeaderMutations(t *testing.T) {
 		},
 		{
 			name: "empty mutations",
-			routeLevel: &aigv1a1.HTTPHeaderMutation{
+			routeLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{},
 				Remove: []string{},
 			},
-			backendLevel: &aigv1a1.HTTPHeaderMutation{
+			backendLevel: &aigv1b1.HTTPHeaderMutation{
 				Set:    []gwapiv1.HTTPHeader{},
 				Remove: []string{},
 			},
-			expected: &aigv1a1.HTTPHeaderMutation{
+			expected: &aigv1b1.HTTPHeaderMutation{
 				Set:    nil,
 				Remove: nil,
 			},
@@ -1179,7 +3596,7 @@ func Test_mergeHeaderMutations(t *testing.T) {
 func Test_bodyMutationToFilterAPI(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    *aigv1a1.HTTPBodyMutation
+		input    *aigv1b1.HTTPBodyMutation
 		expected *filterapi.HTTPBodyMutation
 	}{
 		{
@@ -1189,8 +3606,8 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		},
 		{
 			name: "empty mutation",
-			input: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{},
+			input: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{},
 				Remove: []string{},
 			},
 			expected: &filterapi.HTTPBodyMutation{
@@ -1200,8 +3617,8 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		},
 		{
 			name: "only set operations",
-			input: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "model", Value: "\"gpt-4\""},
 					{Path: "temperature", Value: "0.7"},
 					{Path: "max_tokens", Value: "100"},
@@ -1218,7 +3635,7 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		},
 		{
 			name: "only remove operations",
-			input: &aigv1a1.HTTPBodyMutation{
+			input: &aigv1b1.HTTPBodyMutation{
 				Remove: []string{"internal_flag", "debug_mode", "temp_field"},
 			},
 			expected: &filterapi.HTTPBodyMutation{
@@ -1228,8 +3645,8 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		},
 		{
 			name: "both set and remove operations",
-			input: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "service_tier", Value: "\"scale\""},
 					{Path: "stream", Value: "true"},
 					{Path: "metadata", Value: "{\"key\": \"value\"}"},
@@ -1247,8 +3664,8 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		},
 		{
 			name: "complex json values",
-			input: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "array_field", Value: "[1, 2, 3]"},
 					{Path: "null_field", Value: "null"},
 					{Path: "bool_field", Value: "false"},
@@ -1282,12 +3699,147 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 	}
 }
 
+// TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults tests that
+// global LLM request costs from GatewayConfig are properly included in the filter config
+// when no routes override them.
+func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing.T) {
+	tests := []struct {
+		name                     string
+		globalCosts              []aigv1b1.LLMRequestCost
+		routes                   []aigv1b1.AIGatewayRoute
+		expectedGlobalCosts      []filterapi.GlobalLLMRequestCost
+		expectedRouteScopedCosts []filterapi.LLMRequestCost
+	}{
+		{
+			name: "global defaults only, no routes",
+			globalCosts: []aigv1b1.LLMRequestCost{
+				{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeInputToken},
+			},
+			routes: []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "ns"},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+					},
+				},
+			},
+			expectedGlobalCosts: []filterapi.GlobalLLMRequestCost{
+				{MetadataKey: "billing_charges", Type: filterapi.LLMRequestCostTypeInputToken},
+			},
+			expectedRouteScopedCosts: nil, // No route-scoped costs
+		},
+		{
+			name: "global defaults with route override",
+			globalCosts: []aigv1b1.LLMRequestCost{
+				{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeInputToken},
+				{MetadataKey: "total_tokens", Type: aigv1b1.LLMRequestCostTypeTotalToken},
+			},
+			routes: []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "premium-route", Namespace: "ns"},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+						LLMRequestCosts: []aigv1b1.LLMRequestCost{
+							{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeOutputToken}, // Override global
+						},
+					},
+				},
+			},
+			expectedGlobalCosts: []filterapi.GlobalLLMRequestCost{
+				{MetadataKey: "billing_charges", Type: filterapi.LLMRequestCostTypeInputToken},
+				{MetadataKey: "total_tokens", Type: filterapi.LLMRequestCostTypeTotalToken},
+			},
+			expectedRouteScopedCosts: []filterapi.LLMRequestCost{
+				{MetadataKey: "billing_charges", RouteName: "ns/premium-route", Type: filterapi.LLMRequestCostTypeOutputToken},
+			},
+		},
+		{
+			name: "multiple routes with different overrides",
+			globalCosts: []aigv1b1.LLMRequestCost{
+				{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeInputToken},
+			},
+			routes: []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "free-route", Namespace: "ns"},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+						LLMRequestCosts: []aigv1b1.LLMRequestCost{
+							{MetadataKey: "billing_charges", Type: aigv1b1.LLMRequestCostTypeCEL, CEL: ptr.To("0")}, // Free
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "standard-route", Namespace: "ns"},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+						// No override - will use global default
+					},
+				},
+			},
+			expectedGlobalCosts: []filterapi.GlobalLLMRequestCost{
+				{MetadataKey: "billing_charges", Type: filterapi.LLMRequestCostTypeInputToken},
+			},
+			expectedRouteScopedCosts: []filterapi.LLMRequestCost{
+				{MetadataKey: "billing_charges", RouteName: "ns/free-route", Type: filterapi.LLMRequestCostTypeCEL, CEL: "0"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := requireNewFakeClientWithIndexes(t)
+			kube := fake2.NewClientset()
+			ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+			c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+				"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+			const gwNamespace = "ns"
+
+			// Create AIServiceBackend
+			backend := &aigv1b1.AIServiceBackend{
+				ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+				Spec: aigv1b1.AIServiceBackendSpec{
+					BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+				},
+			}
+			err := fakeClient.Create(t.Context(), backend)
+			require.NoError(t, err)
+
+			const someNamespace = "some-namespace"
+			effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, nil)
+			require.NoError(t, err)
+			require.True(t, effective)
+
+			fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+
+			// Compare global costs (order-agnostic)
+			if diff := cmp.Diff(tt.expectedGlobalCosts, fc.GlobalLLMRequestCosts,
+				cmpopts.SortSlices(func(a, b filterapi.GlobalLLMRequestCost) bool {
+					return a.MetadataKey < b.MetadataKey
+				})); diff != "" {
+				t.Errorf("GlobalLLMRequestCosts mismatch (-want +got):\n%s", diff)
+			}
+
+			// Compare route-scoped costs (order-agnostic)
+			requireLLMRequestCostsEqual(t, tt.expectedRouteScopedCosts, fc.LLMRequestCosts)
+		})
+	}
+}
+
 func Test_mergeBodyMutations(t *testing.T) {
 	tests := []struct {
 		name         string
-		routeLevel   *aigv1a1.HTTPBodyMutation
-		backendLevel *aigv1a1.HTTPBodyMutation
-		expected     *aigv1a1.HTTPBodyMutation
+		routeLevel   *aigv1b1.HTTPBodyMutation
+		backendLevel *aigv1b1.HTTPBodyMutation
+		expected     *aigv1b1.HTTPBodyMutation
 	}{
 		{
 			name:         "both nil",
@@ -1298,39 +3850,39 @@ func Test_mergeBodyMutations(t *testing.T) {
 		{
 			name:       "route nil, backend has values",
 			routeLevel: nil,
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
 				Remove: []string{"backend_remove"},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
 				Remove: []string{"backend_remove"},
 			},
 		},
 		{
 			name: "route has values, backend nil",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
 				Remove: []string{"route_remove"},
 			},
 			backendLevel: nil,
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
 				Remove: []string{"route_remove"},
 			},
 		},
 		{
 			name: "no conflicts - different fields",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "route_field", Value: "\"route-value\""}},
 				Remove: []string{"route_remove"},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{{Path: "backend_field", Value: "\"backend-value\""}},
 				Remove: []string{"backend_remove"},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "backend_field", Value: "\"backend-value\""},
 					{Path: "route_field", Value: "\"route-value\""},
 				},
@@ -1339,48 +3891,48 @@ func Test_mergeBodyMutations(t *testing.T) {
 		},
 		{
 			name: "route overrides backend for same field path",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{{Path: "service_tier", Value: "\"route-value\""}},
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "service_tier", Value: "\"route-value\""}},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{{Path: "service_tier", Value: "\"backend-value\""}},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "service_tier", Value: "\"backend-value\""}},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{{Path: "service_tier", Value: "\"route-value\""}},
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "service_tier", Value: "\"route-value\""}},
 			},
 		},
 		{
 			name: "remove operations are combined and deduplicated",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
+			routeLevel: &aigv1b1.HTTPBodyMutation{
 				Remove: []string{"field1", "shared_field"},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
+			backendLevel: &aigv1b1.HTTPBodyMutation{
 				Remove: []string{"field2", "shared_field"},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
+			expected: &aigv1b1.HTTPBodyMutation{
 				Remove: []string{"field1", "field2", "shared_field"},
 			},
 		},
 		{
 			name: "complex merge scenario",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "route_only", Value: "\"route-only\""},
 					{Path: "override_field", Value: "\"route-wins\""},
 					{Path: "temperature", Value: "0.8"},
 				},
 				Remove: []string{"route_remove", "shared_remove"},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "backend_only", Value: "\"backend-only\""},
 					{Path: "override_field", Value: "\"backend-loses\""},
 					{Path: "max_tokens", Value: "100"},
 				},
 				Remove: []string{"backend_remove", "shared_remove"},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "backend_only", Value: "\"backend-only\""},
 					{Path: "max_tokens", Value: "100"},
 					{Path: "override_field", Value: "\"route-wins\""},
@@ -1392,37 +3944,37 @@ func Test_mergeBodyMutations(t *testing.T) {
 		},
 		{
 			name: "empty mutations",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{},
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{},
 				Remove: []string{},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set:    []aigv1a1.HTTPBodyField{},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set:    []aigv1b1.HTTPBodyField{},
 				Remove: []string{},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
+			expected: &aigv1b1.HTTPBodyMutation{
 				Set:    nil,
 				Remove: nil,
 			},
 		},
 		{
 			name: "different json value types",
-			routeLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "string_field", Value: "\"string-value\""},
 					{Path: "number_field", Value: "42"},
 				},
 			},
-			backendLevel: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "bool_field", Value: "true"},
 					{Path: "object_field", Value: "{\"key\": \"value\"}"},
 					{Path: "array_field", Value: "[1, 2, 3]"},
 					{Path: "null_field", Value: "null"},
 				},
 			},
-			expected: &aigv1a1.HTTPBodyMutation{
-				Set: []aigv1a1.HTTPBodyField{
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
 					{Path: "array_field", Value: "[1, 2, 3]"},
 					{Path: "bool_field", Value: "true"},
 					{Path: "null_field", Value: "null"},
@@ -1442,7 +3994,7 @@ func Test_mergeBodyMutations(t *testing.T) {
 				return
 			}
 			require.NotNil(t, result)
-			if d := cmp.Diff(tt.expected, result, cmpopts.SortSlices(func(a, b aigv1a1.HTTPBodyField) bool {
+			if d := cmp.Diff(tt.expected, result, cmpopts.SortSlices(func(a, b aigv1b1.HTTPBodyField) bool {
 				return a.Path < b.Path
 			}), cmpopts.SortSlices(func(a, b string) bool {
 				return a < b
@@ -1451,4 +4003,128 @@ func Test_mergeBodyMutations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGatewayController_getObjectsForGatewayNamespaceInconsistency(t *testing.T) {
+	const gwName, gwNamespace, egNamespace = "gw", "ns", "envoy-gateway-system"
+	labels := map[string]string{
+		egOwningGatewayNameLabel:      gwName,
+		egOwningGatewayNamespaceLabel: gwNamespace,
+	}
+	gw := &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: gwName, Namespace: gwNamespace}}
+
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(requireNewFakeClientWithIndexes(t), kube, ctrl.Log, egNamespace,
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	// Place a pod in the gateway namespace and a pod in the envoy-gateway namespace so that
+	// objects are found in two distinct namespaces, which should trigger the error.
+	for _, ns := range []string{gwNamespace, egNamespace} {
+		_, err := kube.CoreV1().Pods(ns).Create(t.Context(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-" + ns, Namespace: ns, Labels: labels},
+		}, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	_, _, _, _, err := c.getObjectsForGateway(t.Context(), gw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "found gateway-labeled objects in multiple namespaces")
+}
+
+func TestGatewayController_getObjectsForGatewaySameNamespace(t *testing.T) {
+	const gwName, ns = "gw", "shared"
+	labels := map[string]string{
+		egOwningGatewayNameLabel:      gwName,
+		egOwningGatewayNamespaceLabel: ns,
+	}
+	gw := &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: gwName, Namespace: ns}}
+
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(requireNewFakeClientWithIndexes(t), kube, ctrl.Log, ns,
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	_, err := kube.CoreV1().Pods(ns).Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: ns, Labels: labels},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = kube.AppsV1().Deployments(ns).Create(t.Context(), &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dep-1", Namespace: ns, Labels: labels},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	namespace, pods, deployments, _, err := c.getObjectsForGateway(t.Context(), gw)
+	require.NoError(t, err)
+	require.Equal(t, ns, namespace)
+	require.Len(t, pods, 1)
+	require.Len(t, deployments, 1)
+}
+
+func TestGatewayController_stampGatewayConfigHash(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	c := newTestGatewayController(fakeClient, fake2.NewClientset(), logr.Discard(), "ns", "img", "info", false, nil, true)
+	gw := &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns"}}
+	require.NoError(t, fakeClient.Create(t.Context(), gw))
+
+	gwConfig := &aigv1b1.GatewayConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "gwconfig", Namespace: "ns"},
+		Spec: aigv1b1.GatewayConfigSpec{
+			ExtProc: &aigv1b1.GatewayConfigExtProc{
+				MetadataForwardingNamespaces: []string{"envoy.filters.http.ext_authz"},
+			},
+		},
+	}
+	require.NoError(t, c.stampGatewayConfigHash(t.Context(), gw, gwConfig))
+	var stored gwapiv1.Gateway
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(gw), &stored))
+	first := stored.Annotations[gatewayConfigHashAnnotationKey]
+	require.Len(t, first, 16)
+
+	// Same spec: no change.
+	require.NoError(t, c.stampGatewayConfigHash(t.Context(), &stored, gwConfig))
+	var again gwapiv1.Gateway
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(gw), &again))
+	require.Equal(t, first, again.Annotations[gatewayConfigHashAnnotationKey])
+
+	// Spec change: hash changes, so Envoy Gateway sees a Gateway update and re-translates.
+	gwConfig.Spec.ExtProc.MetadataForwardingNamespaces = []string{"other.ns"}
+	require.NoError(t, c.stampGatewayConfigHash(t.Context(), &again, gwConfig))
+	var changed gwapiv1.Gateway
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(gw), &changed))
+	require.NotEqual(t, first, changed.Annotations[gatewayConfigHashAnnotationKey])
+
+	// Config no longer referenced: annotation removed.
+	require.NoError(t, c.stampGatewayConfigHash(t.Context(), &changed, nil))
+	var cleared gwapiv1.Gateway
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(gw), &cleared))
+	require.NotContains(t, cleared.Annotations, gatewayConfigHashAnnotationKey)
+}
+
+func TestGatewayController_warnUndeclaredMetadataNamespaces(t *testing.T) {
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+	c := newTestGatewayController(requireNewFakeClientWithIndexes(t), fake2.NewClientset(), logger, "ns", "img", "info", false, nil, true)
+	ec := &filterapi.Config{Backends: []filterapi.Backend{
+		{Name: "no-auth"},
+		{Name: "declared", Auth: &filterapi.BackendAuth{CredentialOverride: &filterapi.CredentialOverride{DynamicMetadataNamespace: "declared.ns"}}},
+		{Name: "undeclared-a", Auth: &filterapi.BackendAuth{CredentialOverride: &filterapi.CredentialOverride{DynamicMetadataNamespace: "missing.ns"}}},
+		// Same namespace again: one line, naming both backends.
+		{Name: "undeclared-b", Auth: &filterapi.BackendAuth{CredentialOverride: &filterapi.CredentialOverride{DynamicMetadataNamespace: "missing.ns"}}},
+		{Name: "undeclared-c", Auth: &filterapi.BackendAuth{CredentialOverride: &filterapi.CredentialOverride{DynamicMetadataNamespace: "other-missing.ns"}}},
+		// A header-sourced override has no namespace to declare.
+		{Name: "header", Auth: &filterapi.BackendAuth{CredentialOverride: &filterapi.CredentialOverride{HeaderName: "x-tenant-key"}}},
+	}}
+
+	c.warnUndeclaredMetadataNamespaces(ec, []string{"declared.ns"}, "gw", "ns")
+	require.Len(t, logged, 2)
+	require.Contains(t, logged[0], `"namespace"="missing.ns"`)
+	// Every backend reading the namespace is named, not just the first.
+	require.Contains(t, logged[0], "undeclared-a")
+	require.Contains(t, logged[0], "undeclared-b")
+	require.Contains(t, logged[1], `"namespace"="other-missing.ns"`)
+	require.Contains(t, logged[1], "undeclared-c")
+
+	// Everything declared: silent.
+	logged = nil
+	c.warnUndeclaredMetadataNamespaces(ec, []string{"declared.ns", "missing.ns", "other-missing.ns"}, "gw", "ns")
+	require.Empty(t, logged)
 }

@@ -13,6 +13,9 @@ header:
       The full text of the Apache license is available in the LICENSE file at
       the root of the repo.
   paths-ignore:
+    - .git
+    - .claude
+    - .cursor
     - site
     - out
     - ".github"
@@ -40,3 +43,5 @@ header:
     - "**/.env*"
     - tests/internal/testopenai/cassettes
     - .github/codecov.yml
+    - hack/
+    - .idea/

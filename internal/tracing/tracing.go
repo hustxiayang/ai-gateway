@@ -18,23 +18,27 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/envoyproxy/ai-gateway/internal/tracing/openinference/anthropic"
-	"github.com/envoyproxy/ai-gateway/internal/tracing/openinference/cohere"
-	"github.com/envoyproxy/ai-gateway/internal/tracing/openinference/openai"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
 var _ tracingapi.Tracing = (*tracingImpl)(nil)
 
 type tracingImpl struct {
-	chatCompletionTracer  tracingapi.ChatCompletionTracer
-	completionTracer      tracingapi.CompletionTracer
-	imageGenerationTracer tracingapi.ImageGenerationTracer
-	embeddingsTracer      tracingapi.EmbeddingsTracer
-	responsesTracer       tracingapi.ResponsesTracer
-	rerankTracer          tracingapi.RerankTracer
-	messageTracer         tracingapi.MessageTracer
-	mcpTracer             tracingapi.MCPTracer
+	chatCompletionTracer       tracingapi.ChatCompletionTracer
+	completionTracer           tracingapi.CompletionTracer
+	imageGenerationTracer      tracingapi.ImageGenerationTracer
+	embeddingsTracer           tracingapi.EmbeddingsTracer
+	responsesTracer            tracingapi.ResponsesTracer
+	speechTracer               tracingapi.SpeechTracer
+	transcriptionTracer        tracingapi.TranscriptionTracer
+	translationTracer          tracingapi.TranslationTracer
+	rerankTracer               tracingapi.RerankTracer
+	systemOneTracer            tracingapi.SystemOneTracer
+	messageTracer              tracingapi.MessageTracer
+	tokenizeTracer             tracingapi.TokenizeTracer
+	responsesInputTokensTracer tracingapi.ResponsesInputTokensTracer
+	countTokensTracer          tracingapi.CountTokensTracer
+	mcpTracer                  tracingapi.MCPTracer
 	// shutdown is nil when we didn't create tp.
 	shutdown func(context.Context) error
 }
@@ -64,9 +68,29 @@ func (t *tracingImpl) ResponsesTracer() tracingapi.ResponsesTracer {
 	return t.responsesTracer
 }
 
+// SpeechTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) SpeechTracer() tracingapi.SpeechTracer {
+	return t.speechTracer
+}
+
+// TranscriptionTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) TranscriptionTracer() tracingapi.TranscriptionTracer {
+	return t.transcriptionTracer
+}
+
+// TranslationTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) TranslationTracer() tracingapi.TranslationTracer {
+	return t.translationTracer
+}
+
 // RerankTracer implements the same method as documented on tracingapi.Tracing.
 func (t *tracingImpl) RerankTracer() tracingapi.RerankTracer {
 	return t.rerankTracer
+}
+
+// SystemOneTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) SystemOneTracer() tracingapi.SystemOneTracer {
+	return t.systemOneTracer
 }
 
 // MCPTracer implements the same method as documented on tracingapi.Tracing.
@@ -77,6 +101,21 @@ func (t *tracingImpl) MCPTracer() tracingapi.MCPTracer {
 // MessageTracer implements the same method as documented on tracingapi.Tracing.
 func (t *tracingImpl) MessageTracer() tracingapi.MessageTracer {
 	return t.messageTracer
+}
+
+// TokenizeTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) TokenizeTracer() tracingapi.TokenizeTracer {
+	return t.tokenizeTracer
+}
+
+// ResponsesInputTokensTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) ResponsesInputTokensTracer() tracingapi.ResponsesInputTokensTracer {
+	return t.responsesInputTokensTracer
+}
+
+// CountTokensTracer implements the same method as documented on tracingapi.Tracing.
+func (t *tracingImpl) CountTokensTracer() tracingapi.CountTokensTracer {
+	return t.countTokensTracer
 }
 
 // Shutdown implements the same method as documented on tracingapi.Tracing.
@@ -91,7 +130,7 @@ func (t *tracingImpl) Shutdown(ctx context.Context) error {
 // variables and optional header attribute mapping.
 //
 // Parameters:
-//   - headerAttributeMapping: maps HTTP headers to otel span attributes (e.g. map["x-session-id"]="session.id").
+//   - headerAttributeMapping: maps HTTP headers to otel span attributes (e.g. map["agent-session-id"]="session.id").
 //     If nil, no header mapping is applied.
 //
 // Returns a tracing graph that is noop when disabled.
@@ -123,6 +162,13 @@ func NewTracingFromEnv(ctx context.Context, stdout io.Writer, headerAttributeMap
 		// Fall through to use autoexport which will handle OTLP configuration.
 	}
 
+	// Resolve the semantic convention before building the SDK, because the
+	// convention determines the span attribute limits below.
+	recorders, err := newRecordersFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create resource with service name, defaulting to "ai-gateway" if not set.
 	// First create default resource, then one from env, then our fallback.
 	// The merge order ensures env vars override our default.
@@ -151,6 +197,14 @@ func NewTracingFromEnv(ctx context.Context, stdout io.Writer, headerAttributeMap
 		return nil, fmt.Errorf("failed to merge env resource: %w", err)
 	}
 
+	// Indexed message attributes scale with conversation length and exceed
+	// OTEL's default cap of 128, silently truncating spans. Lift the cap only
+	// for conventions that emit them, so the others retain OTEL defaults.
+	spanLimits := sdktrace.NewSpanLimits()
+	if recorders.unboundedAttributeCount {
+		spanLimits.AttributeCountLimit = -1
+	}
+
 	// Create the tracer provider, special casing console for sync and tests.
 	var tp *sdktrace.TracerProvider
 	if exporter == "console" {
@@ -161,6 +215,7 @@ func NewTracingFromEnv(ctx context.Context, stdout io.Writer, headerAttributeMap
 		tp = sdktrace.NewTracerProvider(
 			sdktrace.WithSyncer(stdoutExporter),
 			sdktrace.WithResource(res),
+			sdktrace.WithRawSpanLimits(spanLimits),
 		)
 
 	} else { // Configure exporter via ENV variables like OTEL_TRACES_EXPORTER.
@@ -172,6 +227,7 @@ func NewTracingFromEnv(ctx context.Context, stdout io.Writer, headerAttributeMap
 		tp = sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(autoExporter),
 			sdktrace.WithResource(res),
+			sdktrace.WithRawSpanLimits(spanLimits),
 		)
 	}
 
@@ -181,59 +237,92 @@ func NewTracingFromEnv(ctx context.Context, stdout io.Writer, headerAttributeMap
 	// Use provided header attribute mapping.
 	headerAttrs := headerAttributeMapping
 
-	// Default to OpenInference trace span semantic conventions.
-	chatRecorder := openai.NewChatCompletionRecorderFromEnv()
-	imageRecorder := openai.NewImageGenerationRecorderFromEnv()
-	completionRecorder := openai.NewCompletionRecorderFromEnv()
-	embeddingsRecorder := openai.NewEmbeddingsRecorderFromEnv()
-	responsesRecorder := openai.NewResponsesRecorderFromEnv()
-	rerankRecorder := cohere.NewRerankRecorderFromEnv()
-	messageRecorder := anthropic.NewMessageRecorderFromEnv()
-
 	tracer := tp.Tracer("envoyproxy/ai-gateway")
 	return &tracingImpl{
 		chatCompletionTracer: newChatCompletionTracer(
 			tracer,
 			propagator,
-			chatRecorder,
+			recorders.chatCompletion,
 			headerAttrs,
 		),
 		imageGenerationTracer: newImageGenerationTracer(
 			tracer,
 			propagator,
-			imageRecorder,
+			recorders.imageGeneration,
 		),
 		completionTracer: newCompletionTracer(
 			tracer,
 			propagator,
-			completionRecorder,
+			recorders.completion,
 			headerAttrs,
 		),
 		embeddingsTracer: newEmbeddingsTracer(
 			tracer,
 			propagator,
-			embeddingsRecorder,
+			recorders.embeddings,
 			headerAttrs,
 		),
 		responsesTracer: newResponsesTracer(
 			tracer,
 			propagator,
-			responsesRecorder,
+			recorders.responses,
+			headerAttrs,
+		),
+		speechTracer: newSpeechTracer(
+			tracer,
+			propagator,
+			recorders.speech,
+			headerAttrs,
+		),
+		transcriptionTracer: newTranscriptionTracer(
+			tracer,
+			propagator,
+			recorders.transcription,
+			headerAttrs,
+		),
+		translationTracer: newTranslationTracer(
+			tracer,
+			propagator,
+			recorders.translation,
 			headerAttrs,
 		),
 		rerankTracer: newRerankTracer(
 			tracer,
 			propagator,
-			rerankRecorder,
+			recorders.rerank,
+			headerAttrs,
+		),
+		systemOneTracer: newSystemOneTracer(
+			tracer,
+			propagator,
+			recorders.systemOne,
 			headerAttrs,
 		),
 		messageTracer: newMessageTracer(
 			tracer,
 			propagator,
-			messageRecorder,
+			recorders.message,
 			headerAttrs,
 		),
-		mcpTracer: newMCPTracer(tracer, propagator, headerAttrs),
+		tokenizeTracer: newTokenizeTracer(
+			tracer,
+			propagator,
+			recorders.tokenize,
+			headerAttrs,
+		),
+		responsesInputTokensTracer: newResponsesInputTokensTracer(
+			tracer,
+			propagator,
+			recorders.responsesInputTokens,
+			headerAttrs,
+		),
+		countTokensTracer: newCountTokensTracer(
+			tracer,
+			propagator,
+			recorders.countTokens,
+			headerAttrs,
+		),
+		mcpTracer: newMCPTracer(tracer, propagator, headerAttrs, recorders.mcp),
 		shutdown:  tp.Shutdown, // we have to shut down what we create.
 	}, nil
 }

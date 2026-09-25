@@ -22,6 +22,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/cohere"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/typesafe"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
@@ -225,9 +226,23 @@ func TestChatCompletionTracer_StartSpanAndInjectHeaders(t *testing.T) {
 	}
 }
 
+var transcriptionTracerCtor = func(tr oteltrace.Tracer, prop propagation.TextMapPropagator, headerAttrs map[string]string) tracingapi.TranscriptionTracer {
+	return newTranscriptionTracer(tr, prop, testTranscriptionRecorder{}, headerAttrs)
+}
+
+var translationTracerCtor = func(tr oteltrace.Tracer, prop propagation.TextMapPropagator, headerAttrs map[string]string) tracingapi.TranslationTracer {
+	return newTranslationTracer(tr, prop, testTranslationRecorder{}, headerAttrs)
+}
+
 func TestRequestTracers_Noop(t *testing.T) {
 	testNoopTracer(t, "chat completion", chatCompletionTracerCtor, func() *openai.ChatCompletionRequest {
 		return &openai.ChatCompletionRequest{Model: "test"}
+	})
+	testNoopTracer(t, "transcription", transcriptionTracerCtor, func() *openai.TranscriptionRequest {
+		return &openai.TranscriptionRequest{Model: "whisper-1"}
+	})
+	testNoopTracer(t, "translation", translationTracerCtor, func() *openai.TranslationRequest {
+		return &openai.TranslationRequest{Model: "whisper-1"}
 	})
 }
 
@@ -235,14 +250,20 @@ func TestRequestTracers_Unsampled(t *testing.T) {
 	testUnsampledTracer(t, "chat completion", chatCompletionTracerCtor, func() *openai.ChatCompletionRequest {
 		return &openai.ChatCompletionRequest{Model: "test"}
 	})
+	testUnsampledTracer(t, "transcription", transcriptionTracerCtor, func() *openai.TranscriptionRequest {
+		return &openai.TranscriptionRequest{Model: "whisper-1"}
+	})
+	testUnsampledTracer(t, "translation", translationTracerCtor, func() *openai.TranslationRequest {
+		return &openai.TranslationRequest{Model: "whisper-1"}
+	})
 }
 
 func TestRequestTracer_HeaderAttributeMapping(t *testing.T) {
 	t.Run("chat completion", func(t *testing.T) {
 		headers := map[string]string{
-			"x-session-id": "abc123",
-			"x-user-id":    "user456",
-			"x-other":      "ignored",
+			"agent-session-id": "abc123",
+			"x-tenant-id":      "user456",
+			"x-other":          "ignored",
 		}
 		reqBody, err := json.Marshal(req)
 		require.NoError(t, err)
@@ -253,7 +274,7 @@ func TestRequestTracer_HeaderAttributeMapping(t *testing.T) {
 			constructor:      chatCompletionTracerCtor,
 			req:              req,
 			headers:          headers,
-			headerAttrs:      map[string]string{"x-session-id": "session.id", "x-user-id": "user.id"},
+			headerAttrs:      map[string]string{"agent-session-id": "session.id", "x-tenant-id": "tenant.id"},
 			reqBody:          reqBody,
 			expectedSpanName: spanName,
 			expectedSpanType: (*chatCompletionSpan)(nil),
@@ -269,7 +290,7 @@ func TestRequestTracer_HeaderAttributeMapping(t *testing.T) {
 				require.Equal(t, "stream: false", attrMap["req"].AsString())
 				require.Equal(t, len(reqBody), int(attrMap["reqBodyLen"].AsInt64()))
 				require.Equal(t, "abc123", attrMap["session.id"].AsString())
-				require.Equal(t, "user456", attrMap["user.id"].AsString())
+				require.Equal(t, "user456", attrMap["tenant.id"].AsString())
 			},
 		})
 	})
@@ -279,7 +300,7 @@ func TestNewCompletionTracer_BuildsGenericRequestTracer(t *testing.T) {
 	tp := trace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	headerAttrs := map[string]string{"x-session-id": "session.id"}
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
 
 	tracer := newCompletionTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testCompletionRecorder{}, headerAttrs)
 	impl, ok := tracer.(*requestTracerImpl[
@@ -298,7 +319,7 @@ func TestNewEmbeddingsTracer_BuildsGenericRequestTracer(t *testing.T) {
 	tp := trace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	headerAttrs := map[string]string{"x-session-id": "session.id"}
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
 
 	tracer := newEmbeddingsTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testEmbeddingsRecorder{}, headerAttrs)
 	impl, ok := tracer.(*requestTracerImpl[
@@ -315,7 +336,7 @@ func TestNewRerankTracer_BuildsGenericRequestTracer(t *testing.T) {
 	tp := trace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	headerAttrs := map[string]string{"x-session-id": "session.id"}
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
 
 	tracer := newRerankTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testRerankTracerRecorder{}, headerAttrs)
 	impl, ok := tracer.(*requestTracerImpl[
@@ -330,6 +351,25 @@ func TestNewRerankTracer_BuildsGenericRequestTracer(t *testing.T) {
 		TopN: ptr.To(1),
 	}, []byte("{}"))
 	require.IsType(t, (*rerankSpan)(nil), s)
+}
+
+func TestNewSystemOneTracer_BuildsGenericRequestTracer(t *testing.T) {
+	tp := trace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
+
+	tracer := newSystemOneTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testSystemOneTracerRecorder{}, headerAttrs)
+	impl, ok := tracer.(*requestTracerImpl[
+		typesafe.SystemOneRequest,
+		typesafe.SystemOneResponse,
+		struct{},
+	])
+	require.True(t, ok)
+	require.Equal(t, headerAttrs, impl.headerAttributes)
+	require.NotNil(t, impl.newSpan)
+	s := tracer.StartSpanAndInjectHeaders(context.Background(), nil, propagation.MapCarrier{}, &typesafe.SystemOneRequest{Model: "jev-latest"}, []byte("{}"))
+	require.IsType(t, (*systemOneSpan)(nil), s)
 }
 
 func TestNewImageGenerationTracer_BuildsGenericRequestTracer(t *testing.T) {
@@ -353,7 +393,7 @@ func TestResponsesTracer_BuildsGenericRequestTracer(t *testing.T) {
 	tp := trace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
-	headerAttrs := map[string]string{"x-session-id": "session.id"}
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
 
 	tracer := newResponsesTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testResponsesRecorder{}, headerAttrs)
 	impl, ok := tracer.(*requestTracerImpl[
@@ -366,6 +406,44 @@ func TestResponsesTracer_BuildsGenericRequestTracer(t *testing.T) {
 	require.NotNil(t, impl.newSpan)
 	s := tracer.StartSpanAndInjectHeaders(context.Background(), nil, propagation.MapCarrier{}, &openai.ResponseRequest{}, []byte("{}"))
 	require.IsType(t, (*responsesSpan)(nil), s)
+}
+
+func TestNewTranscriptionTracer_BuildsGenericRequestTracer(t *testing.T) {
+	tp := trace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
+
+	tracer := newTranscriptionTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testTranscriptionRecorder{}, headerAttrs)
+	impl, ok := tracer.(*requestTracerImpl[
+		openai.TranscriptionRequest,
+		openai.TranscriptionResponse,
+		openai.TranscriptionStreamEvent,
+	])
+	require.True(t, ok)
+	require.Equal(t, headerAttrs, impl.headerAttributes)
+	require.NotNil(t, impl.newSpan)
+	s := tracer.StartSpanAndInjectHeaders(context.Background(), nil, propagation.MapCarrier{}, &openai.TranscriptionRequest{Model: "whisper-1"}, []byte("{}"))
+	require.IsType(t, (*transcriptionSpan)(nil), s)
+}
+
+func TestNewTranslationTracer_BuildsGenericRequestTracer(t *testing.T) {
+	tp := trace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	headerAttrs := map[string]string{"agent-session-id": "session.id"}
+
+	tracer := newTranslationTracer(tp.Tracer("test"), autoprop.NewTextMapPropagator(), testTranslationRecorder{}, headerAttrs)
+	impl, ok := tracer.(*requestTracerImpl[
+		openai.TranslationRequest,
+		openai.TranslationResponse,
+		struct{},
+	])
+	require.True(t, ok)
+	require.Equal(t, headerAttrs, impl.headerAttributes)
+	require.NotNil(t, impl.newSpan)
+	s := tracer.StartSpanAndInjectHeaders(context.Background(), nil, propagation.MapCarrier{}, &openai.TranslationRequest{Model: "whisper-1"}, []byte("{}"))
+	require.IsType(t, (*translationSpan)(nil), s)
 }
 
 type testChatCompletionRecorder struct{}
@@ -493,6 +571,26 @@ func (r testImageGenerationRecorder) RecordResponseOnError(span oteltrace.Span, 
 	)
 }
 
+type testSystemOneTracerRecorder struct {
+	tracingapi.NoopChunkRecorder[struct{}]
+}
+
+func (testSystemOneTracerRecorder) StartParams(*typesafe.SystemOneRequest, []byte) (string, []oteltrace.SpanStartOption) {
+	return "SystemOne", []oteltrace.SpanStartOption{oteltrace.WithSpanKind(oteltrace.SpanKindServer)}
+}
+
+func (testSystemOneTracerRecorder) RecordRequest(span oteltrace.Span, req *typesafe.SystemOneRequest, _ []byte) {
+	span.SetAttributes(attribute.String("model", req.Model))
+}
+
+func (testSystemOneTracerRecorder) RecordResponseOnError(span oteltrace.Span, statusCode int, _ []byte) {
+	span.SetAttributes(attribute.Int("status", statusCode))
+}
+
+func (testSystemOneTracerRecorder) RecordResponse(span oteltrace.Span, resp *typesafe.SystemOneResponse) {
+	span.SetAttributes(attribute.String("response_model", resp.Model))
+}
+
 type testRerankTracerRecorder struct {
 	tracingapi.NoopChunkRecorder[struct{}]
 }
@@ -557,4 +655,58 @@ func (r testResponsesRecorder) RecordResponseOnError(span oteltrace.Span, status
 		attribute.Int("statusCode", statusCode),
 		attribute.String("errorBody", string(body)),
 	)
+}
+
+type testTranscriptionRecorder struct {
+	tracingapi.NoopChunkRecorder[openai.TranscriptionStreamEvent]
+}
+
+func (testTranscriptionRecorder) StartParams(_ *openai.TranscriptionRequest, _ []byte) (string, []oteltrace.SpanStartOption) {
+	return "Transcription", startOpts
+}
+
+func (testTranscriptionRecorder) RecordRequest(span oteltrace.Span, req *openai.TranscriptionRequest, body []byte) {
+	span.SetAttributes(
+		attribute.String("model", req.Model),
+		attribute.Int("reqBodyLen", len(body)),
+	)
+}
+
+func (testTranscriptionRecorder) RecordResponse(span oteltrace.Span, resp *openai.TranscriptionResponse) {
+	span.SetAttributes(attribute.Int("statusCode", 200))
+	if resp != nil {
+		span.SetAttributes(attribute.String("text", resp.Text))
+	}
+}
+
+func (testTranscriptionRecorder) RecordResponseOnError(span oteltrace.Span, statusCode int, body []byte) {
+	span.SetAttributes(attribute.Int("statusCode", statusCode))
+	span.SetAttributes(attribute.String("errorBody", string(body)))
+}
+
+type testTranslationRecorder struct {
+	tracingapi.NoopChunkRecorder[struct{}]
+}
+
+func (testTranslationRecorder) StartParams(_ *openai.TranslationRequest, _ []byte) (string, []oteltrace.SpanStartOption) {
+	return "Translation", startOpts
+}
+
+func (testTranslationRecorder) RecordRequest(span oteltrace.Span, req *openai.TranslationRequest, body []byte) {
+	span.SetAttributes(
+		attribute.String("model", req.Model),
+		attribute.Int("reqBodyLen", len(body)),
+	)
+}
+
+func (testTranslationRecorder) RecordResponse(span oteltrace.Span, resp *openai.TranslationResponse) {
+	span.SetAttributes(attribute.Int("statusCode", 200))
+	if resp != nil {
+		span.SetAttributes(attribute.String("text", resp.Text))
+	}
+}
+
+func (testTranslationRecorder) RecordResponseOnError(span oteltrace.Span, statusCode int, body []byte) {
+	span.SetAttributes(attribute.Int("statusCode", statusCode))
+	span.SetAttributes(attribute.String("errorBody", string(body)))
 }

@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,46 +25,71 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	"github.com/envoyproxy/ai-gateway/internal/lang"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
-// MCPProxy serves /mcp endpoint.
-//
-// This implements [extproc.ConfigReceiver] to gets the up-to-date configuration.
-type MCPProxy struct {
-	*mcpProxyConfig
-	metrics            metrics.MCPMetrics
-	l                  *slog.Logger
-	sessionCrypto      SessionCrypto
-	tracer             tracingapi.MCPTracer
-	toolChangeSignaler changeSignaler // signals tool changes to active sessions.
-	client             http.Client
+// mcpRequestContext serves /mcp endpoint.
+type mcpRequestContext struct {
+	*ProxyConfig
+	metrics                   metrics.MCPMetrics
+	requestHeaders            http.Header
+	originalPath              string
+	perBackendMetricsRecorded bool
+	// extraHeaders and perBackendExtraHeaders are request-derived headers to
+	// forward upstream. The modern path fills them in resolveModernRouteBackends
+	// (same order as newSession). The legacy path stores the same maps on the
+	// session instead.
+	extraHeaders           map[string]string
+	perBackendExtraHeaders map[filterapi.MCPBackendName]map[string]string
+	forwardHeadersResolved bool
+}
+
+// defaultMaxRequestBodySize is the default maximum allowed POST body size in bytes (4 MiB).
+const defaultMaxRequestBodySize = 4 * 1024 * 1024
+
+var errNoMatchingBackendSelector = errors.New("backendSelector matches no route backends")
+
+// getMaxRequestBodySize returns the configured POST body limit from the environment variable,
+// falling back to 4 MiB if the variable is unset or invalid.
+func getMaxRequestBodySize() int64 {
+	if v, ok := os.LookupEnv("MCP_PROXY_MAX_REQUEST_BODY_SIZE"); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxRequestBodySize
 }
 
 // NewMCPProxy creates a new MCPProxy instance.
-func NewMCPProxy(l *slog.Logger, mcpMetrics metrics.MCPMetrics, tracer tracingapi.MCPTracer, sessionCrypto SessionCrypto) (*ProxyConfig, *http.ServeMux, error) {
+func NewMCPProxy(l *slog.Logger, mcpMetrics metrics.MCPMetrics, tracer tracingapi.MCPTracer, sessionCrypto SessionCrypto, logRequestHeaderAttributes map[string]string) (*ProxyConfig, *http.ServeMux, error) {
 	toolChangeSignaler := newMultiWatcherSignaler() // used to signal changes to all active sessions.
-	cfg := &ProxyConfig{toolChangeSignaler: toolChangeSignaler}
+	cfg := &ProxyConfig{
+		toolChangeSignaler:         toolChangeSignaler,
+		tracer:                     tracer,
+		sessionCrypto:              sessionCrypto,
+		l:                          l,
+		client:                     http.Client{}, // No timeout as it's enforced at Envoy level.
+		logRequestHeaderAttributes: maps.Clone(logRequestHeaderAttributes),
+		maxRequestBodySize:         getMaxRequestBodySize(),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(
 		// Must match all paths since the route selection happens at Envoy level and the "route" header is already
 		// set when it reaches here. We use that to select the appropriate backends, so we don't need to have different paths here.
 		//
 		// For example, if we mistakenly set /mcp here, only the route with prefix /mcp will be matched, and other routes
-		// with different prefixes will not be matched, which is not what we want.
+		// with different prefixes will not be matched, which is not desired.
 		"/", func(w http.ResponseWriter, r *http.Request) {
-			proxy := &MCPProxy{
-				mcpProxyConfig:     cfg.mcpProxyConfig,
-				l:                  l,
-				metrics:            mcpMetrics.WithRequestAttributes(r),
-				tracer:             tracer,
-				sessionCrypto:      sessionCrypto,
-				toolChangeSignaler: toolChangeSignaler,
-				client:             http.Client{}, // No timeout as it's enforced at Envoy level.
+			proxy := &mcpRequestContext{
+				metrics:        mcpMetrics.WithRequestAttributes(r),
+				ProxyConfig:    cfg,
+				requestHeaders: r.Header,
+				originalPath:   originalPathForRequest(r),
 			}
-
 			switch r.Method {
 			case http.MethodGet:
 				proxy.serveGET(w, r)
@@ -76,27 +104,128 @@ func NewMCPProxy(l *slog.Logger, mcpMetrics metrics.MCPMetrics, tracer tracingap
 	return cfg, mux, nil
 }
 
+func originalPathForRequest(r *http.Request) string {
+	if r.RequestURI != "" {
+		return r.RequestURI
+	}
+	if r.URL == nil {
+		return ""
+	}
+	return r.URL.RequestURI()
+}
+
+func setHeaderIfMissing(h http.Header, key, value string) {
+	if h.Get(key) != "" {
+		return
+	}
+	h.Set(key, value)
+}
+
+func (m *mcpRequestContext) applyOriginalPathHeaders(req *http.Request) {
+	setHeaderIfMissing(req.Header, internalapi.OriginalPathHeader, m.originalPath)
+	setHeaderIfMissing(req.Header, internalapi.EnvoyOriginalPathHeader, m.originalPath)
+}
+
+func (m *mcpRequestContext) applyLogHeaderMappings(req *http.Request, msg jsonrpc.Message) {
+	if req == nil || len(m.logRequestHeaderAttributes) == 0 {
+		return
+	}
+	meta := extractMetaFromJSONRPCMessage(msg)
+	for header := range m.logRequestHeaderAttributes {
+		if value := lang.CaseInsensitiveValue(meta, header); value != "" {
+			req.Header.Set(header, value)
+			continue
+		}
+		if m.requestHeaders == nil {
+			continue
+		}
+		if value := m.requestHeaders.Get(header); value != "" {
+			req.Header.Set(header, value)
+		}
+	}
+}
+
+func extractMetaFromJSONRPCMessage(msg jsonrpc.Message) map[string]any {
+	req, ok := msg.(*jsonrpc.Request)
+	if !ok || req == nil || len(req.Params) == 0 {
+		return nil
+	}
+	var params struct {
+		Meta map[string]any `json:"_meta"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil
+	}
+	return params.Meta
+}
+
+// selectAuthorizedBackends returns the subset of route backends this request may fan out to.
+// spec.backendSelector is evaluated once per candidate backend using the caller's
+// headers. JWT/CEL inputs are parsed once and reused across candidates. With no
+// selector configured, all route backends are returned.
+func (m *mcpRequestContext) selectAuthorizedBackends(routeName filterapi.MCPRouteName, route *mcpProxyConfigRoute) (map[filterapi.MCPBackendName]filterapi.MCPBackend, error) {
+	if route.backendSelector == nil {
+		return route.backends, nil
+	}
+	headers := m.requestHeaders
+	if headers == nil {
+		headers = http.Header{}
+	}
+	filtered := make(map[filterapi.MCPBackendName]filterapi.MCPBackend, len(route.backends))
+	authzCtx := m.newAuthzContext(&authorizationRequest{Headers: headers})
+	for name, backend := range route.backends {
+		allowed, _ := m.authorizeRequestWith(route.backendSelector, &authorizationRequest{
+			Headers: headers,
+			Backend: name,
+		}, authzCtx)
+		if allowed {
+			filtered[name] = backend
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("%w for route %s", errNoMatchingBackendSelector, routeName)
+	}
+	return filtered, nil
+}
+
 // newSession creates a new session for a downstream client.
 // It multiplexes the initialize request to all backends defined in the MCPRoute associated with the downstream request.
-func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, routeName filterapi.MCPRouteName, subject string, span tracingapi.MCPSpan) (*session, error) {
+// startAt is the time when the overall HTTP request started, used for recording request duration metrics.
+func (m *mcpRequestContext) newSession(ctx context.Context, p *mcp.InitializeParams, routeName filterapi.MCPRouteName, subject string, span tracingapi.MCPSpan, startAt time.Time) (*session, error) {
 	m.l.Debug("creating new MCP session")
+
+	backends := m.routes[routeName]
+	if backends == nil {
+		return nil, fmt.Errorf("no backends found for route %s", routeName)
+	}
+
+	// Route-level headers are extracted before backendSelector so the same
+	// request-derived header set is available for authorization and later
+	// backend calls. Per-backend headers are extracted after selection so
+	// denied backends never receive forwarded credentials.
+	forwardHeaders := extractForwardHeaders(m.requestHeaders, backends.forwardHeaders)
+
+	// spec.backendSelector, if configured, is evaluated once per candidate backend here,
+	// at session-initialize time, rather than on every subsequent call in the session.
+	// With no selector configured, all backends are considered (unchanged behavior).
+	selectedBackends, err := m.selectAuthorizedBackends(routeName, backends)
+	if err != nil {
+		return nil, err
+	}
+
+	perBackendHeaders := m.extractPerBackendHeaders(selectedBackends)
 
 	var (
 		wg      sync.WaitGroup
 		entries []compositeSessionEntry
 		counter int
 	)
-
-	backends := m.routes[routeName]
-	if backends == nil {
-		return nil, fmt.Errorf("no backends found for route %s", routeName)
-	}
-	entries = make([]compositeSessionEntry, len(backends.backends))
+	entries = make([]compositeSessionEntry, len(selectedBackends))
 
 	if m.l.Enabled(ctx, slog.LevelDebug) {
 		m.l.Debug("initializing MCP sessions to backends", slog.String("route", routeName), slog.Any("backends", backends))
 	}
-	for _, backend := range backends.backends {
+	for _, backend := range selectedBackends {
 		entryIndex := counter
 		counter++
 		// Initialize sessions to all backends in parallel to reduce the overall latency of session creation.
@@ -104,23 +233,28 @@ func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, rout
 			if m.l.Enabled(ctx, slog.LevelDebug) {
 				m.l.Debug("creating MCP session", slog.String("backend", backend.Name))
 			}
-			startAt := time.Now()
-			initResult, err := m.initializeSession(ctx, routeName, backend, p)
-			if err != nil {
-				m.l.Error("failed to create MCP session", slog.String("backend", backend.Name), slog.String("error", err.Error()))
+			backendStartAt := time.Now()
+			initResult, initErr := m.initializeSession(ctx, routeName, backend, p, startAt)
+			if initErr != nil {
+				m.l.Error("failed to create MCP session", slog.String("backend", backend.Name), slog.String("error", initErr.Error()))
 				// If one backend fails, don't fail the overall connection. Create a session to the rest of the backends, as they
 				// may provide the needed methods.
 				// TODO: should we record a metric for this?
 				return
 			}
-			m.metrics.RecordInitializationDuration(ctx, startAt, p)
+			m.metrics.WithBackend(backend.Name).RecordInitializationDuration(ctx, backendStartAt, p)
 			if m.l.Enabled(ctx, slog.LevelDebug) {
 				m.l.Debug("created MCP session", slog.String("backend", backend.Name), slog.String("session_id", string(initResult.sessionID)))
 			}
 			if span != nil {
 				span.RecordRouteToBackend(backend.Name, string(initResult.sessionID), true)
 			}
-			entries[entryIndex] = compositeSessionEntry{sessionID: initResult.sessionID, backendName: backend.Name}
+			entries[entryIndex] = compositeSessionEntry{
+				sessionID:       initResult.sessionID,
+				backendName:     backend.Name,
+				capabilities:    initResult.result.Capabilities,
+				protocolVersion: initResult.result.ProtocolVersion,
+			}
 		})
 	}
 	wg.Wait()
@@ -142,11 +276,26 @@ func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, rout
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt session ID: %w", err)
 	}
-	return &session{proxy: m, id: secureClientToGatewaySessionID(encrypted)}, nil
+
+	// Build perBackendSessions map from finalEntries
+	perBackendSessions := make(map[filterapi.MCPBackendName]*compositeSessionEntry, len(finalEntries))
+	for i := range finalEntries {
+		entry := &finalEntries[i]
+		perBackendSessions[entry.backendName] = entry
+	}
+
+	return &session{
+		reqCtx:                 m,
+		id:                     secureClientToGatewaySessionID(encrypted),
+		route:                  routeName,
+		perBackendSessions:     perBackendSessions,
+		extraHeaders:           forwardHeaders,
+		perBackendExtraHeaders: perBackendHeaders,
+	}, nil
 }
 
 // sessionFromID returns the session with the given ID, or error if not found or invalid.
-func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent secureClientToGatewayEventID) (*session, error) {
+func (m *mcpRequestContext) sessionFromID(id secureClientToGatewaySessionID, lastEvent secureClientToGatewayEventID) (*session, error) {
 	decrypted, err := m.sessionCrypto.Decrypt(string(id))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt session ID: %w", err)
@@ -170,7 +319,148 @@ func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent se
 		}
 	}
 
-	return &session{id: id, route: route, proxy: m, perBackendSessions: perBackendSessionIDs}, nil
+	// Extract forward headers from the current request based on the route's forwardHeaders config.
+	var extraHeaders map[string]string
+	var perBackendHeaders map[filterapi.MCPBackendName]map[string]string
+	if routeConfig := m.routes[route]; routeConfig != nil {
+		extraHeaders = extractForwardHeaders(m.requestHeaders, routeConfig.forwardHeaders)
+		perBackendHeaders = m.extractPerBackendHeaders(routeConfig.backends)
+	}
+
+	return &session{id: id, route: route, reqCtx: m, perBackendSessions: perBackendSessionIDs, extraHeaders: extraHeaders, perBackendExtraHeaders: perBackendHeaders}, nil
+}
+
+// backendReportedVersions is one backend's advertised protocol version(s).
+// Legacy initialize contributes a single version; modern server/discover may
+// contribute a SupportedVersions list. Name is used only in warning logs.
+type backendReportedVersions struct {
+	name     string
+	versions []string
+}
+
+// mergedProtocolVersion negotiates the single MCP protocol version the gateway
+// advertises to a client, given what each backend supports and (optionally) the
+// version the client asked for. It is shared by the stateful legacy initialize
+// path (handleInitializeRequest) and the stateless modern server/discover path
+// (mergeDiscoverResults) so both negotiate identically.
+//
+// The negotiated version is:
+//
+//	max(protocolVersion20250618, min(clientVersion, min(perBackendMax)))
+//
+// where perBackendMax is the highest version each backend advertises, and the
+// min against clientVersion is skipped when clientVersion is empty.
+// The floor is applied last so a client (or backend) below 2025-06-18 is
+// lifted to the gateway-tested minimum rather than pulling the result down.
+//
+// Rationale for each clamp:
+//   - min across backends: the gateway aggregates several backends behind one
+//     endpoint, so it can only honestly guarantee features every backend
+//     supports. Advertising a newer version than the weakest backend would let a
+//     client rely on capabilities that backend cannot deliver.
+//   - min with client: prefer not to advertise newer than the client asked for;
+//     the client keys its own behavior off the negotiated version.
+//   - max(floor): 2025-06-18 is the version the gateway itself was built and
+//     tested against. Applied last so pre-floor clients/backends are lifted
+//     rather than dragging the advertised version below what the gateway has
+//     ever spoken. A pre-floor client SHOULD disconnect per the MCP spec if it
+//     cannot support the returned version; a pre-floor backend may receive
+//     requests it cannot parse — both cases are logged as warnings.
+//
+// NOTE: MCP protocol versions are NOT guaranteed to be backward compatible
+// across the transport boundary (e.g. 2024-11-05 used HTTP+SSE while 2025-03-26+
+// use Streamable HTTP). Versions are ISO date strings (YYYY-MM-DD), so
+// lexicographic comparison yields chronological ordering. Negotiating the
+// minimum is a best-effort "honest floor" rather than a correctness guarantee;
+// mismatches across a breaking boundary are surfaced via the warnings below.
+func mergedProtocolVersion(l *slog.Logger, clientVersion string, backends []backendReportedVersions) string {
+	const floor = protocolVersion20250618
+
+	// Compute the minimum, across backends, of each backend's best (highest)
+	// supported version. Backends that reported nothing are ignored: every
+	// spec-compliant server MUST return a protocolVersion in its initialize
+	// response, so an empty entry means we failed to learn it, not that the
+	// backend supports "no version".
+	var backendMin string
+	var downgradedBackends []string // backends advertising newer than the merged min.
+	var flooredBackends []string    // backends whose best version is below the floor.
+	type namedMax struct {
+		name string
+		max  string
+	}
+	backendMaxes := make([]namedMax, 0, len(backends))
+	for _, b := range backends {
+		var backendMax string
+		for _, v := range b.versions {
+			if v == "" {
+				continue
+			}
+			if v > backendMax {
+				backendMax = v
+			}
+		}
+		if backendMax == "" {
+			continue
+		}
+		name := b.name
+		if name == "" {
+			name = fmt.Sprintf("backend[%d]", len(backendMaxes))
+		}
+		backendMaxes = append(backendMaxes, namedMax{name: name, max: backendMax})
+		if backendMin == "" || backendMax < backendMin {
+			backendMin = backendMax
+		}
+	}
+
+	// If we learned nothing from any backend, fall back to the floor.
+	if backendMin == "" {
+		return floor
+	}
+
+	// candidate = min(clientVersion, backendMin). Empty clientVersion means no constraint.
+	merged := backendMin
+	if clientVersion != "" && clientVersion < merged {
+		merged = clientVersion
+	}
+
+	// Apply the tested-version floor last so pre-floor clients/backends cannot
+	// pull the advertised version below what the gateway has been tested on.
+	if merged < floor {
+		merged = floor
+	}
+
+	// Classify backends for warnings.
+	for _, bm := range backendMaxes {
+		if bm.max > merged {
+			downgradedBackends = append(downgradedBackends, fmt.Sprintf("%s(%s)", bm.name, bm.max))
+		}
+		if bm.max < floor {
+			flooredBackends = append(flooredBackends, fmt.Sprintf("%s(%s)", bm.name, bm.max))
+		}
+	}
+
+	if l != nil && len(downgradedBackends) > 0 {
+		l.Warn("MCP protocol version downgraded below some backends: clients may attempt unsupported features",
+			slog.String("merged_version", merged),
+			slog.String("downgraded_backends", strings.Join(downgradedBackends, ", ")),
+			slog.String("note", "MCP versions are not backward compatible across the 2024-11-05 vs 2025-03-26+ transport boundary"),
+		)
+	}
+	if l != nil && (len(flooredBackends) > 0 || (clientVersion != "" && clientVersion < floor)) {
+		attrs := []any{
+			slog.String("merged_version", merged),
+			slog.String("floor", floor),
+		}
+		if clientVersion != "" && clientVersion < floor {
+			attrs = append(attrs, slog.String("client_requested", clientVersion))
+		}
+		if len(flooredBackends) > 0 {
+			attrs = append(attrs, slog.String("floored_backends", strings.Join(flooredBackends, ", ")))
+		}
+		l.Warn("MCP protocol version below floor: lifting to gateway-tested minimum; affected backends may receive unparsable requests", attrs...)
+	}
+
+	return merged
 }
 
 type initializeResult struct {
@@ -178,7 +468,7 @@ type initializeResult struct {
 	result    *mcp.InitializeResult
 }
 
-func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams) (*initializeResult, error) {
+func (m *mcpRequestContext) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams, startAt time.Time) (*initializeResult, error) {
 	// Send the initialize request to the MCP backend listener.
 	reqID := mustJSONRPCRequestID()
 	var (
@@ -192,7 +482,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 			return nil, fmt.Errorf("failed to marshal MCP initialize params: %w", err)
 		}
 		mcpReq := &jsonrpc.Request{Method: "initialize", Params: initializeReq, ID: reqID}
-		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, nil, mcpReq)
+		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, nil, mcpReq, p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send MCP initialize request: %w", err)
 		}
@@ -217,37 +507,54 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 		}
 
 		var rawMsg jsonrpc.Message
-		switch resp.Header.Get("Content-Type") {
-		case "text/event-stream":
-			parser := newSSEEventParser(resp.Body, backend.Name)
-			for {
+		var sseReader io.Reader = resp.Body
+		if resp.Header.Get("Content-Type") != "text/event-stream" {
+			body, _ := io.ReadAll(resp.Body)
+			msg, ok := tryDecodeJSONRPCMessage(body)
+			if ok {
+				rawMsg = msg
+			} else {
+				// Not valid JSON-RPC; fall through to SSE parser with the already-read bytes.
+				sseReader = bytes.NewReader(body)
+			}
+		}
+		if rawMsg == nil {
+			parser := newSSEEventParser(sseReader, backend.Name)
+			var readErr error
+			for rawMsg == nil {
 				event, parseErr := parser.next()
 				// TODO: handle reconnect. We need to re-arrange the event ID so that it will also contain the backend name and the original session ID.
 				// 	Since event ID can be arbitrary string, we can shove each backend's last even ID into the event ID just like the session ID.
 				if event != nil {
-					// TODO: there's no session here what should we do?
-					if len(event.messages) < 1 {
-						return nil, errors.New("failed to get message from MCP sse event")
+					// Some backends emit non-response events (keep-alives with an
+					// empty data line, notifications) before the initialize result.
+					// Skip those and keep reading until we find the JSON-RPC response.
+					for _, msg := range event.messages {
+						if _, ok := msg.(*jsonrpc.Response); ok {
+							rawMsg = msg
+						}
 					}
-					// Last event is the actual response.
-					rawMsg = event.messages[len(event.messages)-1]
+				}
+				if rawMsg != nil {
+					// Found the response; a trailing EOF on this same event is not a failure.
+					break
 				}
 				if parseErr != nil {
-					if errors.Is(parseErr, io.EOF) || strings.Contains(parseErr.Error(), "context deadline exceeded") {
-						break
+					readErr = parseErr
+					if !errors.Is(parseErr, io.EOF) && !strings.Contains(parseErr.Error(), "context deadline exceeded") {
+						m.l.Error("failed to read MCP GET response body", slog.String("error", parseErr.Error()))
 					}
-					m.l.Error("failed to read MCP GET response body", slog.String("error", parseErr.Error()))
 					break
 				}
 			}
-		default:
-			// Handle JSON response.
-			body, _ := io.ReadAll(resp.Body)
-			// Decode the JSON-RPC message.
-			rawMsg, err = jsonrpc.DecodeMessage(body)
-			if err != nil {
-				m.l.Warn("Failed to decode MCP message", slog.String("error", err.Error()))
-				return nil, fmt.Errorf("failed to decode MCP message: %w", err)
+			if rawMsg == nil {
+				// The SSE stream ended (EOF/deadline) or errored before any JSON-RPC
+				// response arrived. Surface a clear error instead of falling through to
+				// the misleading "MCP message is not a response: <nil>".
+				if readErr != nil && !errors.Is(readErr, io.EOF) && !strings.Contains(readErr.Error(), "context deadline exceeded") {
+					return nil, fmt.Errorf("failed to read MCP initialize response from backend %q: %w", backend.Name, readErr)
+				}
+				return nil, fmt.Errorf("MCP initialize stream from backend %q ended before a JSON-RPC response was received", backend.Name)
 			}
 		}
 
@@ -266,7 +573,10 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 		if m.l.Enabled(ctx, slog.LevelDebug) {
 			m.l.Debug("MCP session initialized", slog.Any("capabilities", initResult.Capabilities))
 		}
-		m.metrics.RecordServerCapabilities(ctx, initResult.Capabilities, p)
+		backendMetrics := m.metrics.WithBackend(backend.Name)
+		backendMetrics.RecordServerCapabilities(ctx, initResult.Capabilities, p)
+		backendMetrics.RecordMethodCount(ctx, "initialize", p)
+		backendMetrics.RecordRequestDuration(ctx, startAt, p)
 	}
 
 	// Need to invoke "notifications/initialized" to complete the initialization.
@@ -275,7 +585,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 		mcpReq := &jsonrpc.Request{Method: "notifications/initialized", Params: emptyJSONRPCMessage}
 		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, &compositeSessionEntry{
 			sessionID: gatewayToMCPServerSessionID(sessionID),
-		}, mcpReq)
+		}, mcpReq, p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send MCP notifications/initialized request: %w", err)
 		}
@@ -286,6 +596,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 			body, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("MCP notifications/initialized request failed with status code %d, body=%s", resp.StatusCode, string(body))
 		}
+		m.metrics.WithBackend(backend.Name).RecordMethodCount(ctx, "notifications/initialized", p)
 	}
 	if m.l.Enabled(ctx, slog.LevelDebug) {
 		m.l.Debug("sent MCP notifications/initialized", slog.String("backend", backend.Name), slog.String("session_id", sessionID))
@@ -296,16 +607,18 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 	}, nil
 }
 
-func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry, msg jsonrpc.Message) (*http.Response, error) {
+func (m *mcpRequestContext) invokeJSONRPCRequest(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry, msg jsonrpc.Message, params mcp.Params) (*http.Response, error) {
 	encoded, err := jsonrpc.EncodeMessage(msg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode MCP message: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.mcpEndpointForBackend(backend), bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.backendListenerAddr, bytes.NewReader(encoded))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MCP notifications/initialized request: %w", err)
 	}
-	addMCPHeaders(req, msg, routeName, backend.Name)
+	addMCPHeaders(req, msg, params, routeName, backend.Name)
+	m.applyLogHeaderMappings(req, msg)
+	m.applyOriginalPathHeaders(req)
 	if cse != nil {
 		if len(cse.sessionID) > 0 {
 			req.Header.Set(sessionIDHeader, string(cse.sessionID))
@@ -317,6 +630,24 @@ func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 
+	// Forward configured headers to backend.
+	if routeConfig := m.routes[routeName]; routeConfig != nil {
+		// Route-level headers (e.g., OAuth claimToHeaders).
+		for _, header := range routeConfig.forwardHeaders {
+			if value := m.requestHeaders.Get(header); value != "" {
+				req.Header.Set(header, value)
+			}
+		}
+		// Per-backend headers (from MCPRouteBackendRef.forwardHeaders) with optional renaming.
+		if b, ok := routeConfig.backends[backend.Name]; ok {
+			for _, fh := range b.ForwardHeaders {
+				if value := m.requestHeaders.Get(fh.Name); value != "" {
+					req.Header.Set(fh.ForwardName(), value)
+				}
+			}
+		}
+	}
+
 	resp, err := m.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send MCP notifications/initialized request: %w", err)
@@ -324,7 +655,7 @@ func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi
 	return resp, nil
 }
 
-func (m *MCPProxy) getBackendForRoute(route, backend filterapi.MCPBackendName) (filterapi.MCPBackend, error) {
+func (m *mcpRequestContext) getBackendForRoute(route, backend filterapi.MCPBackendName) (filterapi.MCPBackend, error) {
 	r := m.routes[route]
 	if r == nil {
 		return filterapi.MCPBackend{}, fmt.Errorf("no route found for %q", route)

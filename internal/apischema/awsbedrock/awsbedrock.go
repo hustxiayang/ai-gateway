@@ -472,6 +472,7 @@ type ConverseStreamEvent struct {
 	StopReason        *string                               `json:"stopReason,omitempty"`
 	Usage             *TokenUsage                           `json:"usage,omitempty"`
 	Start             *ContentBlockStart                    `json:"start,omitempty"`
+	ServiceTier       *ServiceTier                          `json:"serviceTier,omitempty"`
 }
 
 // ConverseStreamEventContentBlockDelta is defined in the AWS Bedrock API:
@@ -565,8 +566,9 @@ type ToolConfiguration struct {
 // information, see Tool use (function calling) (https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html)
 // in the Amazon Bedrock User Guide.
 type Tool struct {
-	// The specification for the tool.
-	ToolSpec *ToolSpecification `json:"toolSpec"`
+	// The specification for the tool. Omitted when this element only carries a cache point,
+	// as Bedrock rejects an element that sets more than one of the union's members.
+	ToolSpec *ToolSpecification `json:"toolSpec,omitempty"`
 
 	// Cache point for prompt caching. Enables caching of preceding content.
 	// See https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html for more information.
@@ -600,4 +602,73 @@ type ToolSpecification struct {
 type CachePointBlock struct {
 	// The type of cache point. Currently only "default" is supported.
 	Type string `json:"type"`
+}
+
+// TitanEmbeddingRequest is the request body for the Amazon Titan Embed Text models
+// via the AWS Bedrock InvokeModel API.
+//
+// v1 (amazon.titan-embed-text-v1): only InputText is supported.
+// v2 (amazon.titan-embed-text-v2:0): Dimensions, Normalize, and EmbeddingTypes are also supported.
+//
+// See https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-embed-text.html
+type TitanEmbeddingRequest struct {
+	// InputText is the text to embed. Required.
+	InputText string `json:"inputText"`
+
+	// Dimensions is the number of dimensions for the output embedding.
+	// Accepted values: 256, 512, 1024 (default). Only supported by v2.
+	Dimensions *int `json:"dimensions,omitempty"`
+
+	// Normalize indicates whether to normalize the output embedding vector.
+	// Defaults to true. Only supported by v2.
+	Normalize *bool `json:"normalize,omitempty"`
+
+	// EmbeddingTypes specifies the output embedding types.
+	// Accepted values: "float" (default), "binary". Only supported by v2.
+	EmbeddingTypes []string `json:"embeddingTypes,omitempty"`
+}
+
+// TitanEmbeddingResponse is the response body returned by the Amazon Titan Embed Text models.
+//
+// See https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-embed-text.html
+type TitanEmbeddingResponse struct {
+	// Embedding is the embedding vector for the input text.
+	Embedding []float64 `json:"embedding"`
+
+	// InputTextTokenCount is the number of tokens in the input text.
+	InputTextTokenCount int `json:"inputTextTokenCount"`
+}
+
+// CountTokensConverseInput mirrors the Converse input for the Bedrock CountTokens API.
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensConverseInput struct {
+	Messages   []*Message            `json:"messages,omitempty"`
+	System     []*SystemContentBlock `json:"system,omitempty"`
+	ToolConfig *ToolConfiguration    `json:"toolConfig,omitempty"`
+}
+
+// CountTokensConverseRequest is the request structure for the Bedrock CountTokens API using Converse-style input.
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensConverseRequest struct {
+	Input struct {
+		Converse *CountTokensConverseInput `json:"converse"`
+	} `json:"input"`
+}
+
+// CountTokensInvokeModelRequest is the request structure for the Bedrock CountTokens API using InvokeModel-style input.
+// The body is a base64-encoded model-specific request body (e.g., Anthropic Messages format).
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensInvokeModelRequest struct {
+	Input struct {
+		InvokeModel struct {
+			Body string `json:"body"`
+		} `json:"invokeModel"`
+	} `json:"input"`
+}
+
+// CountTokensResponse represents the response structure for the AWS Bedrock CountTokens API
+// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+type CountTokensResponse struct {
+	// The total number of input tokens that were counted
+	InputTokens int `json:"inputTokens"`
 }

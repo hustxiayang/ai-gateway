@@ -9,22 +9,45 @@ package internalapi
 
 import (
 	"fmt"
+	"maps"
+	"regexp"
+	"slices"
 	"strings"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 )
 
 const (
 	// EnvoyAIGatewayHeaderPrefix is the prefix for special headers used by AI Gateway, either for internal or external use.
 	EnvoyAIGatewayHeaderPrefix = "x-ai-eg-"
+	// EnvoyOriginalPathHeader is the Envoy header used to preserve the original request path.
+	EnvoyOriginalPathHeader = "x-envoy-original-path"
+	// OriginalPathHeader is the AI Gateway header used to preserve the original request path.
+	OriginalPathHeader = EnvoyAIGatewayHeaderPrefix + "original-path"
 	// InternalEndpointMetadataNamespace is the namespace used for the dynamic metadata for internal use.
 	InternalEndpointMetadataNamespace = "aigateway.envoy.io"
 	// InternalMetadataBackendNameKey is the key used to store the backend name
 	InternalMetadataBackendNameKey = "per_route_rule_backend_name"
+	// InternalMetadataUpstreamHostKey is the key used to store the resolved upstream host on endpoint
+	// metadata (e.g. consumed by the AWS backend auth handler for SigV4 signing).
+	InternalMetadataUpstreamHostKey = "upstream_host"
+	// InternalMetadataRouteNameKey is the key used to store the route name.
+	InternalMetadataRouteNameKey = "aigw_route_name"
+	// UpstreamHostHeader carries the upstream host resolved at config time from the upstream ext_proc
+	// filter to backend auth handlers. The AWS handler derives its SigV4 signing region from this host,
+	// so there is no separate region header.
+	UpstreamHostHeader = EnvoyAIGatewayHeaderPrefix + "upstream-host"
 	// MCPBackendHeader is the special header key used to specify the target backend name.
 	MCPBackendHeader = EnvoyAIGatewayHeaderPrefix + "mcp-backend"
 	// MCPRouteHeader is the special header key used to identify the mcp route.
 	MCPRouteHeader = EnvoyAIGatewayHeaderPrefix + "mcp-route"
+	// MCPSubjectHeader carries the authenticated subject (the JWT "sub" claim) as extracted
+	// and verified by Envoy's JWT filter via a claimToHeaders mapping.
+	MCPSubjectHeader = EnvoyAIGatewayHeaderPrefix + "mcp-subject"
+	// MCPBackendSubsetHeader is the trusted, shim-supplied comma-separated backend subset a request may fan out to.
+	MCPBackendSubsetHeader = EnvoyAIGatewayHeaderPrefix + "mcp-backend-subset"
+	// MCPBackendSubsetMetadataKey is the dynamic metadata key the shim sets; Envoy renders it into MCPBackendSubsetHeader.
+	MCPBackendSubsetMetadataKey = "mcp_backend_subset"
 	// MCPBackendListenerPort is the port for the MCP backend listener.
 	MCPBackendListenerPort = 10088
 	// MCPProxyPort is the port where the MCP proxy listens.
@@ -37,6 +60,8 @@ const (
 	MCPPerBackendRefHTTPRoutePrefix = MCPGeneratedResourceCommonPrefix + "br-"
 	// MCPPerBackendHTTPRouteFilterPrefix is the prefix for the HTTP route filter names for per-backend resources.
 	MCPPerBackendHTTPRouteFilterPrefix = MCPGeneratedResourceCommonPrefix + "brf-"
+	// MCPPerBackendCredentialSecretPrefix is the prefix for the credential secrets created for per-backend credential injection.
+	MCPPerBackendCredentialSecretPrefix = MCPGeneratedResourceCommonPrefix + "cred-"
 
 	// MCPMetadataHeaderPrefix is the prefix for special headers used to pass metadata in the filter metadata.
 	// These headers are added internally to the requests to the upstream servers so they can be populated in the filter
@@ -47,13 +72,54 @@ const (
 	MCPMetadataHeaderRequestID = MCPMetadataHeaderPrefix + "request-id"
 	// MCPMetadataHeaderMethod is the special header key used to pass the MCP method in the filter metadata.
 	MCPMetadataHeaderMethod = MCPMetadataHeaderPrefix + "method"
+	// MCPMetadataHeaderToolName is the special header key used to pass the MCP tool name in the filter metadata.
+	MCPMetadataHeaderToolName = MCPMetadataHeaderPrefix + "tool-name"
+	// MCPMetadataHeaderResourceURI is the special header key used to pass the MCP resource URI in the filter metadata.
+	MCPMetadataHeaderResourceURI = MCPMetadataHeaderPrefix + "resource-uri"
+
+	// AWSCredentialOverrideHeaderPrefix is the default prefix for the three headers carrying a
+	// per-request SigV4 credential. SigV4 takes three inputs, so unlike other auth types this is a
+	// prefix, not a full header name.
+	AWSCredentialOverrideHeaderPrefix = "x-aigw-aws-" //nolint:gosec // G101: a header name prefix, not a credential.
+	// AWSCredentialOverrideMetadataKey is the default metadata key for a per-request AWS
+	// credential. One key, not a prefix: the value is a struct holding all three inputs.
+	AWSCredentialOverrideMetadataKey = "x-aigw-aws-credentials" //nolint:gosec // G101: a metadata key name, not a credential.
 )
 
+// AWSCredentialOverrideHeaderNames derives the three SigV4 header names from a prefix. The
+// controller builds its strip list from it, the extproc reads them; it lives here so both agree.
+func AWSCredentialOverrideHeaderNames(prefix string) (accessKeyID, secretAccessKey, sessionToken string) {
+	return prefix + "access-key-id", prefix + "secret-access-key", prefix + "session-token"
+}
+
 // MCPInternalHeadersToMetadata maps special MCP headers to metadata keys.
+//
+// Only headers that do not survive to the router belong here. Headers the MCP proxy sets and leaves
+// on the request - mcp-session-id, x-ai-eg-mcp-route - are already readable from an access log with
+// %REQ(...)%, on both the MCP proxy listener and the backend listener, so mapping them would only add
+// a second name for the same value.
 var MCPInternalHeadersToMetadata = map[string]string{
-	MCPBackendHeader:           "mcp_backend",
-	MCPMetadataHeaderMethod:    "mcp_method",
-	MCPMetadataHeaderRequestID: "mcp_request_id",
+	MCPBackendHeader:             "mcp_backend",
+	MCPMetadataHeaderMethod:      "mcp_method",
+	MCPMetadataHeaderRequestID:   "mcp_request_id",
+	MCPMetadataHeaderToolName:    "mcp_tool_name",
+	MCPMetadataHeaderResourceURI: "mcp_resource_uri",
+}
+
+const (
+	// LogFormatText selects human-readable log output. This is the default for every binary.
+	LogFormatText = "text"
+	// LogFormatJSON selects JSON log output, for log pipelines that parse structured records.
+	LogFormatJSON = "json"
+)
+
+// ValidateLogFormat checks that format is one of the supported log output formats. Callers that
+// validate another binary's format wrap the error to say whose it is.
+func ValidateLogFormat(format string) error {
+	if format != LogFormatText && format != LogFormatJSON {
+		return fmt.Errorf("invalid log format: %q, must be %q or %q", format, LogFormatText, LogFormatJSON)
+	}
+	return nil
 }
 
 const (
@@ -64,17 +130,14 @@ const (
 )
 
 const (
-	xdsMetadataBackendNamePath = `.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']`
-	// XDSClusterMetadataKey is the key used to access cluster metadata in xDS attributes
-	// This is for backward compatibility with the older deployment. TODO: remove this after v0.5 is released.
-	XDSClusterMetadataKey = "xds.cluster_metadata"
 	// XDSClusterMetadataBackendNamePath is the full attribute path to access the backend name in cluster metadata in xDS attributes.
-	XDSClusterMetadataBackendNamePath = XDSClusterMetadataKey + xdsMetadataBackendNamePath
-	// XDSUpstreamHostMetadataKey is the key used to access upstream host metadata in xDS attributes
-	// This is for backward compatibility with the older deployment. TODO: remove this after v0.5 is released.
-	XDSUpstreamHostMetadataKey = "xds.upstream_host_metadata"
+	XDSClusterMetadataBackendNamePath = "xds.cluster_metadata.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']"
 	// XDSUpstreamHostMetadataBackendNamePath is the full attribute path to access the backend name in upstream host metadata in xDS attributes.
-	XDSUpstreamHostMetadataBackendNamePath = XDSUpstreamHostMetadataKey + xdsMetadataBackendNamePath
+	XDSUpstreamHostMetadataBackendNamePath = "xds.upstream_host_metadata.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']"
+	// XDSUpstreamHostMetadataUpstreamHostPath is the full attribute path to access the resolved upstream host in upstream host metadata in xDS attributes.
+	XDSUpstreamHostMetadataUpstreamHostPath = "xds.upstream_host_metadata.filter_metadata['aigateway.envoy.io']['upstream_host']"
+	// XDSRouteMetadataRouteNamePath is the full attribute path to access the route name in route metadata in xDS attributes.
+	XDSRouteMetadataRouteNamePath = "xds.route_metadata.filter_metadata['aigateway.envoy.io']['aigw_route_name']"
 )
 
 // PerRouteRuleRefBackendName generates a unique backend name for a per-route rule,
@@ -82,6 +145,28 @@ const (
 // route rule in a specific AIGatewayRoute.
 func PerRouteRuleRefBackendName(namespace, name, routeName string, routeRuleIndex, refIndex int) string {
 	return fmt.Sprintf("%s/%s/route/%s/rule/%d/ref/%d", namespace, name, routeName, routeRuleIndex, refIndex)
+}
+
+// awsBedrockHostRE matches an AWS Bedrock runtime host — public, FIPS, PrivateLink (VPCE), or the
+// newer api.aws domain — and captures the region, e.g. bedrock-runtime.us-east-1.amazonaws.com,
+// bedrock-runtime-fips.us-east-1.amazonaws.com, vpce-<id>.bedrock-runtime.us-east-1.vpce.amazonaws.com,
+// and bedrock-runtime.us-east-1.api.aws all yield "us-east-1". The anchors reject a spoofed suffix such
+// as bedrock-runtime.us-east-1.amazonaws.com.evil.com.
+var awsBedrockHostRE = regexp.MustCompile(`(?:^|\.)bedrock-runtime(?:-fips)?\.([a-z0-9-]+)\.(?:vpce\.amazonaws\.com|amazonaws\.com|api\.aws)$`)
+
+// AWSBedrockRegionFromHost returns the AWS region encoded in a Bedrock signing host, or "" if no region
+// can be derived from host. It is used to self-correct the SigV4 signing region when the resolved
+// upstream host disagrees with the handler's configured region (e.g. a VPCE in a different region than
+// the gateway was configured for).
+//
+// Any other host — including a custom/internal hostname such as bedrock.corp.internal, which encodes no
+// region at all — yields "", and the caller falls back to its statically configured region. That
+// fallback is correct in that case, not a bug: there is no region to extract from an arbitrary hostname.
+func AWSBedrockRegionFromHost(host string) string {
+	if m := awsBedrockHostRE.FindStringSubmatch(host); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 const (
@@ -93,12 +178,12 @@ const (
 // ParseRequestHeaderAttributeMapping parses comma-separated key-value pairs for header-to-attribute mapping.
 // The input format is "header1:attribute1,header2:attribute2" where header names are HTTP request
 // headers and attribute names are Otel span or metric attributes.
-// Example: "x-session-id:session.id,x-user-id:user.id".
+// Example: "agent-session-id:session.id,x-tenant-id:tenant.id".
 //
 // Note: This serves a different purpose than OTEL's OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST,
 // which captures headers as span attributes for tracing.
 //
-// Note: We do not need to convert to Prometheus format (e.g., x-session-id → session.id) here,
+// Note: We do not need to convert to Prometheus format (e.g., agent-session-id → session.id) here,
 // as that's done implicitly in the Prometheus exporter.
 func ParseRequestHeaderAttributeMapping(s string) (map[string]string, error) {
 	if s == "" {
@@ -132,6 +217,41 @@ func ParseRequestHeaderAttributeMapping(s string) (map[string]string, error) {
 	return result, nil
 }
 
+// MergeRequestHeaderAttributeMappings merges two header-to-attribute mappings.
+// Keys in override replace keys in base.
+func MergeRequestHeaderAttributeMappings(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	maps.Copy(merged, base)
+	maps.Copy(merged, override)
+	return merged
+}
+
+// FormatRequestHeaderAttributeMapping formats a header-to-attribute mapping into a stable, comma-separated string.
+// The output is sorted by header name to make it deterministic for tests and configs.
+func FormatRequestHeaderAttributeMapping(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		_, _ = b.WriteString(k)
+		b.WriteByte(':')
+		_, _ = b.WriteString(m[k])
+	}
+	return b.String()
+}
+
 // EndpointPrefixes represents well-known endpoint prefixes that AI Gateway supports.
 type EndpointPrefixes struct {
 	// OpenAI defaults to "/"
@@ -140,6 +260,8 @@ type EndpointPrefixes struct {
 	Cohere string
 	// Anthropic defaults to "/anthropic"
 	Anthropic string
+	// TypeSafe defaults to "/typesafe"
+	TypeSafe string
 }
 
 // ParseEndpointPrefixes parses a comma-separated list of key:value pairs to populate EndpointPrefixes.
@@ -148,10 +270,11 @@ type EndpointPrefixes struct {
 //   - openai
 //   - cohere
 //   - anthropic
+//   - typesafe
 //
 // Format example:
 //
-//	"openai:/,cohere:/cohere,anthropic:/anthropic"
+//	"openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe"
 //
 // Unknown keys cause an error; values must be non-empty.
 func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
@@ -159,6 +282,7 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 		OpenAI:    "/",
 		Cohere:    "/cohere",
 		Anthropic: "/anthropic",
+		TypeSafe:  "/typesafe",
 	}
 	if s == "" {
 		return out, nil
@@ -186,15 +310,17 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 			out.Cohere = value
 		case "anthropic":
 			out.Anthropic = value
+		case "typesafe":
+			out.TypeSafe = value
 		default:
-			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic)", key, i+1)
+			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic, typesafe)", key, i+1)
 		}
 	}
 	return out, nil
 }
 
 // ModelNameHeaderKeyDefault is the default header key for the model name.
-const ModelNameHeaderKeyDefault = aigv1a1.AIModelHeaderKey
+const ModelNameHeaderKeyDefault = aigv1b1.AIModelHeaderKey
 
 // ModelNameHeaderKey is the configurable header key whose value is set by the gateway
 // based on the model extracted from the request body.
@@ -213,7 +339,7 @@ type ModelNameHeaderKey = string
 // the OriginalModel in the client request to the router.
 //
 // Configuration:
-//   - Set via aigv1a1.AIGatewayRouteRuleBackendRef
+//   - Set via aigv1b1.AIGatewayRouteRuleBackendRef
 //   - Replaces the OriginalModel with a backend-specific model name
 //
 // Example:
@@ -306,6 +432,6 @@ type ResponseModel = string
 // AIGatewayFilterMetadataNamespace is the namespace used for the filter metadata related to AI Gateway.
 //
 // For example, token usage, input/output tokens, and request costs are stored in this namespace.
-// Aliased from aigv1a1.AIGatewayFilterMetadataNamespace to avoid making ExtProc directly depend
+// Aliased from aigv1b1.AIGatewayFilterMetadataNamespace to avoid making ExtProc directly depend
 // on the control plane API which is not a concern of ExtProc.
-const AIGatewayFilterMetadataNamespace = aigv1a1.AIGatewayFilterMetadataNamespace
+const AIGatewayFilterMetadataNamespace = aigv1b1.AIGatewayFilterMetadataNamespace

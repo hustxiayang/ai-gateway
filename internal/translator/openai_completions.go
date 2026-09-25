@@ -119,6 +119,19 @@ func (o *openAIToOpenAITranslatorV1Completion) ResponseBody(_ map[string]string,
 		if resp.Usage.TotalTokens >= 0 {
 			tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens)) // #nosec G115
 		}
+		if resp.Usage.PromptTokensDetails != nil {
+			if resp.Usage.PromptTokensDetails.CachedTokens >= 0 {
+				tokenUsage.SetCachedInputTokens(uint32(resp.Usage.PromptTokensDetails.CachedTokens)) //nolint:gosec
+			}
+			if cacheWriteTokens := resp.Usage.PromptTokensDetails.CacheWriteTokensValue(); cacheWriteTokens >= 0 {
+				tokenUsage.SetCacheCreationInputTokens(uint32(cacheWriteTokens)) //nolint:gosec
+			}
+		}
+		if resp.Usage.CompletionTokensDetails != nil {
+			if resp.Usage.CompletionTokensDetails.ReasoningTokens >= 0 {
+				tokenUsage.SetReasoningTokens(uint32(resp.Usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
+			}
+		}
 	}
 
 	// Record non-streaming response to span if tracing is enabled.
@@ -141,10 +154,10 @@ func (o *openAIToOpenAITranslatorV1Completion) extractUsageFromBufferEvent(span 
 		}
 		line := o.buffered[:i]
 		o.buffered = o.buffered[i+1:]
-		if !bytes.HasPrefix(line, sseDataPrefix) {
+		data, ok := cutSSEDataPrefix(line)
+		if !ok {
 			continue
 		}
-		data := bytes.TrimPrefix(line, sseDataPrefix)
 		// Skip the [DONE] marker
 		if bytes.Equal(data, sseDoneMessage) {
 			continue
@@ -171,8 +184,11 @@ func (o *openAIToOpenAITranslatorV1Completion) extractUsageFromBufferEvent(span 
 			tokenUsage.SetOutputTokens(uint32(usage.CompletionTokens)) //nolint:gosec
 			tokenUsage.SetTotalTokens(uint32(usage.TotalTokens))       //nolint:gosec
 			if usage.PromptTokensDetails != nil {
-				tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))               //nolint:gosec
-				tokenUsage.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheCreationTokens)) //nolint:gosec
+				tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))                   //nolint:gosec
+				tokenUsage.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheWriteTokensValue())) //nolint:gosec
+			}
+			if usage.CompletionTokensDetails != nil {
+				tokenUsage.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
 			}
 			// Do not mark buffering done; keep scanning to return the latest usage in this batch.
 		}

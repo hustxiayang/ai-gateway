@@ -6,11 +6,13 @@
 package dataplanemcp
 
 import (
+	"bufio"
 	"context"
 	_ "embed"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,8 +28,33 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/tests/internal/testmcp"
 )
+
+type accessLogLine struct {
+	Method           string `json:"method"`
+	SessionID        any    `json:"session.id"`
+	MCPProviderName  any    `json:"mcp.provider.name"`
+	MCPMethodName    any    `json:"mcp.method.name"`
+	MCPToolName      any    `json:"mcp.tool.name"`
+	MCPResourceURI   any    `json:"mcp.resource.uri"`
+	JSONRPCRequestID any    `json:"jsonrpc.request.id"`
+}
+
+func accessLogHasLine(accessLog string, predicate func(line accessLogLine) bool) bool {
+	scanner := bufio.NewScanner(strings.NewReader(accessLog))
+	for scanner.Scan() {
+		var line accessLogLine
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
+		}
+		if predicate(line) {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	defaultMCPBackend                  = "default-mcp-backend"
@@ -35,6 +62,10 @@ const (
 	defaultMCPBackendResourceURIPrefix = defaultMCPBackend + "+"
 	defaultMCPPath                     = "/mcp"
 )
+
+// defaultMCPBackendUIRendererURI is the gateway-namespaced form of testmcp.UIRendererResource.URI:
+// the backend name becomes the leading path segment and the ui:// scheme is preserved.
+var defaultMCPBackendUIRendererURI = "ui://" + defaultMCPBackend + "/" + strings.TrimPrefix(testmcp.UIRendererResource.URI, "ui://")
 
 var tests = []struct {
 	name   string
@@ -51,6 +82,9 @@ var tests = []struct {
 	{name: "ListPrompts", testFn: testListPrompts},
 	{name: "CodeReviewPrompts", testFn: testCodeReviewPrompts},
 	{name: "PromptChangeNotifications", testFn: testPromptChangeNotifications},
+	{name: "ToolCallUIResourceURI", testFn: testToolCallUIResourceURI},
+	{name: "ToolCallResourceLink", testFn: testToolCallResourceLink},
+	{name: "ToolCallEmbeddedResource", testFn: testToolCallEmbeddedResource},
 	{name: "ListResources", testFn: testListResources},
 	{name: "ReadResource", testFn: testReadResource},
 	{name: "ReadResourceNotFound", testFn: testReadResourceNotFound},
@@ -92,6 +126,102 @@ func TestMCP_differentPath(t *testing.T) {
 	})
 }
 
+func TestMCPAccessLogMetadata(t *testing.T) {
+	env := requireNewMCPEnv(t, false, 1200*time.Second, defaultMCPPath)
+	session := env.newSession(t)
+
+	const sessionID = "session-123"
+	_, err := session.session.CallTool(t.Context(), &mcp.CallToolParams{
+		Meta: mcp.Meta{
+			"agent-session-id": sessionID,
+		},
+		Name:      defaultMCPBackendResourcePrefix + testmcp.ToolEcho.Tool.Name,
+		Arguments: testmcp.ToolEchoArgs{Text: "log test"},
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return accessLogHasLine(env.env.EnvoyStdout(), func(line accessLogLine) bool {
+			if line.SessionID != sessionID {
+				return false
+			}
+			if line.MCPProviderName != defaultMCPBackend {
+				return false
+			}
+			if line.MCPMethodName != "tools/call" {
+				return false
+			}
+			if line.MCPToolName != testmcp.ToolEcho.Tool.Name {
+				return false
+			}
+			return line.JSONRPCRequestID != nil
+		})
+	}, 15*time.Second, 500*time.Millisecond)
+}
+
+// TestMCPAccessLogResourceURI covers the one MCP metadata header the access log cannot get any other
+// way: x-ai-eg-mcp-metadata-resource-uri is consumed and removed by header_to_metadata, so %REQ(...)%
+// cannot see it.
+//
+// The logged value is the upstream URI, not the client-facing composite one the client sent, because
+// addMCPHeaders runs after the backend prefix is stripped. That matches mcp.tool.name, which
+// TestMCPAccessLogMetadata asserts is the bare tool name. The composite form stays available on the
+// span - see the mcp.resource.uri assertion in testReadResource - and is recoverable from the log by
+// pairing this with mcp.provider.name.
+func TestMCPAccessLogResourceURI(t *testing.T) {
+	env := requireNewMCPEnv(t, false, 1200*time.Second, defaultMCPPath)
+	session := env.newSession(t)
+
+	_, err := session.session.ReadResource(t.Context(), &mcp.ReadResourceParams{
+		URI: defaultMCPBackendResourceURIPrefix + testmcp.DummyResource.URI,
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return accessLogHasLine(env.env.EnvoyStdout(), func(line accessLogLine) bool {
+			if line.MCPMethodName != "resources/read" {
+				return false
+			}
+			if line.MCPProviderName != defaultMCPBackend {
+				return false
+			}
+			return line.MCPResourceURI == testmcp.DummyResource.URI
+		})
+	}, 15*time.Second, 500*time.Millisecond)
+}
+
+func TestMCPAccessLogStreamGET(t *testing.T) {
+	env := requireNewMCPEnv(t, false, 1200*time.Second, defaultMCPPath)
+	session := env.newSession(t)
+	sessionID := session.session.ID()
+
+	req, err := http.NewRequest(http.MethodGet, env.baseURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/event-stream")
+	// MCP GET requires Mcp-Session-Id for the stream; agent-session-id is the log-mapping header.
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	req.Header.Set("agent-session-id", sessionID)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	require.Eventually(t, func() bool {
+		return accessLogHasLine(env.env.EnvoyStdout(), func(line accessLogLine) bool {
+			if line.Method != "GET" {
+				return false
+			}
+			if line.SessionID != sessionID {
+				return false
+			}
+			if line.MCPMethodName != nil {
+				return false
+			}
+			return line.JSONRPCRequestID == nil
+		})
+	}, 15*time.Second, 500*time.Millisecond)
+}
+
 func testListTools(t *testing.T, m *mcpEnv) {
 	s := m.newSession(t)
 	tools, err := s.session.ListTools(t.Context(), &mcp.ListToolsParams{})
@@ -120,6 +250,9 @@ func testListTools(t *testing.T, m *mcpEnv) {
 		defaultMCPBackendResourcePrefix + testmcp.ToolNotificationCountsName,
 		defaultMCPBackendResourcePrefix + testmcp.ToolElicitEmail.Tool.Name,
 		defaultMCPBackendResourcePrefix + testmcp.ToolCreateMessage.Tool.Name,
+		defaultMCPBackendResourcePrefix + testmcp.ToolUIResource.Tool.Name,
+		defaultMCPBackendResourcePrefix + testmcp.ToolResourceLink.Tool.Name,
+		defaultMCPBackendResourcePrefix + testmcp.ToolEmbeddedResource.Tool.Name,
 	})
 }
 
@@ -148,7 +281,7 @@ func testToolChangeNotifications(t *testing.T, m *mcpEnv) {
 		}
 		require.NotNil(t, req)
 		require.NotNil(t, req.Params)
-		require.IsTypef(t, &mcp.ToolListChangedParams{}, req.Params, "expected ToolListChangedParams, got %T", req.Params)
+		require.IsTypef(t, &mcp.ToolListChangedParams{}, req.Params, "expected ToolListChangedParams, actual %T", req.Params)
 	}
 
 	t.Run("tool add", func(t *testing.T) {
@@ -230,10 +363,92 @@ func testToolCallError(t *testing.T, m *mcpEnv) {
 			Name:      defaultMCPBackendResourcePrefix + testmcp.ToolError.Tool.Name,
 			Arguments: testmcp.ToolErrorArgs{Error: "a"},
 		})
-		require.Error(t, err)
-		require.Nil(t, res)
-		require.Contains(t, err.Error(), "minLength")
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		require.Len(t, res.Content, 1)
+		require.IsType(t, &mcp.TextContent{}, res.Content[0])
+		require.Contains(t, res.Content[0].(*mcp.TextContent).Text, "minLength")
 		requireToolSpanWithExceptionType(t, m.collector.TakeSpan(), "default-mcp-backend", testmcp.ToolError.Tool.Name, false, "minLength", "invalid_param")
+	})
+}
+
+// testToolCallUIResourceURI verifies that a tool result carrying _meta.ui.resourceUri is
+// namespaced by the gateway with the ui:// scheme preserved, and that the client can read
+// the resource back via resources/read using the rewritten URI as-is.
+func testToolCallUIResourceURI(t *testing.T, m *mcpEnv) {
+	s := m.newSession(t)
+
+	res, err := s.session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: defaultMCPBackendResourcePrefix + testmcp.ToolUIResource.Tool.Name,
+	})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+
+	uiMeta, ok := res.Meta["ui"].(map[string]any)
+	require.True(t, ok, "_meta.ui must be a map")
+	require.Equal(t, defaultMCPBackendUIRendererURI, uiMeta["resourceUri"], "_meta.ui.resourceUri must be namespaced")
+	requireToolSpan(t, m.collector.TakeSpan(), defaultMCPBackend, testmcp.ToolUIResource.Tool.Name, false, "")
+
+	readRes, err := s.session.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: defaultMCPBackendUIRendererURI})
+	require.NoError(t, err)
+	require.Len(t, readRes.Contents, 1)
+	require.Equal(t, defaultMCPBackendUIRendererURI, readRes.Contents[0].URI)
+	require.Equal(t, testmcp.UIRendererResource.MIMEType, readRes.Contents[0].MIMEType)
+	requireMCPSpan(t, m.collector.TakeSpan(), "ReadResource", map[string]string{
+		"mcp.method.name":  "resources/read",
+		"mcp.resource.uri": defaultMCPBackendUIRendererURI,
+	})
+}
+
+// testToolCallResourceLink verifies the same round-trip for a ResourceLink in the tool result Content.
+func testToolCallResourceLink(t *testing.T, m *mcpEnv) {
+	s := m.newSession(t)
+
+	res, err := s.session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: defaultMCPBackendResourcePrefix + testmcp.ToolResourceLink.Tool.Name,
+	})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Len(t, res.Content, 1)
+
+	link, ok := res.Content[0].(*mcp.ResourceLink)
+	require.True(t, ok, "Content[0] must be a ResourceLink")
+	require.Equal(t, defaultMCPBackendUIRendererURI, link.URI, "ResourceLink.URI must be namespaced")
+	requireToolSpan(t, m.collector.TakeSpan(), defaultMCPBackend, testmcp.ToolResourceLink.Tool.Name, false, "")
+
+	readRes, err := s.session.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: link.URI})
+	require.NoError(t, err)
+	require.Len(t, readRes.Contents, 1)
+	require.Equal(t, link.URI, readRes.Contents[0].URI)
+	requireMCPSpan(t, m.collector.TakeSpan(), "ReadResource", map[string]string{
+		"mcp.method.name":  "resources/read",
+		"mcp.resource.uri": link.URI,
+	})
+}
+
+// testToolCallEmbeddedResource verifies the same round-trip for an EmbeddedResource in the tool result Content.
+func testToolCallEmbeddedResource(t *testing.T, m *mcpEnv) {
+	s := m.newSession(t)
+
+	res, err := s.session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: defaultMCPBackendResourcePrefix + testmcp.ToolEmbeddedResource.Tool.Name,
+	})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Len(t, res.Content, 1)
+
+	embedded, ok := res.Content[0].(*mcp.EmbeddedResource)
+	require.True(t, ok, "Content[0] must be an EmbeddedResource")
+	require.Equal(t, defaultMCPBackendUIRendererURI, embedded.Resource.URI, "EmbeddedResource.Resource.URI must be namespaced")
+	requireToolSpan(t, m.collector.TakeSpan(), defaultMCPBackend, testmcp.ToolEmbeddedResource.Tool.Name, false, "")
+
+	readRes, err := s.session.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: embedded.Resource.URI})
+	require.NoError(t, err)
+	require.Len(t, readRes.Contents, 1)
+	require.Equal(t, embedded.Resource.URI, readRes.Contents[0].URI)
+	requireMCPSpan(t, m.collector.TakeSpan(), "ReadResource", map[string]string{
+		"mcp.method.name":  "resources/read",
+		"mcp.resource.uri": embedded.Resource.URI,
 	})
 }
 
@@ -346,10 +561,16 @@ func testLoggingSetLevel(t *testing.T, m *mcpEnv) {
 		Level: "debug",
 	})
 	require.NoError(t, err)
-	requireMCPSpan(t, m.collector.TakeSpan(), "SetLoggingLevel", map[string]string{
+
+	span := m.collector.TakeSpan()
+	requireMCPSpan(t, span, "SetLoggingLevel", map[string]string{
 		"mcp.method.name":   "logging/setLevel",
 		"mcp.logging.level": "debug",
 	})
+	// Verify that the request was not routed to the MCP server that does not support logging
+	routedBackends := backendsFromSpan(t, span)
+	require.Contains(t, routedBackends, "default-mcp-backend")
+	require.NotContains(t, routedBackends, "dumb-mcp-backend")
 }
 
 func testListPrompts(t *testing.T, m *mcpEnv) {
@@ -407,7 +628,7 @@ func testPromptChangeNotifications(t *testing.T, m *mcpEnv) {
 	}
 	require.NotNil(t, req)
 	require.NotNil(t, req.Params)
-	require.IsTypef(t, &mcp.PromptListChangedParams{}, req.Params, "expected PromptListChangedParams, got %T", req.Params)
+	require.IsTypef(t, &mcp.PromptListChangedParams{}, req.Params, "expected PromptListChangedParams, actual %T", req.Params)
 
 	// Verify the prompt was updated.
 	list, err = s.session.ListPrompts(t.Context(), &mcp.ListPromptsParams{})
@@ -422,10 +643,15 @@ func testListResources(t *testing.T, m *mcpEnv) {
 	s := m.newSession(t)
 	list, err := s.session.ListResources(t.Context(), &mcp.ListResourcesParams{})
 	require.NoError(t, err)
-	require.Len(t, list.Resources, 1)
-	require.Equal(t, defaultMCPBackendResourcePrefix+testmcp.DummyResource.Name, list.Resources[0].Name)
-	require.Equal(t, defaultMCPBackendResourceURIPrefix+testmcp.DummyResource.URI, list.Resources[0].URI)
-	require.Equal(t, testmcp.DummyResource.Description, list.Resources[0].Description)
+	require.Len(t, list.Resources, 2)
+	urisByName := map[string]string{}
+	for _, r := range list.Resources {
+		urisByName[r.Name] = r.URI
+	}
+	require.Equal(t, defaultMCPBackendResourceURIPrefix+testmcp.DummyResource.URI,
+		urisByName[defaultMCPBackendResourcePrefix+testmcp.DummyResource.Name])
+	require.Equal(t, defaultMCPBackendUIRendererURI,
+		urisByName[defaultMCPBackendResourcePrefix+testmcp.UIRendererResource.Name])
 	requireMCPSpan(t, m.collector.TakeSpan(), "ListResources", map[string]string{
 		"mcp.method.name": "resources/list",
 	})
@@ -478,10 +704,17 @@ func testResourceSubscribe(t *testing.T, m *mcpEnv) {
 	s := m.newSession(t)
 	list, err := s.session.ListResources(t.Context(), &mcp.ListResourcesParams{})
 	require.NoError(t, err)
-	require.Len(t, list.Resources, 1)
-	require.Equal(t, defaultMCPBackendResourcePrefix+testmcp.DummyResource.Name, list.Resources[0].Name)
-	require.Equal(t, defaultMCPBackendResourceURIPrefix+testmcp.DummyResource.URI, list.Resources[0].URI)
-	require.Equal(t, testmcp.DummyResource.Description, list.Resources[0].Description)
+	require.Len(t, list.Resources, 2)
+	// Find DummyResource by name since the merge order across resources is not guaranteed.
+	var dummyResourceURI string
+	for _, r := range list.Resources {
+		if r.Name == defaultMCPBackendResourcePrefix+testmcp.DummyResource.Name {
+			require.Equal(t, defaultMCPBackendResourceURIPrefix+testmcp.DummyResource.URI, r.URI)
+			require.Equal(t, testmcp.DummyResource.Description, r.Description)
+			dummyResourceURI = r.URI
+		}
+	}
+	require.NotEmpty(t, dummyResourceURI, "DummyResource not found in the resource list")
 	requireMCPSpan(t, m.collector.TakeSpan(), "ListResources", map[string]string{
 		"mcp.method.name": "resources/list",
 	})
@@ -489,12 +722,12 @@ func testResourceSubscribe(t *testing.T, m *mcpEnv) {
 	// It is important to be able to use the resource URI returned by the List method *as-is*, because this is what real MCP
 	// clients will do.
 	err = s.session.Subscribe(t.Context(), &mcp.SubscribeParams{
-		URI: list.Resources[0].URI,
+		URI: dummyResourceURI,
 	})
 	require.NoError(t, err)
 	requireMCPSpan(t, m.collector.TakeSpan(), "Subscribe", map[string]string{
 		"mcp.method.name":  "resources/subscribe",
-		"mcp.resource.uri": list.Resources[0].URI,
+		"mcp.resource.uri": dummyResourceURI,
 	})
 
 	// Update the resource.
@@ -519,17 +752,17 @@ func testResourceSubscribe(t *testing.T, m *mcpEnv) {
 	}
 	require.NotNil(t, req)
 	require.NotNil(t, req.Params)
-	require.IsTypef(t, &mcp.ResourceUpdatedNotificationParams{}, req.Params, "expected ResourceUpdatedNotificationRequest, got %T", req.Params)
+	require.IsTypef(t, &mcp.ResourceUpdatedNotificationParams{}, req.Params, "expected ResourceUpdatedNotificationRequest, actual %T", req.Params)
 	// Expect the notification to have the prefixed URI, which is what the MCP client always sees as the resource URI.
 	require.Equal(t, req.Params.URI, defaultMCPBackendResourceURIPrefix+testmcp.DummyResource.URI)
 
 	err = s.session.Unsubscribe(t.Context(), &mcp.UnsubscribeParams{
-		URI: list.Resources[0].URI,
+		URI: dummyResourceURI,
 	})
 	require.NoError(t, err)
 	requireMCPSpan(t, m.collector.TakeSpan(), "Unsubscribe", map[string]string{
 		"mcp.method.name":  "resources/unsubscribe",
-		"mcp.resource.uri": list.Resources[0].URI,
+		"mcp.resource.uri": dummyResourceURI,
 	})
 	// Wait for the unsubscribe notification.
 	requireEventuallyNotificationCountMessages(t, s, m, "unsubscribe: 1")
@@ -556,7 +789,7 @@ func testResourceListChangeNotifications(t *testing.T, m *mcpEnv) {
 	s := m.newSession(t)
 	list, err := s.session.ListResources(t.Context(), &mcp.ListResourcesParams{})
 	require.NoError(t, err)
-	require.Len(t, list.Resources, 1)
+	require.Len(t, list.Resources, 2)
 	requireMCPSpan(t, m.collector.TakeSpan(), "ListResources", map[string]string{
 		"mcp.method.name": "resources/list",
 	})
@@ -590,12 +823,12 @@ func testResourceListChangeNotifications(t *testing.T, m *mcpEnv) {
 	}
 	require.NotNil(t, req)
 	require.NotNil(t, req.Params)
-	require.IsTypef(t, &mcp.ResourceListChangedParams{}, req.Params, "expected ResourceListChangedParams, got %T", req.Params)
+	require.IsTypef(t, &mcp.ResourceListChangedParams{}, req.Params, "expected ResourceListChangedParams, actual %T", req.Params)
 
 	// Verify the resource was added.
 	list, err = s.session.ListResources(t.Context(), &mcp.ListResourcesParams{})
 	require.NoError(t, err)
-	require.Len(t, list.Resources, 2)
+	require.Len(t, list.Resources, 3)
 	requireMCPSpan(t, m.collector.TakeSpan(), "ListResources", map[string]string{
 		"mcp.method.name": "resources/list",
 	})
@@ -678,7 +911,7 @@ func testSamplingCreateMessage(t *testing.T, m *mcpEnv) {
 	}
 	require.NotNil(t, req)
 	require.NotNil(t, req.Params)
-	require.IsTypef(t, &mcp.CreateMessageParams{}, req.Params, "expected CreateMessageParams, got %T", req.Params)
+	require.IsTypef(t, &mcp.CreateMessageParams{}, req.Params, "expected CreateMessageParams, actual %T", req.Params)
 
 	// The gateway encodes progress tokens as: base64(original)__<type>__<backend-name>
 	// where type is 's' for string, 'i' for int, 'f' for float.
@@ -706,7 +939,7 @@ func testElicit(t *testing.T, m *mcpEnv) {
 	}
 	require.NotNil(t, req)
 	require.NotNil(t, req.Params)
-	require.IsTypef(t, &mcp.ElicitParams{}, req.Params, "expected ElicitParams, got %T", req.Params)
+	require.IsTypef(t, &mcp.ElicitParams{}, req.Params, "expected ElicitParams, actual %T", req.Params)
 	// Elicit requests from server-to-client do not create spans in the gateway.
 	// These are server-initiated requests handled without tracing.
 }

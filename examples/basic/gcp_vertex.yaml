@@ -4,7 +4,7 @@
 # the root of the repo.
 
 # GCP Example
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIServiceBackend
 metadata:
   name: envoy-ai-gateway-basic-gcp
@@ -17,7 +17,7 @@ spec:
     kind: Backend
     group: gateway.envoyproxy.io
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIServiceBackend
 metadata:
   name: envoy-ai-gateway-basic-gcp-anthropic
@@ -31,7 +31,7 @@ spec:
     kind: Backend
     group: gateway.envoyproxy.io
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: BackendSecurityPolicy
 metadata:
   name: envoy-ai-gateway-basic-gcp-credentials
@@ -74,7 +74,7 @@ spec:
         hostname: us-east5-aiplatform.googleapis.com
         port: 443
 ---
-apiVersion: gateway.networking.k8s.io/v1alpha3
+apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy
 metadata:
   name: envoy-ai-gateway-basic-gcp-tls
@@ -88,7 +88,7 @@ spec:
     wellKnownCACertificates: "System"
     hostname: us-central1-aiplatform.googleapis.com
 ---
-apiVersion: gateway.networking.k8s.io/v1alpha3
+apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy
 metadata:
   name: envoy-ai-gateway-basic-gcp-us-east5-tls
@@ -110,7 +110,7 @@ metadata:
 stringData:
   service_account.json: "{}" # Replace with your service account json key file
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: envoy-ai-gateway-basic-gcp
@@ -129,7 +129,7 @@ spec:
       backendRefs:
         - name: envoy-ai-gateway-basic-gcp
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: envoy-ai-gateway-basic-gcp-anthropic

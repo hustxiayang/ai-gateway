@@ -6,9 +6,12 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -23,6 +26,8 @@ import (
 	"github.com/openai/openai-go/option"
 	"github.com/stretchr/testify/require"
 
+	typesafeschema "github.com/envoyproxy/ai-gateway/internal/apischema/typesafe"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
 	"github.com/envoyproxy/ai-gateway/tests/internal/e2elib"
 )
@@ -71,11 +76,16 @@ func Test_Examples_Basic(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, e2elib.KubectlApplyManifestStdin(t.Context(), strings.ReplaceAll(string(cohereManifest), "COHERE_API_KEY", cc.CohereAPIKey)))
 
+		// Apply TypeSafe resources if credentials are set
+		typeSafeManifest, err := os.ReadFile(manifestDir + "/typesafe.yaml")
+		require.NoError(t, err)
+		require.NoError(t, e2elib.KubectlApplyManifestStdin(t.Context(), strings.ReplaceAll(string(typeSafeManifest), "TYPESAFE_API_KEY", cc.TypeSafeAPIKey)))
+
 		time.Sleep(5 * time.Second) // At least 5 seconds for the updated secret to be propagated.
 
 		for _, tc := range []examplesBasicChatCompletionsTestCase{
 			{name: "openai", modelName: "gpt-4o-mini", skip: !cc.OpenAIValid},
-			{name: "aws", modelName: "us.meta.llama3-2-1b-instruct-v1:0", skip: !cc.AWSValid},
+			{name: "aws", modelName: internaltesting.AWSBedrockModelName, skip: !cc.AWSValid},
 		} {
 			tc.run(t, egSelector)
 		}
@@ -111,6 +121,58 @@ func Test_Examples_Basic(t *testing.T) {
 				}
 				if len(resp.Results) == 0 {
 					return errors.New("no rerank results returned")
+				}
+				return nil
+			}, 20*time.Second, 3*time.Second)
+		})
+
+		// TypeSafe System One passthrough routed via gateway.
+		t.Run("typesafe_systemone", func(t *testing.T) {
+			cc.MaybeSkip(t, internaltesting.RequiredCredentialTypeSafe)
+			internaltesting.RequireEventuallyNoError(t, func() error {
+				fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+				defer fwd.Kill()
+
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+
+				body := `{
+  "model": "jev-latest",
+  "state": {"ticket": "I was charged twice for order #4471. Please refund the duplicate charge."},
+  "questions": {
+    "is_billing": {"type": "noul", "instructions": "Is this ticket about billing?"},
+    "team": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"billing": null, "shipping": null, "other": null}},
+    "urgency": {"type": "score", "instructions": "How urgent is this ticket?", "criteria": ["can wait", "this week", "today"]}
+  }
+}`
+				httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, fwd.Address()+"/typesafe/v1/systemone", bytes.NewReader([]byte(body)))
+				if reqErr != nil {
+					return reqErr
+				}
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, callErr := http.DefaultClient.Do(httpReq)
+				if callErr != nil {
+					return fmt.Errorf("typesafe systemone error: %w", callErr)
+				}
+				defer resp.Body.Close()
+				respBody, readErr := io.ReadAll(resp.Body)
+				if readErr != nil {
+					return readErr
+				}
+				if resp.StatusCode != http.StatusOK {
+					return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+				}
+				var parsed typesafeschema.SystemOneResponse
+				if parseErr := json.Unmarshal(respBody, &parsed); parseErr != nil {
+					return fmt.Errorf("failed to parse response %s: %w", string(respBody), parseErr)
+				}
+				for _, id := range []string{"is_billing", "team", "urgency"} {
+					if _, ok := parsed.Answers[id]; !ok {
+						return fmt.Errorf("missing answer %q in %s", id, string(respBody))
+					}
+				}
+				if parsed.Usage == nil || parsed.Usage.InputTokens == nil || *parsed.Usage.InputTokens == 0 {
+					return fmt.Errorf("expected non-zero input_tokens in %s", string(respBody))
 				}
 				return nil
 			}, 20*time.Second, 3*time.Second)
@@ -157,6 +219,48 @@ func Test_Examples_Basic(t *testing.T) {
 				}
 				if err = stream.Err(); err != nil {
 					return fmt.Errorf("stream error: %w", err)
+				}
+				if !nonEmptyResponse {
+					return errors.New("no non-empty response received")
+				}
+				return nil
+			}, 20*time.Second, 3*time.Second)
+		})
+
+		// Test Anthropic Messages API (/v1/messages) translated to AWS Bedrock Converse API.
+		// This reuses the existing AWSBedrock route for us.amazon.nova-micro-v1:0 from aws.yaml.
+		t.Run("aws_bedrock_anthropic_messages", func(t *testing.T) {
+			cc.MaybeSkip(t, internaltesting.RequiredCredentialAWS)
+			internaltesting.RequireEventuallyNoError(t, func() error {
+				fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+				defer fwd.Kill()
+
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+
+				client := anthropic.NewClient(
+					anthropicoption.WithAPIKey("dummy"),
+					anthropicoption.WithBaseURL(fwd.Address()+"/anthropic/"),
+				)
+
+				msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+					Model:     internaltesting.AWSBedrockModelName,
+					MaxTokens: 256,
+					Messages: []anthropic.MessageParam{
+						anthropic.NewUserMessage(anthropic.NewTextBlock("Say this is a test.")),
+					},
+				})
+				if err != nil {
+					return fmt.Errorf("anthropic messages to aws bedrock error: %w", err)
+				}
+				nonEmptyResponse := false
+				for _, block := range msg.Content {
+					if textBlock, ok := block.AsAny().(anthropic.TextBlock); ok {
+						if textBlock.Text != "" {
+							nonEmptyResponse = true
+							t.Logf("received text: %s", textBlock.Text)
+						}
+					}
 				}
 				if !nonEmptyResponse {
 					return errors.New("no non-empty response received")

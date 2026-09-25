@@ -19,6 +19,20 @@ type MCPConfig struct {
 	Routes []MCPRoute `json:"routes,omitempty"`
 }
 
+// PrefixMode controls how tool and prompt names are prefixed when exposed to clients.
+type PrefixMode string
+
+const (
+	// PrefixModeAlways prefixes tool/prompt names with "<backend>__" for every backend.
+	// This is the default and preserves existing behavior.
+	PrefixModeAlways PrefixMode = "Always"
+
+	// PrefixModeNever exposes tool/prompt names unprefixed. The gateway resolves the
+	// target backend at call time using the index built from the most recent tools/list
+	// response for this session. Tool names must be unique across all backends on the route.
+	PrefixModeNever PrefixMode = "Never"
+)
+
 // MCPRoute is the route configuration for routing to each MCP backend based on the tool name.
 type MCPRoute struct {
 	// Name is the fully qualified identifier of a MCPRoute.
@@ -30,6 +44,18 @@ type MCPRoute struct {
 
 	// Authorization is the authorization configuration for this route.
 	Authorization *MCPRouteAuthorization `json:"authorization,omitempty"`
+
+	// BackendSelector restricts which of this route's backends a request may fan out to.
+	// It reuses the same MCPRouteAuthorization shape and CEL engine as Authorization above,
+	// but is evaluated once per candidate backend at session-initialize time.
+	BackendSelector *MCPRouteAuthorization `json:"backendSelector,omitempty"`
+
+	// ForwardHeaders specifies HTTP headers to extract from the incoming request and forward to backend MCP servers.
+	ForwardHeaders []string `json:"forwardHeaders,omitempty"`
+
+	// PrefixMode is the route-level fallback PrefixMode applied to backends that do not
+	// set their own per-backend PrefixMode. Defaults to Always if unset.
+	PrefixMode PrefixMode `json:"prefixMode,omitempty"`
 }
 
 // MCPBackend is the MCP backend configuration.
@@ -38,17 +64,47 @@ type MCPBackend struct {
 	// This name is set in [internalapi.MCPBackendHeader] header to route the request to the specific backend.
 	Name MCPBackendName `json:"name"`
 
-	// Path is the HTTP endpoint path of the backend MCP server.
-	Path string `json:"path"`
-
 	// ToolSelector filters the tools exposed by this backend. If not set, all tools are exposed.
 	ToolSelector *MCPToolSelector `json:"toolSelector,omitempty"`
+
+	// PromptSelector filters the prompts exposed by this backend. If not set, all prompts are
+	// exposed, but this backend's prompts are never exposed bare under PrefixModeNever (see
+	// MCPPromptSelector).
+	PromptSelector *MCPPromptSelector `json:"promptSelector,omitempty"`
+
+	// ForwardHeaders specifies HTTP headers to extract from the incoming request and forward to this backend.
+	// Each entry maps a source header name to an optional destination header name.
+	ForwardHeaders []MCPHeaderForward `json:"forwardHeaders,omitempty"`
+
+	// PrefixMode controls how tool and prompt names from this backend are prefixed.
+	// When set, overrides the route-level PrefixMode for this specific backend.
+	// Defaults to Always if unset.
+	PrefixMode PrefixMode `json:"prefixMode,omitempty"`
+}
+
+// MCPHeaderForward specifies a header to extract from the incoming request and forward to a backend.
+type MCPHeaderForward struct {
+	// Name is the header name to extract from the incoming client request.
+	Name string `json:"name"`
+
+	// BackendHeader is the header name to use when forwarding to the backend.
+	// If empty, the original header name is used.
+	BackendHeader string `json:"backendHeader,omitempty"`
+}
+
+// ForwardName returns the header name to use when forwarding to the backend.
+// If BackendHeader is set, it is used; otherwise the original Name is used.
+func (h MCPHeaderForward) ForwardName() string {
+	if h.BackendHeader != "" {
+		return h.BackendHeader
+	}
+	return h.Name
 }
 
 // MCPBackendName is the name of the MCP backend.
 type MCPBackendName = string
 
-// MCPToolSelector filters tools using include patterns with exact matches or regular expressions.
+// MCPToolSelector filters tools using include and exclude patterns with exact matches or regular expressions.
 type MCPToolSelector struct {
 	// Include is a list of tool names to include. Only the specified tools will be available.
 	Include []string `json:"include,omitempty"`
@@ -57,6 +113,38 @@ type MCPToolSelector struct {
 	// Only tools matching these patterns will be available.
 	// TODO: regex is almost completely absent in the MCP ecosystem, consider removing this for simplicity.
 	IncludeRegex []string `json:"includeRegex,omitempty"`
+
+	// Exclude is a list of tool names to exclude. The specified tools will not be available.
+	// Exclude rules take precedence over include rules.
+	Exclude []string `json:"exclude,omitempty"`
+
+	// ExcludeRegex is a list of RE2-compatible regular expressions that, when matched, exclude the tool.
+	// Tools matching these patterns will not be available. Exclude rules take precedence over include rules.
+	ExcludeRegex []string `json:"excludeRegex,omitempty"`
+}
+
+// MCPPromptSelector filters prompts using include and exclude patterns with exact matches or regular expressions.
+//
+// Unlike MCPToolSelector, declaring Include here also determines which prompt names may be
+// exposed unprefixed under PrefixModeNever: the admission-time controller validation only
+// allows a Never-mode backend's prompts to be exposed bare when they are enumerated here (see
+// validatePerBackendPrefixMode), because otherwise their uniqueness across backends can't be
+// proven ahead of time.
+type MCPPromptSelector struct {
+	// Include is a list of prompt names to include. Only the specified prompts will be available.
+	Include []string `json:"include,omitempty"`
+
+	// IncludeRegex is a list of RE2-compatible regular expressions that, when matched, include the prompt.
+	// Only prompts matching these patterns will be available.
+	IncludeRegex []string `json:"includeRegex,omitempty"`
+
+	// Exclude is a list of prompt names to exclude. The specified prompts will not be available.
+	// Exclude rules take precedence over include rules.
+	Exclude []string `json:"exclude,omitempty"`
+
+	// ExcludeRegex is a list of RE2-compatible regular expressions that, when matched, exclude the prompt.
+	// Prompts matching these patterns will not be available. Exclude rules take precedence over include rules.
+	ExcludeRegex []string `json:"excludeRegex,omitempty"`
 }
 
 // MCPRouteName is the name of the MCP route.

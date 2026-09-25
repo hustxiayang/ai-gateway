@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	testsinternal "github.com/envoyproxy/ai-gateway/tests/internal"
 )
 
@@ -29,6 +29,15 @@ func TestAIGatewayRoutes(t *testing.T) {
 		expErr string
 	}{
 		{name: "basic.yaml"},
+		{name: "rule_name.yaml"},
+		{
+			name:   "duplicate_rule_names.yaml",
+			expErr: "spec.rules: Invalid value: \"array\": rule name must be unique within the route",
+		},
+		{
+			name:   "reserved_rule_name.yaml",
+			expErr: "spec.rules[0]: Invalid value: \"object\": rule name route-not-found is reserved",
+		},
 		{name: "llmcosts.yaml"},
 		{name: "parent_refs.yaml"},
 		{name: "parent_refs_default_kind.yaml"},
@@ -53,12 +62,16 @@ func TestAIGatewayRoutes(t *testing.T) {
 			name:   "inference_pool_unsupported_group.yaml",
 			expErr: "spec.rules[0].backendRefs[0]: Invalid value: \"object\": only InferencePool from inference.networking.k8s.io group is supported",
 		},
+		{
+			name:   "too_many_rules.yaml",
+			expErr: "spec.rules: Too many: 16: must have at most 15 items",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/aigatewayroutes", tc.name))
 			require.NoError(t, err)
 
-			aiGatewayRoute := &aigv1a1.AIGatewayRoute{}
+			aiGatewayRoute := &aigv1b1.AIGatewayRoute{}
 			err = yaml.UnmarshalStrict(data, aiGatewayRoute)
 			require.NoError(t, err)
 
@@ -83,18 +96,25 @@ func TestAIServiceBackends(t *testing.T) {
 		{name: "basic.yaml"},
 		{name: "anthropic-schema.yaml"},
 		{name: "basic-eg-backend-aws.yaml"},
+		{name: "aws-openai-schema.yaml"},
 		{name: "basic-eg-backend-azure.yaml"},
 		{
 			name:   "unknown_schema.yaml",
 			expErr: "spec.schema.name: Unsupported value: \"SomeRandomVendor\": supported values: \"OpenAI\", \"Cohere\", \"AWSBedrock\", \"AzureOpenAI\", \"GCPVertexAI\", \"GCPAnthropic\", \"Anthropic\"",
 		},
 		{name: "k8s-svc.yaml", expErr: "BackendRef must be a Backend resource of Envoy Gateway"},
+		{name: "header-value-filters-gcpanthropic.yaml"},
+		{name: "header-value-filters-awsanthropic.yaml"},
+		{
+			name:   "header-value-filters-unsupported-schema.yaml",
+			expErr: "headerValueFilters is only honored by GCPAnthropic and AWSAnthropic backends",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/aiservicebackends", tc.name))
 			require.NoError(t, err)
 
-			aiBackend := &aigv1a1.AIServiceBackend{}
+			aiBackend := &aigv1b1.AIServiceBackend{}
 			err = yaml.UnmarshalStrict(data, aiBackend)
 			require.NoError(t, err)
 
@@ -103,6 +123,38 @@ func TestAIServiceBackends(t *testing.T) {
 			} else {
 				require.NoError(t, c.Create(ctx, aiBackend))
 				require.NoError(t, c.Delete(ctx, aiBackend))
+			}
+		})
+	}
+}
+
+func TestGatewayConfigs(t *testing.T) {
+	c, _, _ := testsinternal.NewEnvTest(t)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name   string
+		expErr string
+	}{
+		{name: "metadata_forwarding_namespaces.yaml"},
+		{
+			name:   "bad_metadata_forwarding_namespace.yaml",
+			expErr: "metadata namespaces may only contain letters, digits, '.', '_', '/' and '-'",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := testdata.ReadFile(path.Join("testdata/gatewayconfigs", tc.name))
+			require.NoError(t, err)
+
+			gatewayConfig := &aigv1b1.GatewayConfig{}
+			err = yaml.UnmarshalStrict(data, gatewayConfig)
+			require.NoError(t, err)
+
+			if tc.expErr != "" {
+				require.ErrorContains(t, c.Create(ctx, gatewayConfig), tc.expErr)
+			} else {
+				require.NoError(t, c.Create(ctx, gatewayConfig))
+				require.NoError(t, c.Delete(ctx, gatewayConfig))
 			}
 		})
 	}
@@ -178,6 +230,9 @@ func TestBackendSecurityPolicies(t *testing.T) {
 		{name: "azure_valid_credentials.yaml"},
 		{name: "aws_credential_file.yaml"},
 		{name: "aws_oidc.yaml"},
+		// AWSCredentials used to be rejected outright by a CEL rule, because SigV4 needs three
+		// inputs and the override plumbing carried one string.
+		{name: "aws_credential_override.yaml"},
 		{name: "gcp_oidc.yaml"},
 		{name: "anthropic-apikey.yaml"},
 		{name: "targetrefs_basic.yaml"},
@@ -197,7 +252,7 @@ func TestBackendSecurityPolicies(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/backendsecuritypolicies", tc.name))
 			require.NoError(t, err)
 
-			backendSecurityPolicy := &aigv1a1.BackendSecurityPolicy{}
+			backendSecurityPolicy := &aigv1b1.BackendSecurityPolicy{}
 			err = yaml.UnmarshalStrict(data, backendSecurityPolicy)
 			require.NoError(t, err)
 
@@ -230,11 +285,18 @@ func TestMCPRoutes(t *testing.T) {
 		},
 		{
 			name:   "tool_selector_missing.yaml",
-			expErr: "spec.backendRefs[0].toolSelector: Invalid value: \"object\": exactly one of include or includeRegex must be specified",
+			expErr: "spec.backendRefs[0].toolSelector: Invalid value: \"object\": at least one of include, includeRegex, exclude, or excludeRegex must be specified",
 		},
 		{
 			name:   "tool_selector_both.yaml",
-			expErr: "spec.backendRefs[0].toolSelector: Invalid value: \"object\": exactly one of include or includeRegex must be specified",
+			expErr: "spec.backendRefs[0].toolSelector: Invalid value: \"object\": include and includeRegex are mutually exclusive",
+		},
+		{name: "tool_selector_exclude.yaml"},
+		{name: "tool_selector_exclude_regex.yaml"},
+		{name: "tool_selector_include_and_exclude.yaml"},
+		{
+			name:   "tool_selector_exclude_both.yaml",
+			expErr: "spec.backendRefs[0].toolSelector: Invalid value: \"object\": exclude and excludeRegex are mutually exclusive",
 		},
 		{
 			name:   "backend_api_key_inline_and_secret.yaml",
@@ -243,6 +305,15 @@ func TestMCPRoutes(t *testing.T) {
 		{
 			name:   "backend_api_key_missing.yaml",
 			expErr: "spec.backendRefs[0].securityPolicy.apiKey: Invalid value: \"object\": exactly one of secretRef or inline must be set",
+		},
+		{
+			name:   "backend_api_key_both_header_and_query.yaml",
+			expErr: "only one of header or queryParam can be set",
+		},
+		{name: "backend_api_key_injection_if_not_present.yaml"},
+		{
+			name:   "backend_api_key_injection_if_not_present_query.yaml",
+			expErr: "injectionPolicy cannot be IfNotPresent when queryParam is set",
 		},
 		{
 			name:   "jwks_missing.yaml",
@@ -265,12 +336,21 @@ func TestMCPRoutes(t *testing.T) {
 			expErr: "spec.securityPolicy.authorization.rules[0].source.jwt: Invalid value: \"object\": either scopes or claims must be specified",
 		},
 		{name: "authorization_without_jwt_source.yaml"},
+		{name: "mergetype_valid.yaml"},
+		{
+			name:   "mergetype_security_policy_replace_invalid.yaml",
+			expErr: "spec.securityPolicy.mergeType: Invalid value: \"string\": Replace is not a valid MergeType for SecurityPolicy",
+		},
+		{
+			name:   "mergetype_backend_traffic_policy_replace_invalid.yaml",
+			expErr: "spec.backendTrafficPolicy.mergeType: Invalid value: \"string\": Replace is not a valid MergeType for BackendTrafficPolicy",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/mcpgatewayroutes", tc.name))
 			require.NoError(t, err)
 
-			mcpRoute := &aigv1a1.MCPRoute{}
+			mcpRoute := &aigv1b1.MCPRoute{}
 			err = yaml.UnmarshalStrict(data, mcpRoute)
 			require.NoError(t, err)
 

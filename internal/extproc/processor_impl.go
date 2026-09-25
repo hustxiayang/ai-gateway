@@ -6,27 +6,40 @@
 package extproc
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/google/cel-go/cel"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/headermutator"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
+
+// LogRequestHeaderAttributes is the mapping of request headers to log as dynamic metadata attributes.
+// This is configured at the startup of the extproc server.
+var LogRequestHeaderAttributes map[string]string
 
 // NewFactory creates a ProcessorFactory with the given parameters.
 //
@@ -48,10 +61,10 @@ func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	_ EndpointSpecT, // This is a type marker to bind EndpointSpecT without specifying ReqT, RespT, RespChunkT explicitly.
 ) ProcessorFactory {
-	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool) (Processor, error) {
+	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
 		logger = logger.With("isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
-			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer), nil
+			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction), nil
 		}
 		return newUpstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](requestHeaders, f.NewMetrics(), logger), nil
 	}
@@ -88,7 +101,13 @@ type (
 		// upstreamFilterCount is the number of upstream filters that have been processed.
 		// This is used to determine if the request is a retry request.
 		upstreamFilterCount int
-		stream              bool
+		// localReplyEmitted records that the gateway answered the request itself with an
+		// ImmediateResponse. Envoy sends that local reply back through the response path,
+		// where it would otherwise be handled as if it came from the upstream.
+		localReplyEmitted bool
+		stream            bool
+		debugLogEnabled   bool
+		enableRedaction   bool
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -96,16 +115,19 @@ type (
 	upstreamProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]] struct {
 		parent *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]
 
-		logger            *slog.Logger
-		requestHeaders    map[string]string
-		responseHeaders   map[string]string
-		responseEncoding  string
-		translator        translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
-		modelNameOverride internalapi.ModelNameOverride
-		headerMutator     *headermutator.HeaderMutator
-		bodyMutator       *bodymutator.BodyMutator
-		backendName       string
-		handler           filterapi.BackendAuthHandler
+		logger             *slog.Logger
+		requestHeaders     map[string]string
+		responseHeaders    map[string]string
+		responseEncoding   string
+		compressedBuf      []byte // accumulates raw compressed bytes across streaming chunks
+		decompressedOffset int    // tracks decompressed bytes already returned
+		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
+		modelNameOverride  internalapi.ModelNameOverride
+		headerMutator      *headermutator.HeaderMutator
+		bodyMutator        *bodymutator.BodyMutator
+		backendName        string
+		routeName          string
+		handler            filterapi.BackendAuthHandler
 		// cost is the cost of the request that is accumulated during the processing of the response.
 		costs metrics.TokenUsage
 		// metrics tracking.
@@ -118,13 +140,17 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 	requestHeaders map[string]string,
 	logger *slog.Logger,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
+	enableRedaction bool,
 ) *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT] {
+	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	return &routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]{
 		config:            config,
 		requestHeaders:    requestHeaders,
 		logger:            logger,
 		tracer:            tracer,
 		forceBodyMutation: false,
+		debugLogEnabled:   debugLogEnabled,
+		enableRedaction:   enableRedaction,
 	}
 }
 
@@ -161,12 +187,91 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespons
 	return
 }
 
+// formatUserFacingErrorJSON formats a user-facing error as a JSON response body.
+// Returns JSON in format: {"type":"error","error":{"type":"<errorType>","code":"<statusCode>","message":"<message>"}}
+func formatUserFacingErrorJSON(errorType string, statusCode int, message string) []byte {
+	return fmt.Appendf(nil, `{"type":"error","error":{"type":"%s","code":"%d","message":"%s"}}`,
+		errorType, statusCode, message)
+}
+
+// respondLocally answers the request from the gateway itself instead of dispatching it upstream.
+//
+// The immediate response is delivered as an Envoy local reply, which travels back through the
+// response path. It records that on the parent so [upstreamProcessor.ProcessResponseBody] can
+// skip it, and ends the span here because the response path no longer will.
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) respondLocally(ctx context.Context, statusCode int, errorType, message string) *extprocv3.ProcessingResponse {
+	u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
+	resp := createUserFacingErrorResponse(statusCode, errorType, message)
+	u.parent.localReplyEmitted = true
+	if u.parent.span != nil {
+		u.parent.span.EndSpanOnError(statusCode, resp.GetImmediateResponse().GetBody())
+	}
+	return resp
+}
+
+// createUserFacingErrorResponse creates an ImmediateResponse for user-facing errors with JSON body.
+func createUserFacingErrorResponse(statusCode int, errorType string, message string) *extprocv3.ProcessingResponse {
+	body := formatUserFacingErrorJSON(errorType, statusCode, message)
+	headerMutation := &extprocv3.HeaderMutation{}
+	setHeader(headerMutation, "content-type", "application/json")
+	setHeader(headerMutation, "content-length", strconv.Itoa(len(body)))
+
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &extprocv3.ImmediateResponse{
+				Status:     &typev3.HttpStatus{Code: typev3.StatusCode(statusCode)}, // #nosec G115 - HTTP status codes are always in valid int32 range
+				Headers:    headerMutation,
+				Body:       body,
+				GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.InvalidArgument)},
+			},
+		},
+	}
+}
+
 // ProcessRequestBody implements [Processor.ProcessRequestBody].
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequestBody(ctx context.Context, rawBody *extprocv3.HttpBody) (*extprocv3.ProcessingResponse, error) {
-	originalModel, body, stream, mutatedOriginalBody, err := r.eh.ParseBody(rawBody.Body, len(r.config.RequestCosts) > 0)
+	var (
+		originalModel       internalapi.OriginalModel
+		body                *ReqT
+		stream              bool
+		mutatedOriginalBody []byte
+		err                 error
+	)
+	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0
+	contentType := r.requestHeaders["content-type"]
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		originalModel, body, stream, mutatedOriginalBody, err = r.eh.ParseMultipartBody(rawBody.Body, contentType, costConfigured)
+	} else {
+		originalModel, body, stream, mutatedOriginalBody, err = r.eh.ParseBody(rawBody.Body, costConfigured)
+	}
 	if err != nil {
+		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
+			// return to user as 400 -  e.g., "malformed request: failed to parse JSON for /v1/chat/completions"
+			r.logger.Error("returning user-facing error for malformed request", slog.String("error", err.Error()))
+			return createUserFacingErrorResponse(400, "BadRequest", userFacingErr.Error()), nil
+		}
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
+
+	// Use the request-scoped logger from context if available, otherwise fall back to processor logger
+	logger := loggerFromContext(ctx)
+	if logger == nil {
+		logger = r.logger
+	}
+
+	// Only log parsed request body when redaction is enabled
+	if r.debugLogEnabled && r.enableRedaction {
+		if redactedBody, err := r.eh.RedactSensitiveInfoFromRequest(body); err != nil {
+			logger.Warn("failed to redact sensitive info from request, ignoring and continuing", slog.Any("error", err))
+		} else {
+			if jsonBody, err := json.Marshal(redactedBody); err != nil {
+				logger.Error("failed to marshal redacted request for logging, ignoring and continuing", slog.Any("error", err))
+			} else {
+				logger.Debug("request body processing", slog.Any("request", string(jsonBody)))
+			}
+		}
+	}
+
 	if mutatedOriginalBody != nil {
 		r.originalRequestBodyRaw = mutatedOriginalBody
 		r.forceBodyMutation = true
@@ -179,9 +284,24 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 	var additionalHeaders []*corev3.HeaderValueOption
 	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
 		// Set the original model to the request header with the key `x-ai-eg-model`.
-		Header: &corev3.HeaderValue{Key: internalapi.ModelNameHeaderKeyDefault, RawValue: []byte(originalModel)},
-	}, &corev3.HeaderValueOption{
-		Header: &corev3.HeaderValue{Key: originalPathHeader, RawValue: []byte(r.requestHeaders[":path"])},
+		// This header is owned by the gateway, so overwrite any client-supplied value instead of appending.
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		Header:       &corev3.HeaderValue{Key: internalapi.ModelNameHeaderKeyDefault, RawValue: []byte(originalModel)},
+	})
+	originalPath := r.requestHeaders[":path"]
+	// These original-path headers are owned by extproc, so set them unconditionally.
+	// A client-supplied or pre-existing value must not shadow the gateway's own value,
+	// as downstream logic (e.g. processor lookup on retry) keys off it.
+	r.requestHeaders[originalPathHeader] = originalPath
+	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
+		// Overwrite unconditionally so a client-supplied or pre-existing value is replaced, not appended.
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		Header:       &corev3.HeaderValue{Key: originalPathHeader, RawValue: []byte(originalPath)},
+	})
+	r.requestHeaders[internalapi.EnvoyOriginalPathHeader] = originalPath
+	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		Header:       &corev3.HeaderValue{Key: internalapi.EnvoyOriginalPathHeader, RawValue: []byte(originalPath)},
 	})
 	r.originalModel = originalModel
 	r.originalRequestBody = body
@@ -243,6 +363,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	forceBodyMutation := u.onRetry() || u.parent.forceBodyMutation
 	newHeaders, newBody, err := u.translator.RequestBody(u.parent.originalRequestBodyRaw, u.parent.originalRequestBody, forceBodyMutation)
 	if err != nil {
+		if userFacingErr := internalapi.GetUserFacingError(err); userFacingErr != nil {
+			// return to user as 422 -  e.g., "invalid request body: tool_choice type not supported"
+			u.logger.Info("returning user-facing error for invalid request", slog.String("error", err.Error()))
+			return u.respondLocally(ctx, 422, "UnprocessableEntity", userFacingErr.Error()), nil
+		}
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
 
@@ -263,9 +388,19 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		}
 	}
 
-	// Apply body mutations from the route and also restore original body on retry.
-	bodyMutation = applyBodyMutation(u.bodyMutator, bodyMutation,
-		u.parent.originalRequestBodyRaw, forceBodyMutation, u.logger)
+	// Decide whether the upstream filter should replace the request body at
+	// all. If the translator emitted no body, no backend HTTPBodyMutation is
+	// configured, and we're not forcing body replay (retry or
+	// streaming-without-usage), then issuing CONTINUE_AND_REPLACE with the
+	// captured original body would clobber any body mutation applied by an
+	// earlier ext_proc filter in the chain.
+	mutatorHasMutations := u.bodyMutator != nil && u.bodyMutator.HasMutations()
+	wantBodyReplace := bodyMutation != nil || forceBodyMutation || mutatorHasMutations
+
+	if wantBodyReplace {
+		// Apply body mutations from the route and also restore original body on retry.
+		bodyMutation = applyBodyMutation(u.bodyMutator, bodyMutation, u.parent.originalRequestBodyRaw, u.logger)
+	}
 
 	// Ensure bodyMutation is not nil for subsequent processing
 	if bodyMutation == nil {
@@ -276,10 +411,18 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		u.requestHeaders[h.Header.Key] = string(h.Header.RawValue)
 	}
 
+	// x-ai-eg-upstream-host is an internal, controller-derived value consumed by backend auth handlers
+	// (e.g. the AWS handler, via the upstream-host metadata attribute). Strip any copy — including one a
+	// downstream client spoofed — so it never egresses to the upstream provider.
+	headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, internalapi.UpstreamHostHeader)
+
 	if h := u.handler; h != nil {
 		var hdrs []internalapi.Header
 		hdrs, err = h.Do(ctx, u.requestHeaders, bodyMutation.GetBody())
 		if err != nil {
+			if errors.Is(err, backendauth.ErrCredentialMissing) {
+				return u.respondLocally(ctx, 401, "Unauthorized", "missing upstream credential"), nil
+			}
 			return nil, fmt.Errorf("failed to do auth request: %w", err)
 		}
 		for _, h := range hdrs {
@@ -290,10 +433,31 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		}
 	}
 
+	if !wantBodyReplace {
+		// No body change -> no content-length restamp; emit CONTINUE so Envoy
+		// keeps whatever body the previous filter in the chain produced.
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestHeaders{
+				RequestHeaders: &extprocv3.HeadersResponse{
+					Response: &extprocv3.CommonResponse{
+						HeaderMutation: headerMutation,
+						Status:         extprocv3.CommonResponse_CONTINUE,
+					},
+				},
+			},
+			DynamicMetadata: mergeDynamicMetadata(
+				buildBackendDynamicMetadata(u.backendName),
+				buildRequestHeaderDynamicMetadata(u.requestHeaders),
+			),
+		}, nil
+	}
+
 	var dm *structpb.Struct
 	if bm := bodyMutation.GetBody(); bm != nil {
 		dm = buildContentLengthDynamicMetadataOnRequest(len(bm))
 	}
+	dm = mergeDynamicMetadata(dm, buildBackendDynamicMetadata(u.backendName))
+	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -314,6 +478,16 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 
 // ProcessResponseHeaders implements [Processor.ProcessResponseHeaders].
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessResponseHeaders(ctx context.Context, headers *corev3.HeaderMap) (res *extprocv3.ProcessingResponse, err error) {
+	// See the same check in ProcessResponseBody: the headers of a local reply are ours as well,
+	// so they are passed through untouched.
+	if u.parent.localReplyEmitted {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseHeaders{
+				ResponseHeaders: &extprocv3.HeadersResponse{},
+			},
+		}, nil
+	}
+
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
@@ -324,6 +498,9 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	if enc := u.responseHeaders["content-encoding"]; enc != "" {
 		u.responseEncoding = enc
 	}
+	// Reset streaming decompression state for new response (important for retries).
+	u.compressedBuf = nil
+	u.decompressedOffset = 0
 	newHeaders, err := u.translator.ResponseHeaders(u.responseHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response headers: %w", err)
@@ -334,6 +511,14 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		mode = &extprocv3http.ProcessingMode{ResponseBodyMode: extprocv3http.ProcessingMode_STREAMED}
 	}
 	headerMutation, _ := mutationsFromTranslationResult(newHeaders, nil)
+	// When switching to streamed mode, remove content-length so Envoy does
+	// not truncate the response to the first body chunk. The upstream may
+	// include content-length (e.g. computed by a prior hop's HTTP/2 codec
+	// when transfer-encoding: chunked was copied by an EPP ext_proc), which
+	// is invalid for a streaming SSE response.
+	if mode != nil {
+		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, "content-length")
+	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 		ResponseHeaders: &extprocv3.HeadersResponse{
 			Response: &extprocv3.CommonResponse{HeaderMutation: headerMutation},
@@ -343,6 +528,17 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 
 // ProcessResponseBody implements [Processor.ProcessResponseBody].
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessResponseBody(ctx context.Context, body *extprocv3.HttpBody) (res *extprocv3.ProcessingResponse, err error) {
+	// A local reply the gateway produced itself is not an upstream response: translating it would
+	// rewrite the body we just wrote, and completion was already recorded when it was produced.
+	// This returns before the deferred recording below is registered.
+	if u.parent.localReplyEmitted {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseBody{
+				ResponseBody: &extprocv3.BodyResponse{},
+			},
+		}, nil
+	}
+
 	recordRequestCompletionErr := false
 	defer func() {
 		if err != nil || recordRequestCompletionErr {
@@ -354,8 +550,15 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}
 	}()
 
-	// Decompress the body if needed using common utility.
-	decodingResult, err := decodeContentIfNeeded(body.Body, u.responseEncoding)
+	// Decompress the body if needed.
+	// For streaming responses with content-encoding, use stateful decompression
+	// that accumulates compressed bytes across chunks.
+	var decodingResult contentDecodingResult
+	if u.parent.stream && u.responseEncoding != "" {
+		decodingResult, err = u.decodeStreamingContent(body.Body, body.EndOfStream)
+	} else {
+		decodingResult, err = decodeContentIfNeeded(body.Body, u.responseEncoding)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +572,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			return nil, fmt.Errorf("failed to transform response error: %w", err)
 		}
 		headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
+		// Remove content-encoding header if original body encoded but was mutated in the processor.
+		headerMutation = removeContentEncodingIfNeeded(headerMutation, bodyMutation, decodingResult.isEncoded)
 		if u.parent.span != nil {
 			b := bodyMutation.GetBody()
 			if b == nil {
@@ -430,8 +635,12 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		u.metrics.RecordTokenUsage(ctx, u.costs, u.requestHeaders)
 	}
 
-	if body.EndOfStream && len(u.parent.config.RequestCosts) > 0 {
-		metadata, err := buildDynamicMetadata(u.parent.config, &u.costs, u.requestHeaders, u.backendName)
+	// Build dynamic metadata as soon as the accumulated usage changes (i.e. the chunk that carries
+	// the usage payload), not only at end-of-stream. This ensures the access log still captures usage
+	// even if the downstream client disconnects right after the terminal chunk, before EndOfStream
+	// is observed by the extproc. The EndOfStream write below remains as the final refresh.
+	if (body.EndOfStream || !tokenUsage.IsZero()) && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
+		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
 		}
@@ -448,8 +657,31 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	return resp, nil
 }
 
+// decodeStreamingContent handles decompression for streaming responses with content-encoding.
+// It accumulates raw compressed bytes across chunks and re-decompresses from the beginning each time,
+// returning only the newly decompressed data. This is necessary because gzip streams are stateful
+// and a new decompressor cannot be created mid-stream without the full preceding data.
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) decodeStreamingContent(chunk []byte, endOfStream bool) (contentDecodingResult, error) {
+	u.compressedBuf = append(u.compressedBuf, chunk...)
+	decodingResult, err := decodeContentIfNeeded(u.compressedBuf, u.responseEncoding)
+	if err != nil {
+		return contentDecodingResult{}, err
+	}
+	allDecompressed, readErr := io.ReadAll(decodingResult.reader)
+	if readErr != nil {
+		if endOfStream || !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			return contentDecodingResult{}, fmt.Errorf("failed to decompress streaming content: %w", readErr)
+		}
+		// For non-final chunks, ErrUnexpectedEOF is expected: the gzip stream is incomplete
+		// (footer not yet received), but all data up to this point is valid.
+	}
+	newData := allDecompressed[u.decompressedOffset:]
+	u.decompressedOffset = len(allDecompressed)
+	return contentDecodingResult{reader: bytes.NewReader(newData), isEncoded: true}, nil
+}
+
 // SetBackend implements [Processor.SetBackend].
-func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(ctx context.Context, b *filterapi.Backend, backendHandler filterapi.BackendAuthHandler, routeProcessor Processor) (err error) {
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(ctx context.Context, backend *filterapi.RuntimeBackend, routeName string, routeProcessor Processor) (err error) {
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
@@ -457,26 +689,62 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}()
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])
 	if !ok {
-		panic("BUG: expected routeProcessor to be of type *chatCompletionProcessorRouterFilter")
+		panic(fmt.Sprintf("BUG: expected routeProcessor to be of type *routerProcessor[%T], got %T", rp, routeProcessor))
 	}
 	rp.upstreamFilterCount++
-	u.metrics.SetBackend(b)
-	u.modelNameOverride = b.ModelNameOverride
-	u.backendName = b.Name
-	u.handler = backendHandler
-	u.headerMutator = headermutator.NewHeaderMutator(b.HeaderMutation, rp.requestHeaders)
-	u.bodyMutator = bodymutator.NewBodyMutator(b.BodyMutation, rp.originalRequestBodyRaw)
+	u.metrics.SetBackend(backend.Backend)
+	// Some semantic conventions record the provider, which is only known now
+	// that routing has resolved a backend.
+	if bs, ok := rp.span.(tracingapi.BackendSpan); ok {
+		bs.RecordBackend(tracingapi.Backend{
+			Schema: string(backend.Backend.Schema.Name),
+			Name:   backend.Backend.Name,
+		})
+	}
+	u.modelNameOverride = backend.Backend.ModelNameOverride
+	u.backendName = backend.Backend.Name
+	u.routeName = routeName
+	u.handler = backend.Handler
+	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
+	u.bodyMutator = bodymutator.NewBodyMutator(backend.Backend.BodyMutation, rp.originalRequestBodyRaw)
 	// Header-derived labels/CEL must be able to see the overridden request model.
 	if u.modelNameOverride != "" {
 		u.requestHeaders[internalapi.ModelNameHeaderKeyDefault] = u.modelNameOverride
 	}
-	rp.upstreamFilter = u
-	u.parent = rp
+	u.parent = rp // Set parent before GetTranslator so it can access rp.eh
 
-	u.translator, err = u.parent.eh.GetTranslator(b.Schema, u.modelNameOverride)
+	u.translator, err = u.parent.eh.GetTranslator(backend.Backend.Schema, u.modelNameOverride)
 	if err != nil {
-		return fmt.Errorf("failed to create translator for backend %s: %w", b.Name, err)
+		return fmt.Errorf("failed to create translator for backend %s: %w", backend.Backend.Name, err)
 	}
+	if setter, ok := u.translator.(translator.ContentTypeSetter); ok {
+		setter.SetContentType(rp.requestHeaders["content-type"])
+	}
+	rp.upstreamFilter = u // Only assign after translator is confirmed valid
+
+	if headerSetter, ok := u.translator.(translator.RequestHeadersSetter); ok {
+		headerSetter.SetRequestHeaders(u.requestHeaders)
+	}
+
+	if filters := backend.Backend.HeaderValueFilters; len(filters) > 0 {
+		if filterSetter, ok := u.translator.(translator.HeaderValueFilterSetter); ok {
+			for _, f := range filters {
+				filterSetter.SetHeaderValueFilter(f.Name, f.Mode, f.Values)
+			}
+		}
+	}
+
+	switch redactor := u.translator.(type) {
+	case translator.ResponseRedactor:
+		redactor.SetRedactionConfig(u.parent.debugLogEnabled, u.parent.enableRedaction, u.logger)
+	case translator.AnthropicResponseRedactor:
+		redactor.SetRedactionConfig(u.parent.debugLogEnabled, u.parent.enableRedaction, u.logger)
+	default:
+		if u.parent.debugLogEnabled && u.parent.enableRedaction {
+			u.logger.Debug("translator does not support redaction", slog.String("backend", backend.Backend.Name))
+		}
+	}
+
 	return
 }
 
@@ -519,59 +787,217 @@ func buildContentLengthDynamicMetadataOnRequest(contentLength int) *structpb.Str
 	return metadata
 }
 
+// buildBackendDynamicMetadata emits the backend resolved for this request by
+// [upstreamProcessor.SetBackend]. Emitting it during decode is what makes it readable on
+// the response path: Envoy applies route-level response header mutations in the router
+// filter, which runs before this filter when encoding.
+func buildBackendDynamicMetadata(backendName string) *structpb.Struct {
+	if backendName == "" {
+		return nil
+	}
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{
+						Fields: map[string]*structpb.Value{
+							"backend_name": structpb.NewStringValue(backendName),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func buildRequestHeaderDynamicMetadata(requestHeaders map[string]string) *structpb.Struct {
+	if len(LogRequestHeaderAttributes) == 0 {
+		return nil
+	}
+	fields := make(map[string]*structpb.Value, len(LogRequestHeaderAttributes))
+	for header, attr := range LogRequestHeaderAttributes {
+		value, ok := requestHeaders[header]
+		if !ok || value == "" {
+			continue
+		}
+		fields[attr] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: value}}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{Fields: fields},
+				},
+			},
+		},
+	}
+}
+
+func mergeDynamicMetadata(base, extra *structpb.Struct) *structpb.Struct {
+	if base == nil {
+		return extra
+	}
+	if extra == nil {
+		return base
+	}
+	baseFields := base.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+	if baseFields == nil {
+		baseFields = &structpb.Struct{Fields: map[string]*structpb.Value{}}
+		base.Fields[internalapi.AIGatewayFilterMetadataNamespace] = structpb.NewStructValue(baseFields)
+	}
+	extraFields := extra.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+	if extraFields == nil {
+		return base
+	}
+	for k, v := range extraFields.Fields {
+		baseFields.Fields[k] = v
+	}
+	return base
+}
+
+// evalCost is a helper function that computes the cost value based on the cost type and CEL program.
+func evalCost(costType filterapi.LLMRequestCostType, celProg cel.Program, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName string) (uint64, error) {
+	var cost uint64
+	switch costType {
+	case filterapi.LLMRequestCostTypeInputToken:
+		v, _ := costs.InputTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeCachedInputToken:
+		v, _ := costs.CachedInputTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeCacheCreationInputToken:
+		v, _ := costs.CacheCreationInputTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeOutputToken:
+		v, _ := costs.OutputTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeTotalToken:
+		v, _ := costs.TotalTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeReasoningToken:
+		v, _ := costs.ReasoningTokens()
+		cost = uint64(v)
+	case filterapi.LLMRequestCostTypeCEL:
+		var err error
+
+		in, _ := costs.InputTokens()
+		cachedIn, _ := costs.CachedInputTokens()
+		cacheCreation, _ := costs.CacheCreationInputTokens()
+		out, _ := costs.OutputTokens()
+		total, _ := costs.TotalTokens()
+		reasoning, _ := costs.ReasoningTokens()
+		cost, err = llmcostcel.EvaluateProgram(
+			celProg,
+			requestHeaders[internalapi.ModelNameHeaderKeyDefault],
+			backendName,
+			routeName,
+			in,
+			cachedIn,
+			cacheCreation,
+			out,
+			total,
+			reasoning,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("failed to evaluate CEL expression: %w", err)
+		}
+	default:
+		return 0, fmt.Errorf("unknown cost type: %s", costType)
+	}
+	return cost, nil
+}
+
+// evalRuntimeGlobalRequestCost computes the cost value for a single global runtime cost rule.
+func evalRuntimeGlobalRequestCost(rc *filterapi.RuntimeGlobalRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName string) (uint64, error) {
+	return evalCost(rc.Type, rc.CELProg, costs, requestHeaders, backendName, routeName)
+}
+
+// evalRuntimeRequestCost computes the cost value for a single route-scoped runtime cost rule.
+func evalRuntimeRequestCost(rc *filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName string) (uint64, error) {
+	return evalCost(rc.Type, rc.CELProg, costs, requestHeaders, backendName, routeName)
+}
+
 // buildDynamicMetadata creates metadata for rate limiting and cost tracking.
-// This function is called by the upstream filter only at the end of the stream (body.EndOfStream=true)
-// when the response is successfully completed. It is not called for failed requests or partial responses.
+// This function is called by the upstream filter at the end of the stream (body.EndOfStream=true), and,
+// for streaming responses, also as soon as a chunk carries new usage so the access log still captures it
+// if the downstream client disconnects before EndOfStream is observed. It is not called for failed requests.
 // The metadata includes token usage costs and model information for downstream processing.
-func buildDynamicMetadata(config *filterapi.RuntimeConfig, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName string) (*structpb.Struct, error) {
-	metadata := make(map[string]*structpb.Value, len(config.RequestCosts)+2)
-	for i := range config.RequestCosts {
-		rc := &config.RequestCosts[i]
-		var cost uint32
-		switch rc.Type {
-		case filterapi.LLMRequestCostTypeInputToken:
-			cost, _ = costs.InputTokens()
-		case filterapi.LLMRequestCostTypeCachedInputToken:
-			cost, _ = costs.CachedInputTokens()
-		case filterapi.LLMRequestCostTypeCacheCreationInputToken:
-			cost, _ = costs.CacheCreationInputTokens()
-		case filterapi.LLMRequestCostTypeOutputToken:
-			cost, _ = costs.OutputTokens()
-		case filterapi.LLMRequestCostTypeTotalToken:
-			cost, _ = costs.TotalTokens()
-		case filterapi.LLMRequestCostTypeCEL:
-			in, _ := costs.InputTokens()
-			cachedIn, _ := costs.CachedInputTokens()
-			cacheCreation, _ := costs.CacheCreationInputTokens()
-			out, _ := costs.OutputTokens()
-			total, _ := costs.TotalTokens()
-			costU64, err := llmcostcel.EvaluateProgram(
-				rc.CELProg,
-				requestHeaders[internalapi.ModelNameHeaderKeyDefault],
-				backendName,
-				in,
-				cachedIn,
-				cacheCreation,
-				out,
-				total,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("failed to evaluate CEL expression: %w", err)
-			}
-			cost = uint32(costU64) //nolint:gosec
-		default:
-			return nil, fmt.Errorf("unknown request cost kind: %s", rc.Type)
+// Two-tier precedence: for each metadataKey, check route-scoped requestCosts first (matching RouteName == routeName).
+// If found, use it. Otherwise, fall back to globalRequestCosts. If neither exists, the key is not emitted.
+func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string) (*structpb.Struct, error) {
+	metadata := make(map[string]*structpb.Value, len(requestCosts)+len(globalRequestCosts)+3)
+
+	// Track which metadata keys have been populated by route-scoped costs.
+	populatedKeys := make(map[string]struct{})
+
+	shortBackend := backendName
+	if parts := strings.SplitN(backendName, "/", 3); len(parts) >= 2 {
+		shortBackend = parts[0] + "/" + parts[1]
+	}
+
+	actualModel := requestHeaders[internalapi.ModelNameHeaderKeyDefault]
+
+	// First, process route-scoped costs that match this route.
+	// Route-scoped costs must have a RouteName set (validated at runtime config creation).
+	for i := range requestCosts {
+		rc := &requestCosts[i]
+		if rc.Backend != "" && rc.Backend != shortBackend {
+			continue
+		}
+		if rc.RouteName != routeName {
+			continue
+		}
+		if rc.Model != "" && rc.Model != actualModel {
+			continue
+		}
+		cost, err := evalRuntimeRequestCost(rc, costs, requestHeaders, backendName, routeName)
+		if err != nil {
+			return nil, err
+		}
+		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
+		populatedKeys[rc.MetadataKey] = struct{}{}
+	}
+
+	// Then, process global costs for keys not already populated.
+	for i := range globalRequestCosts {
+		rc := &globalRequestCosts[i]
+		if _, exists := populatedKeys[rc.MetadataKey]; exists {
+			continue // Route-scoped cost already set this key.
+		}
+		cost, err := evalRuntimeGlobalRequestCost(rc, costs, requestHeaders, backendName, routeName)
+		if err != nil {
+			return nil, err
 		}
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 	}
 
-	// Add the actual request model that was used (after any backend overrides were applied).
-	// At this point, the header contains the final model that was sent to the upstream.
-	actualModel := requestHeaders[internalapi.ModelNameHeaderKeyDefault]
 	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
 
 	if backendName != "" {
-		metadata["backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: backendName}}
+		// backend_name itself is emitted by buildBackendDynamicMetadata in the request
+		// headers phase, so it is already on the stream by the time this runs.
+		//
+		// ai_service_backend_name stores the short "namespace/name" format extracted
+		// from the full PerRouteRuleRefBackendName ("{namespace}/{name}/route/...").
+		// This is used by the quota rate limit descriptor actions to match the
+		// rate limit service config which keys on "namespace/backendName".
+		parts := strings.SplitN(backendName, "/", 3)
+		shortName := backendName
+		if len(parts) >= 2 {
+			shortName = parts[0] + "/" + parts[1]
+		}
+		metadata["ai_service_backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: shortName}}
+	}
+	if routeName != "" {
+		metadata["route_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: routeName}}
+	}
+
+	// responseModel is the actual model that served the request.
+	if responseModel != "" {
+		metadata["response_model"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: responseModel}}
 	}
 
 	if len(metadata) == 0 {

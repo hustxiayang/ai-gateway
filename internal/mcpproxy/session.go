@@ -7,6 +7,7 @@ package mcpproxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -15,10 +16,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,13 +42,28 @@ const (
 	lastEventIDHeader = "Last-Event-Id"
 )
 
+// backendEvent wraps an sseEvent with request timing context for metrics.
+type backendEvent struct {
+	*sseEvent
+	startAt time.Time
+}
+
 // session implements [Session].
 type session struct {
 	id                 secureClientToGatewaySessionID
 	route              string
-	proxy              *MCPProxy
+	reqCtx             *mcpRequestContext
 	mu                 sync.RWMutex
 	perBackendSessions map[filterapi.MCPBackendName]*compositeSessionEntry
+	// extraHeaders contains header values extracted from the current HTTP request to be forwarded to ALL backends.
+	// These are derived from the route's configured forward headers (e.g., OAuth claimToHeaders) and the current request's headers.
+	// Note: extraHeaders is NOT encoded in the session ID. It is re-extracted from each incoming request.
+	extraHeaders map[string]string
+	// perBackendExtraHeaders contains per-backend header values extracted from the current HTTP request.
+	// Key is the backend name; value is a map of destination header name -> value.
+	// These are derived from each MCPRouteBackendRef's forwardHeaders config.
+	// Note: perBackendExtraHeaders is NOT encoded in the session ID. It is re-extracted from each incoming request.
+	perBackendExtraHeaders map[filterapi.MCPBackendName]map[string]string
 }
 
 // Close implements [io.Closer.Close].
@@ -55,30 +74,21 @@ func (s *session) Close() error {
 			// Stateless backend, nothing to do.
 			continue
 		}
-		// Make DELETE request to the MCP server to close the session.
-		backend, err := s.proxy.getBackendForRoute(s.route, backendName)
+		req, err := http.NewRequest(http.MethodDelete, s.reqCtx.backendListenerAddr, nil)
 		if err != nil {
-			s.proxy.l.Error("failed to get backend for route",
+			s.reqCtx.l.Error("failed to create DELETE request to MCP server to close session",
 				slog.String("backend", backendName),
 				slog.String("session_id", string(sessionID)),
 				slog.String("error", err.Error()),
 			)
 			continue
 		}
-		req, err := http.NewRequest(http.MethodDelete, s.proxy.mcpEndpointForBackend(backend), nil)
-		if err != nil {
-			s.proxy.l.Error("failed to create DELETE request to MCP server to close session",
-				slog.String("backend", backendName),
-				slog.String("session_id", string(sessionID)),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-		addMCPHeaders(req, nil, s.route, backendName)
+		addMCPHeaders(req, nil, nil, s.route, backendName)
+		s.reqCtx.applyOriginalPathHeaders(req)
 		req.Header.Set(sessionIDHeader, sessionID.String())
-		resp, err := s.proxy.client.Do(req)
+		resp, err := s.reqCtx.client.Do(req)
 		if err != nil {
-			s.proxy.l.Error("failed to send DELETE request to MCP server to close session",
+			s.reqCtx.l.Error("failed to send DELETE request to MCP server to close session",
 				slog.String("backend", backendName),
 				slog.String("session_id", string(sessionID)),
 				slog.String("error", err.Error()),
@@ -91,7 +101,7 @@ func (s *session) Close() error {
 			status != http.StatusMethodNotAllowed &&
 			// Some stateless backends may return 404 Not Found if they don't track sessions.
 			status != http.StatusNotFound {
-			s.proxy.l.Error("failed to close MCP session",
+			s.reqCtx.l.Error("failed to close MCP session",
 				slog.String("backend", backendName),
 				slog.String("session_id", string(sessionID)),
 				slog.Int("status_code", resp.StatusCode),
@@ -112,7 +122,7 @@ func (s *session) getCompositeSessionEntry(backend filterapi.MCPBackendName) *co
 
 	entry, ok := s.perBackendSessions[backend]
 	if !ok {
-		s.proxy.l.Warn("attempt to get session for unknown backend in session",
+		s.reqCtx.l.Warn("attempt to get session for unknown backend in session",
 			slog.String("backend", backend))
 		return nil
 	}
@@ -124,7 +134,7 @@ func (s *session) setLastEventID(backend filterapi.MCPBackendName, lastEventID s
 	defer s.mu.Unlock()
 	entry, ok := s.perBackendSessions[backend]
 	if !ok {
-		s.proxy.l.Warn("attempt to set last event ID for unknown backend in session",
+		s.reqCtx.l.Warn("attempt to set last event ID for unknown backend in session",
 			slog.String("backend", backend))
 		return
 	}
@@ -143,10 +153,10 @@ func (s *session) lastEventID() string {
 		_, _ = b.WriteString(",")
 	}
 	lastEventID := b.String()[:b.Len()-1] // string the trailing ','.
-	if s.proxy != nil && s.proxy.sessionCrypto != nil {
-		encrypted, err := s.proxy.sessionCrypto.Encrypt(lastEventID)
+	if s.reqCtx != nil && s.reqCtx.sessionCrypto != nil {
+		encrypted, err := s.reqCtx.sessionCrypto.Encrypt(lastEventID)
 		if err != nil {
-			s.proxy.l.Error("failed to encrypt last event ID", slog.String("error", err.Error()))
+			s.reqCtx.l.Error("failed to encrypt last event ID", slog.String("error", err.Error()))
 			return ""
 		}
 		return encrypted
@@ -183,7 +193,7 @@ func newToolListChangedMessage() *jsonrpc.Request {
 
 // streamNotifications streams notifications from all backends in this session to the given writer.
 func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter, toolChangeSignaler changeSignaler) error {
-	backendMsgs := s.sendToAllBackends(ctx, http.MethodGet, nil, nil)
+	backendMsgs := s.sendToAllBackends(ctx, http.MethodGet, nil, nil, nil)
 
 	// Create a ticker for periodic heartbeat events to avoid HTTP timeouts.
 	// This also helps unblock Goose at startup - it looks like Goose is waiting for the first SSE event before proceeding.
@@ -211,27 +221,31 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 		// events received from the upstream MCP backends
 		case event, ok := <-backendMsgs:
 			if !ok {
-				// Channel closed, all backends have finished.
-				return nil
+				// All backend notification streams have ended (e.g. backends returned 405
+				// or closed their SSE connections). Nil out the channel to disable this
+				// select case, but keep the SSE connection alive for heartbeats and
+				// gateway-level tool change notifications.
+				backendMsgs = nil
+				continue
 			}
 
 			prev := event.id
 			s.setLastEventID(event.backend, event.id)
 			event.id = s.lastEventID()
-			if s.proxy.l.Enabled(ctx, slog.LevelDebug) {
-				s.proxy.l.Debug("Changed event ID", slog.String("backend", event.backend),
+			if s.reqCtx.l.Enabled(ctx, slog.LevelDebug) {
+				s.reqCtx.l.Debug("Changed event ID", slog.String("backend", event.backend),
 					slog.String("prev_event_id", prev),
 					slog.String("event_id", event.id))
 			}
 			for _, _msg := range event.messages {
 				// Maybe the server->client request made during the notification handling needs to be modified.
 				if msg, ok := _msg.(*jsonrpc.Request); ok {
-					if err := s.proxy.maybeServerToClientRequestModify(ctx, msg, event.backend); err != nil {
-						s.proxy.l.Error("failed to modify server->client request", slog.String("error", err.Error()))
+					if err := s.reqCtx.maybeServerToClientRequestModify(ctx, msg, event.backend); err != nil {
+						s.reqCtx.l.Error("failed to modify server->client request", slog.String("error", err.Error()))
 						continue
 					}
 				}
-				s.proxy.recordResponse(ctx, _msg)
+				s.reqCtx.recordResponse(ctx, _msg)
 			}
 			event.writeAndMaybeFlush(w)
 			// Reset the heartbeat ticker so that the next heartbeat will be sent after the full interval.
@@ -275,19 +289,29 @@ func getHeartbeatInterval(def time.Duration) time.Duration {
 
 // sendToAllBackends sends an HTTP request to all backends in this session and returns a channel that streams
 // the response events from all backends.
-func (s *session) sendToAllBackends(ctx context.Context, httpMethod string, request *jsonrpc.Request, span tracingapi.MCPSpan) <-chan *sseEvent {
+func (s *session) sendToAllBackends(ctx context.Context, httpMethod string, request *jsonrpc.Request, params mcpsdk.Params, span tracingapi.MCPSpan) <-chan *backendEvent {
+	return s.sendToBackendsFiltered(ctx, httpMethod, request, params, span, nil)
+}
+
+// sendToBackendsFiltered sends an HTTP request to backends in this session that pass the given filter,
+// and returns a channel that streams the response events from those backends.
+// If filter is nil, all backends are included.
+func (s *session) sendToBackendsFiltered(ctx context.Context, httpMethod string, request *jsonrpc.Request, params mcpsdk.Params, span tracingapi.MCPSpan, filter func(*compositeSessionEntry) bool) <-chan *backendEvent {
 	var (
-		logger      = s.proxy.l
-		backendMsgs = make(chan *sseEvent, 200)
+		logger      = s.reqCtx.l
+		backendMsgs = make(chan *backendEvent, 200)
 		wg          sync.WaitGroup
 	)
 
-	wg.Add(len(s.perBackendSessions))
 	for backendName, cse := range s.perBackendSessions {
+		if filter != nil && !filter(cse) {
+			continue
+		}
+		wg.Add(1)
 		sessionID := cse.sessionID
 		go func() {
 			defer wg.Done()
-			backend, err := s.proxy.getBackendForRoute(s.route, backendName)
+			backend, err := s.reqCtx.getBackendForRoute(s.route, backendName)
 			if err != nil {
 				logger.Error("failed to get backend for route",
 					slog.String("backend", backendName),
@@ -296,7 +320,7 @@ func (s *session) sendToAllBackends(ctx context.Context, httpMethod string, requ
 				)
 				return
 			}
-			err = s.sendRequestPerBackend(ctx, backendMsgs, s.route, backend, cse, httpMethod, request)
+			err = s.sendRequestPerBackend(ctx, backendMsgs, s.route, backend, cse, httpMethod, request, params)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
@@ -321,8 +345,8 @@ func (s *session) sendToAllBackends(ctx context.Context, httpMethod string, requ
 }
 
 // sendRequestPerBackend sends an HTTP request to the given backend and streams the response events to eventChan.
-func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *sseEvent, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry,
-	httpMethod string, request *jsonrpc.Request,
+func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *backendEvent, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry,
+	httpMethod string, request *jsonrpc.Request, params mcpsdk.Params,
 ) error {
 	var body io.Reader
 	if request != nil {
@@ -333,24 +357,34 @@ func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *s
 		body = bytes.NewReader(encodedReq)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, httpMethod, s.proxy.mcpEndpointForBackend(backend), body)
+	req, err := http.NewRequestWithContext(ctx, httpMethod, s.reqCtx.backendListenerAddr, body)
 	if err != nil {
 		return fmt.Errorf("failed to create GET request: %w", err)
 	}
 	sessionID := cse.sessionID.String()
-	addMCPHeaders(req, request, routeName, backend.Name)
+	addMCPHeaders(req, request, params, routeName, backend.Name)
+	s.reqCtx.applyLogHeaderMappings(req, request)
+	s.reqCtx.applyOriginalPathHeaders(req)
 	req.Header.Set(protocolVersionHeader, protocolVersion20250618)
 	req.Header.Set(sessionIDHeader, cse.sessionID.String())
 	if httpMethod != http.MethodGet {
 		req.Header.Set("Content-type", "application/json")
 	}
 	req.Header.Set("Accept", "text/event-stream, application/json")
-	req.Header.Set("Accept-encoding", "gzip, br, zstd, deflate")
+	req.Header.Set("Accept-Encoding", "gzip, br")
+
+	// Forward route-level headers (e.g., OAuth claimToHeaders) and per-backend
+	// headers (from MCPRouteBackendRef.forwardHeaders, with optional renaming).
+	var perBackend map[string]string
+	if s.perBackendExtraHeaders != nil {
+		perBackend = s.perBackendExtraHeaders[backend.Name]
+	}
+	applyExtractedForwardHeaders(req, s.extraHeaders, perBackend)
 
 	if lastEventID := cse.lastEventID; lastEventID != "" {
 		req.Header.Set(lastEventIDHeader, lastEventID)
 	}
-	if s.proxy.l.Enabled(ctx, slog.LevelDebug) {
+	if s.reqCtx.l.Enabled(ctx, slog.LevelDebug) {
 		args := []any{
 			slog.String("backend", backend.Name),
 			slog.String("session_id", sessionID),
@@ -368,9 +402,10 @@ func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *s
 		if lastEventID := cse.lastEventID; lastEventID != "" {
 			args = append(args, slog.String("last_event_id", lastEventID))
 		}
-		s.proxy.l.Debug("sending MCP request", args...)
+		s.reqCtx.l.Debug("sending MCP request", args...)
 	}
-	httpResp, err := s.proxy.client.Do(req)
+	startAt := time.Now()
+	httpResp, err := s.reqCtx.client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
@@ -378,47 +413,65 @@ func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *s
 		return fmt.Errorf("failed to send GET request: %w", err)
 	}
 
-	switch httpResp.StatusCode {
-	case http.StatusNoContent, http.StatusMethodNotAllowed, http.StatusAccepted:
-		// No notifications.
-		_ = httpResp.Body.Close()
-		return nil
-	case http.StatusOK:
-	default:
-		body, _ := io.ReadAll(httpResp.Body)
-		_ = httpResp.Body.Close()
-		return fmt.Errorf("MCP GET request failed with status code %d, body=%s", httpResp.StatusCode, string(body))
-	}
-
 	defer func() {
 		_ = httpResp.Body.Close()
 	}()
 
-	if httpResp.Header.Get("Content-Type") == "application/json" {
-		// This is not an SSE response, but only a single JSON response. Convert it as an event and
-		// send it to the channel.
+	// Decompress the response body based on Content-Encoding.
+	// We explicitly set Accept-Encoding: gzip, br so Go's http.Transport will not
+	// auto-decompress, and we handle it here for both gzip and Brotli.
+	var bodyReader io.Reader = httpResp.Body
+	switch httpResp.Header.Get("Content-Encoding") {
+	case "gzip":
+		gr, gzErr := gzip.NewReader(httpResp.Body)
+		if gzErr != nil {
+			return fmt.Errorf("failed to create gzip decompressor: %w", gzErr)
+		}
+		defer gr.Close()
+		bodyReader = gr
+	case "br":
+		bodyReader = brotli.NewReader(httpResp.Body)
+	}
+
+	switch httpResp.StatusCode {
+	case http.StatusNoContent, http.StatusMethodNotAllowed, http.StatusAccepted:
+		// No notifications.
+		return nil
+	case http.StatusOK:
+	default:
+		body, _ := io.ReadAll(bodyReader)
+		return fmt.Errorf("MCP GET request failed with status code %d, body=%s", httpResp.StatusCode, string(body))
+	}
+
+	if isJSONContentType(httpResp.Header.Get("Content-Type")) {
+		// Try to decode as a single JSON-RPC message first.
 		var respBody []byte
-		respBody, err = io.ReadAll(httpResp.Body)
+		respBody, err = io.ReadAll(bodyReader)
 		if err != nil {
 			return fmt.Errorf("failed to read MCP response body: %w", err)
 		}
-		var msg jsonrpc.Message
-		msg, err = jsonrpc.DecodeMessage(respBody)
-		if err != nil {
-			return fmt.Errorf("failed to decode jsonrpc message from MCP response body: %w", err)
+		msg, ok := tryDecodeJSONRPCMessage(respBody)
+		if ok {
+			eventChan <- &backendEvent{
+				sseEvent: &sseEvent{
+					backend:  backend.Name,
+					event:    "message",
+					id:       "", // No event ID in this case.
+					messages: []jsonrpc.Message{msg},
+				},
+				startAt: startAt,
+			}
+			return nil
 		}
-		eventChan <- &sseEvent{
-			backend:  backend.Name,
-			event:    "message",
-			id:       "", // No event ID in this case.
-			messages: []jsonrpc.Message{msg},
-		}
-		return nil
+		// Body claimed application/json but isn't valid JSON-RPC (e.g. some backends
+		// send SSE data despite the content type). Fall through to the SSE parser
+		// using the already-read body bytes.
+		bodyReader = bytes.NewReader(respBody)
 	}
 
 	// io.Copy won't flush until the end, which doesn't happen for streaming responses.
 	// So we need to read the body in chunks and flush after each chunk.
-	parser := newSSEEventParser(httpResp.Body, backend.Name)
+	parser := newSSEEventParser(bodyReader, backend.Name)
 	for {
 		var event *sseEvent
 		event, err = parser.next()
@@ -430,7 +483,7 @@ func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *s
 		//
 		// In any case, the reconnect support here must be in line with proxyResponseBody's reconnect logic when that happens.
 		if event != nil {
-			eventChan <- event
+			eventChan <- &backendEvent{sseEvent: event, startAt: startAt}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) ||
@@ -490,11 +543,197 @@ type (
 
 	// compositeSessionEntry is used to track the session and last event ID for each backend in a composite session.
 	compositeSessionEntry struct {
-		backendName string
-		sessionID   gatewayToMCPServerSessionID
-		lastEventID string
+		backendName  string
+		sessionID    gatewayToMCPServerSessionID
+		lastEventID  string
+		capabilities *mcpsdk.ServerCapabilities
+		// protocolVersion is the protocolVersion this backend reported in its
+		// initialize response. It is only populated on freshly created sessions
+		// (newSession) and is NOT encoded in the session ID, so it is empty on
+		// entries reconstructed from a session ID via backendSessionIDs. That is
+		// fine because it is only consumed during initialize (handleInitializeRequest).
+		protocolVersion string
 	}
 )
+
+// Capability bitmask constants for encoding server capabilities in the session ID.
+// Each bit represents a capability or sub-capability field.
+const (
+	capBitTools                = 1 << iota // bit 0: Tools non-nil
+	capBitToolsListChanged                 // bit 1: Tools.ListChanged
+	capBitPrompts                          // bit 2: Prompts non-nil
+	capBitPromptsListChanged               // bit 3: Prompts.ListChanged
+	capBitLogging                          // bit 4: Logging non-nil
+	capBitResources                        // bit 5: Resources non-nil
+	capBitResourcesListChanged             // bit 6: Resources.ListChanged
+	capBitResourcesSubscribe               // bit 7: Resources.Subscribe
+	capBitCompletions                      // bit 8: Completions non-nil
+
+	// capBitAll is the bitmask with all capabilities set (used for backward compatibility).
+	capBitAll = capBitTools | capBitToolsListChanged |
+		capBitPrompts | capBitPromptsListChanged |
+		capBitLogging |
+		capBitResources | capBitResourcesListChanged | capBitResourcesSubscribe |
+		capBitCompletions
+)
+
+// encodeCapabilityFlags encodes server capabilities as a zero-padded 3-char hex string.
+func encodeCapabilityFlags(caps *mcpsdk.ServerCapabilities) string {
+	if caps == nil {
+		return "000"
+	}
+	var bits uint
+	if caps.Tools != nil {
+		bits |= capBitTools
+		if caps.Tools.ListChanged {
+			bits |= capBitToolsListChanged
+		}
+	}
+	if caps.Prompts != nil {
+		bits |= capBitPrompts
+		if caps.Prompts.ListChanged {
+			bits |= capBitPromptsListChanged
+		}
+	}
+	if caps.Logging != nil {
+		bits |= capBitLogging
+	}
+	if caps.Resources != nil {
+		bits |= capBitResources
+		if caps.Resources.ListChanged {
+			bits |= capBitResourcesListChanged
+		}
+		if caps.Resources.Subscribe {
+			bits |= capBitResourcesSubscribe
+		}
+	}
+	if caps.Completions != nil {
+		bits |= capBitCompletions
+	}
+	return fmt.Sprintf("%03x", bits)
+}
+
+// decodeCapabilityFlags decodes a hex string into server capabilities.
+func decodeCapabilityFlags(hex string) *mcpsdk.ServerCapabilities {
+	bits, err := strconv.ParseUint(hex, 16, 16)
+	if err != nil {
+		// Fallback: assume all capabilities for backward compatibility.
+		bits = capBitAll
+	}
+	caps := &mcpsdk.ServerCapabilities{}
+	if bits&capBitTools != 0 {
+		caps.Tools = &mcpsdk.ToolCapabilities{
+			ListChanged: bits&capBitToolsListChanged != 0,
+		}
+	}
+	if bits&capBitPrompts != 0 {
+		caps.Prompts = &mcpsdk.PromptCapabilities{
+			ListChanged: bits&capBitPromptsListChanged != 0,
+		}
+	}
+	if bits&capBitLogging != 0 {
+		caps.Logging = &mcpsdk.LoggingCapabilities{}
+	}
+	if bits&capBitResources != 0 {
+		caps.Resources = &mcpsdk.ResourceCapabilities{
+			ListChanged: bits&capBitResourcesListChanged != 0,
+			Subscribe:   bits&capBitResourcesSubscribe != 0,
+		}
+	}
+	if bits&capBitCompletions != 0 {
+		caps.Completions = &mcpsdk.CompletionCapabilities{}
+	}
+	return caps
+}
+
+// mergedCapabilities computes the union of all backend capabilities in this session.
+// If ANY backend supports a capability, the merged result includes it.
+// Sub-fields like ListChanged and Subscribe are OR'd across all backends.
+func (s *session) mergedCapabilities() *mcpsdk.ServerCapabilities {
+	caps := make([]*mcpsdk.ServerCapabilities, 0, len(s.perBackendSessions))
+	for _, entry := range s.perBackendSessions {
+		caps = append(caps, entry.capabilities)
+	}
+	return unionServerCapabilities(caps)
+}
+
+// mergedProtocolVersion negotiates the protocol version to advertise to the
+// client for this stateful (legacy) session, capped at the client's requested
+// version. It reuses the shared mergedProtocolVersion negotiation so the legacy
+// initialize path and the modern server/discover path stay in lockstep.
+func (s *session) mergedProtocolVersion(clientVersion string) string {
+	backends := make([]backendReportedVersions, 0, len(s.perBackendSessions))
+	for name, entry := range s.perBackendSessions {
+		backends = append(backends, backendReportedVersions{
+			name:     name,
+			versions: []string{entry.protocolVersion},
+		})
+	}
+	// Stable order so warning log fields are deterministic across runs.
+	slices.SortFunc(backends, func(a, b backendReportedVersions) int {
+		return strings.Compare(a.name, b.name)
+	})
+	var l *slog.Logger
+	if s.reqCtx != nil {
+		l = s.reqCtx.l
+	}
+	return mergedProtocolVersion(l, clientVersion, backends)
+}
+
+// unionServerCapabilities computes the union of the given backend capabilities.
+// If ANY backend advertises a capability, the merged result includes it, and
+// sub-fields like ListChanged and Subscribe are OR'd across all backends. Nil
+// entries are ignored. This is the single source of truth for capability
+// aggregation shared by the stateful (initialize) and stateless (server/discover)
+// paths.
+func unionServerCapabilities(all []*mcpsdk.ServerCapabilities) *mcpsdk.ServerCapabilities {
+	merged := &mcpsdk.ServerCapabilities{}
+	for _, caps := range all {
+		if caps == nil {
+			continue
+		}
+		if caps.Tools != nil {
+			if merged.Tools == nil {
+				merged.Tools = &mcpsdk.ToolCapabilities{}
+			}
+			merged.Tools.ListChanged = merged.Tools.ListChanged || caps.Tools.ListChanged
+		}
+		if caps.Prompts != nil {
+			if merged.Prompts == nil {
+				merged.Prompts = &mcpsdk.PromptCapabilities{}
+			}
+			merged.Prompts.ListChanged = merged.Prompts.ListChanged || caps.Prompts.ListChanged
+		}
+		if caps.Logging != nil {
+			if merged.Logging == nil {
+				merged.Logging = &mcpsdk.LoggingCapabilities{}
+			}
+		}
+		if caps.Resources != nil {
+			if merged.Resources == nil {
+				merged.Resources = &mcpsdk.ResourceCapabilities{}
+			}
+			merged.Resources.ListChanged = merged.Resources.ListChanged || caps.Resources.ListChanged
+			merged.Resources.Subscribe = merged.Resources.Subscribe || caps.Resources.Subscribe
+		}
+		if caps.Completions != nil {
+			if merged.Completions == nil {
+				merged.Completions = &mcpsdk.CompletionCapabilities{}
+			}
+		}
+		for id, ext := range caps.Extensions {
+			if merged.Extensions == nil {
+				merged.Extensions = make(map[string]any, len(caps.Extensions))
+			}
+			// First backend to declare an extension wins, so the merge is stable regardless of
+			// map iteration order.
+			if _, ok := merged.Extensions[id]; !ok {
+				merged.Extensions[id] = ext
+			}
+		}
+	}
+	return merged
+}
 
 // String implements fmt.Stringer.
 func (g gatewayToMCPServerSessionID) String() string { return string(g) }
@@ -505,36 +744,59 @@ func (c clientToGatewaySessionID) String() string { return string(c) }
 // backendSessionIDs parses the SessionID and returns a map of MCP backend name to MCP session ID.
 func (c clientToGatewaySessionID) backendSessionIDs() (map[filterapi.MCPBackendName]*compositeSessionEntry, string, error) {
 	perBackendSessionIDs := make(map[filterapi.MCPBackendName]*compositeSessionEntry)
-	parts := strings.Split(string(c), "@")
-	if len(parts) != 3 {
+	id := string(c)
+	// The format is: {routeName}@{subject}@{backends}
+	// We use LastIndex to find the backends boundary because the subject may contain '@'
+	// (e.g. email addresses). The backends segment uses base64-encoded session IDs which
+	// cannot contain '@', so LastIndex reliably finds the correct separator.
+	lastAt := strings.LastIndex(id, "@")
+	if lastAt < 0 {
 		return nil, "", fmt.Errorf("invalid session ID: missing '@' separator")
 	}
-	route := parts[0]
-	// Ignore strip the subject part for now.
-	_ = parts[1]
-	backendSessions := parts[2]
+	backendSessions := id[lastAt+1:]
+	prefix := id[:lastAt] // "{routeName}@{subject}" — subject may itself contain '@'
+	firstAt := strings.Index(prefix, "@")
+	if firstAt < 0 {
+		return nil, "", fmt.Errorf("invalid session ID: missing '@' separator")
+	}
+	route := prefix[:firstAt]
+	// The subject (prefix[firstAt+1:]) is retained inside the encrypted session ID for
+	// anti-hijacking purposes but is not needed during parsing.
+
+	// Each backend segment format: {backendName}:{base64(sessionID)}:{capHex}
+	// The capHex field is optional for backward compatibility with old session IDs.
 	for _, part := range strings.Split(backendSessions, ",") {
-		colon := strings.Index(part, ":")
-		if colon < 0 {
+		// Split into at most 3 fields: backendName, base64SessionID, capHex.
+		fields := strings.SplitN(part, ":", 3)
+		if len(fields) < 2 {
 			return nil, "", fmt.Errorf("invalid session ID: missing ':' separator in backend session ID part %q", part)
 		}
-		backendName := part[:colon]
+		backendName := fields[0]
 		if backendName == "" {
 			return nil, "", fmt.Errorf("invalid session ID: empty backend name in part %q", part)
 		}
 		var sessionID gatewayToMCPServerSessionID
-		sessionIDBas64 := part[colon+1:]
-		if sessionIDBas64 != "" { // Some servers are stateless hence no (==empty) session ID.
-			decoded, err := base64.StdEncoding.DecodeString(sessionIDBas64)
+		sessionIDBase64 := fields[1]
+		if sessionIDBase64 != "" { // Some servers are stateless hence no (==empty) session ID.
+			decoded, err := base64.StdEncoding.DecodeString(sessionIDBase64)
 			if err != nil {
 				err = fmt.Errorf("invalid session ID: failed to base64 decode session ID in part %q: %w", part, err)
 				return nil, "", err
 			}
 			sessionID = gatewayToMCPServerSessionID(decoded)
 		}
+		// Parse capability flags from the third field, defaulting to all capabilities
+		// for backward compatibility with session IDs that don't include them.
+		var caps *mcpsdk.ServerCapabilities
+		if len(fields) == 3 {
+			caps = decodeCapabilityFlags(fields[2])
+		} else {
+			caps = decodeCapabilityFlags("") // defaults to all capabilities
+		}
 		perBackendSessionIDs[backendName] = &compositeSessionEntry{
-			backendName: backendName,
-			sessionID:   sessionID,
+			backendName:  backendName,
+			sessionID:    sessionID,
+			capabilities: caps,
 		}
 	}
 	return perBackendSessionIDs, route, nil
@@ -552,6 +814,8 @@ func clientToGatewaySessionIDFromEntries(subject string, entries []compositeSess
 		_, _ = b.WriteString(entry.backendName)
 		_, _ = b.WriteString(":")
 		_, _ = b.WriteString(base64.StdEncoding.EncodeToString([]byte(entry.sessionID)))
+		_, _ = b.WriteString(":")
+		_, _ = b.WriteString(encodeCapabilityFlags(entry.capabilities))
 		_, _ = b.WriteString(",")
 	}
 	sessionID := b.String()[:b.Len()-1] // string the trailing ','.

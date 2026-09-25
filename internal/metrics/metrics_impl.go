@@ -101,6 +101,8 @@ func (b *metricsImpl) SetBackend(backend *filterapi.Backend) {
 		b.backend = genaiProviderAnthropic
 	case filterapi.APISchemaCohere:
 		b.backend = genaiProviderCohere
+	case filterapi.APISchemaTypeSafe:
+		b.backend = genaiProviderTypeSafe
 	default:
 		b.backend = backend.Name
 	}
@@ -170,6 +172,12 @@ func (b *metricsImpl) RecordTokenUsage(ctx context.Context, usage TokenUsage, re
 		b.metrics.tokenUsage.Record(ctx, float64(outputTokens),
 			metric.WithAttributeSet(attrs),
 			metric.WithAttributes(attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeOutput)),
+		)
+	}
+	if reasoningTokens, ok := usage.ReasoningTokens(); ok {
+		b.metrics.tokenUsage.Record(ctx, float64(reasoningTokens),
+			metric.WithAttributeSet(attrs),
+			metric.WithAttributes(attribute.Key(genaiAttributeTokenType).String(genaiTokenTypeReasoning)),
 		)
 	}
 }

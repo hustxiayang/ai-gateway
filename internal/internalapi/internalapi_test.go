@@ -13,12 +13,13 @@ import (
 )
 
 func TestParseEndpointPrefixes_Success(t *testing.T) {
-	in := "openai:/foo,cohere:/1/2/3,anthropic:/cat"
+	in := "openai:/foo,cohere:/1/2/3,anthropic:/cat,typesafe:/ts"
 	ep, err := ParseEndpointPrefixes(in)
 	require.NoError(t, err)
 	require.Equal(t, "/foo", ep.OpenAI)
 	require.Equal(t, "/1/2/3", ep.Cohere)
 	require.Equal(t, "/cat", ep.Anthropic)
+	require.Equal(t, "/ts", ep.TypeSafe)
 }
 
 func TestParseEndpointPrefixes_EmptyInput(t *testing.T) {
@@ -27,6 +28,7 @@ func TestParseEndpointPrefixes_EmptyInput(t *testing.T) {
 	require.Equal(t, "/", ep.OpenAI)
 	require.Equal(t, "/cohere", ep.Cohere)
 	require.Equal(t, "/anthropic", ep.Anthropic)
+	require.Equal(t, "/typesafe", ep.TypeSafe)
 }
 
 func TestParseEndpointPrefixes_UnknownKey(t *testing.T) {
@@ -104,99 +106,194 @@ func TestConstants(t *testing.T) {
 	// Test that constants have expected values
 	require.Equal(t, "aigateway.envoy.io", InternalEndpointMetadataNamespace)
 	require.Equal(t, "per_route_rule_backend_name", InternalMetadataBackendNameKey)
+	require.Equal(t, "aigw_route_name", InternalMetadataRouteNameKey)
 	require.Equal(t, "x-gateway-destination-endpoint", EndpointPickerHeaderKey)
+	require.Equal(t, "xds.route_metadata.filter_metadata['aigateway.envoy.io']['aigw_route_name']", XDSRouteMetadataRouteNamePath)
 }
 
 func TestParseRequestHeaderAttributeMapping(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected map[string]string
-		wantErr  bool
+		name      string
+		input     string
+		expected  map[string]string
+		expectErr bool
 	}{
 		{
-			name:     "empty string",
-			input:    "",
-			expected: nil,
-			wantErr:  false,
+			name:      "empty string",
+			input:     "",
+			expected:  nil,
+			expectErr: false,
 		},
 		{
-			name:     "single valid pair",
-			input:    "x-session-id:session.id",
-			expected: map[string]string{"x-session-id": "session.id"},
-			wantErr:  false,
+			name:      "single valid pair",
+			input:     "agent-session-id:session.id",
+			expected:  map[string]string{"agent-session-id": "session.id"},
+			expectErr: false,
 		},
 		{
-			name:     "multiple valid pairs",
-			input:    "x-session-id:session.id,x-user-id:user.id",
-			expected: map[string]string{"x-session-id": "session.id", "x-user-id": "user.id"},
-			wantErr:  false,
+			name:      "multiple valid pairs",
+			input:     "agent-session-id:session.id,x-tenant-id:tenant.id",
+			expected:  map[string]string{"agent-session-id": "session.id", "x-tenant-id": "tenant.id"},
+			expectErr: false,
 		},
 		{
-			name:     "with whitespace",
-			input:    " x-session-id : session.id , x-user-id : user.id ",
-			expected: map[string]string{"x-session-id": "session.id", "x-user-id": "user.id"},
-			wantErr:  false,
+			name:      "with whitespace",
+			input:     " agent-session-id : session.id , x-tenant-id : tenant.id ",
+			expected:  map[string]string{"agent-session-id": "session.id", "x-tenant-id": "tenant.id"},
+			expectErr: false,
 		},
 		{
-			name:     "invalid format - missing colon",
-			input:    "x-session-id",
-			expected: nil,
-			wantErr:  true,
+			name:      "invalid format - missing colon",
+			input:     "agent-session-id",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "invalid format - empty header",
-			input:    ":session.id",
-			expected: nil,
-			wantErr:  true,
+			name:      "invalid format - empty header",
+			input:     ":session.id",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "invalid format - empty attribute",
-			input:    "x-session-id:",
-			expected: nil,
-			wantErr:  true,
+			name:      "invalid format - empty attribute",
+			input:     "agent-session-id:",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "multiple colons - takes first colon",
-			input:    "x-session-id:session.id:extra",
-			expected: map[string]string{"x-session-id": "session.id:extra"},
-			wantErr:  false,
+			name:      "multiple colons - takes first colon",
+			input:     "agent-session-id:session.id:extra",
+			expected:  map[string]string{"agent-session-id": "session.id:extra"},
+			expectErr: false,
 		},
 		{
-			name:     "trailing comma - should fail",
-			input:    "x-session-id:session.id,",
-			expected: nil,
-			wantErr:  true,
+			name:      "trailing comma - should fail",
+			input:     "agent-session-id:session.id,",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "double comma - should fail",
-			input:    "x-session-id:session.id,,x-user-id:user.id",
-			expected: nil,
-			wantErr:  true,
+			name:      "double comma - should fail",
+			input:     "agent-session-id:session.id,,x-tenant-id:tenant.id",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "comma with spaces - should fail",
-			input:    "x-session-id : session.id , , x-user-id : user.id",
-			expected: nil,
-			wantErr:  true,
+			name:      "comma with spaces - should fail",
+			input:     "agent-session-id : session.id , , x-tenant-id : tenant.id",
+			expected:  nil,
+			expectErr: true,
 		},
 		{
-			name:     "leading comma - should fail",
-			input:    ",x-session-id:session.id",
-			expected: nil,
-			wantErr:  true,
+			name:      "leading comma - should fail",
+			input:     ",agent-session-id:session.id",
+			expected:  nil,
+			expectErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := ParseRequestHeaderAttributeMapping(tt.input)
-			if tt.wantErr {
+			if tt.expectErr {
 				assert.Error(t, err)
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, tt.expected, result)
 			}
+		})
+	}
+}
+
+func TestMergeRequestHeaderAttributeMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     map[string]string
+		override map[string]string
+		expected map[string]string
+	}{
+		{
+			name:     "both empty",
+			base:     nil,
+			override: nil,
+			expected: nil,
+		},
+		{
+			name:     "base only",
+			base:     map[string]string{"x-tenant-id": "tenant.id"},
+			override: nil,
+			expected: map[string]string{"x-tenant-id": "tenant.id"},
+		},
+		{
+			name:     "override only",
+			base:     nil,
+			override: map[string]string{"agent-session-id": "session.id"},
+			expected: map[string]string{"agent-session-id": "session.id"},
+		},
+		{
+			name:     "override wins",
+			base:     map[string]string{"x-tenant-id": "tenant.id", "agent-session-id": "old.session.id"},
+			override: map[string]string{"agent-session-id": "session.id"},
+			expected: map[string]string{"x-tenant-id": "tenant.id", "agent-session-id": "session.id"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := MergeRequestHeaderAttributeMappings(tt.base, tt.override)
+			require.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestFormatRequestHeaderAttributeMapping(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]string
+		expected string
+	}{
+		{name: "nil", input: nil, expected: ""},
+		{name: "empty", input: map[string]string{}, expected: ""},
+		{
+			name:     "sorted output",
+			input:    map[string]string{"x-tenant-id": "tenant.id", "agent-session-id": "session.id"},
+			expected: "agent-session-id:session.id,x-tenant-id:tenant.id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, FormatRequestHeaderAttributeMapping(tt.input))
+		})
+	}
+}
+
+// Recognized forms, all case-sensitive lowercase:
+//   - Public: bedrock-runtime.<region>.amazonaws.com
+//   - Public FIPS: bedrock-runtime-fips.<region>.amazonaws.com
+//   - PrivateLink (VPCE): <vpce-id>.bedrock-runtime.<region>.vpce.amazonaws.com
+//   - PrivateLink FIPS: <vpce-id>.bedrock-runtime-fips.<region>.vpce.amazonaws.com
+//   - Newer API domain: bedrock-runtime.<region>.api.aws
+func TestAWSBedrockRegionFromHost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		want string
+	}{
+		{"public bedrock host", "bedrock-runtime.us-east-1.amazonaws.com", "us-east-1"},
+		{"vpce host", "vpce-123.bedrock-runtime.us-west-2.vpce.amazonaws.com", "us-west-2"},
+		{"prefixed bedrock host", "aaa.bedrock-runtime.eu-central-1.amazonaws.com", "eu-central-1"},
+		{"fips public bedrock host", "bedrock-runtime-fips.us-east-1.amazonaws.com", "us-east-1"},
+		{"fips vpce host", "vpce-123.bedrock-runtime-fips.us-west-2.vpce.amazonaws.com", "us-west-2"},
+		{"api.aws domain host", "bedrock-runtime.ap-southeast-2.api.aws", "ap-southeast-2"},
+		{"non-bedrock host", "api.openai.com", ""},
+		{"custom internal host has no derivable region", "bedrock.corp.internal", ""},
+		{"spoofed suffix is rejected", "bedrock-runtime.us-east-1.amazonaws.com.evil.com", ""},
+		{"spoofed api.aws suffix is rejected", "bedrock-runtime.us-east-1.api.aws.evil.com", ""},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, AWSBedrockRegionFromHost(tc.host))
 		})
 	}
 }

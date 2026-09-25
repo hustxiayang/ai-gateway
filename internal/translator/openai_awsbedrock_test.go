@@ -21,13 +21,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	openaigo "github.com/openai/openai-go/v2"
+	openaigo "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
@@ -223,10 +224,6 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 								Text: ptr.To("I also dunno"),
 							},
 						},
-					},
-					{
-						Role:    openai.ChatMessageRoleAssistant,
-						Content: []*awsbedrock.ContentBlock{},
 					},
 				},
 			},
@@ -1159,6 +1156,71 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 			},
 		},
 		{
+			name: "test thinking enabled config with display",
+			input: openai.ChatCompletionRequest{
+				Model: "bedrock.unit-test-model",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+						},
+					},
+				},
+				Thinking: &openai.ThinkingUnion{
+					OfEnabled: &openai.ThinkingEnabled{
+						Type:         "enabled",
+						BudgetTokens: 1024,
+						Display:      "omitted",
+					},
+				},
+			},
+			output: awsbedrock.ConverseInput{
+				AdditionalModelRequestFields: map[string]interface{}{
+					"thinking": map[string]interface{}{"type": "enabled", "budget_tokens": float64(1024), "display": "omitted"},
+				},
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{{Text: ptr.To("Hello")}},
+					},
+				},
+			},
+		},
+		{
+			name: "test thinking adaptive config with display",
+			input: openai.ChatCompletionRequest{
+				Model: "bedrock.unit-test-model",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+						},
+					},
+				},
+				Thinking: &openai.ThinkingUnion{
+					OfAdaptive: &openai.ThinkingAdaptive{
+						Type:    "adaptive",
+						Display: "summarized",
+					},
+				},
+			},
+			output: awsbedrock.ConverseInput{
+				AdditionalModelRequestFields: map[string]interface{}{
+					"thinking": map[string]interface{}{"type": "adaptive", "display": "summarized"},
+				},
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{{Text: ptr.To("Hello")}},
+					},
+				},
+			},
+		},
+		{
 			name: "test thinking disabled config",
 			input: openai.ChatCompletionRequest{
 				Model: "bedrock.unit-test-model",
@@ -1230,6 +1292,90 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 								},
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			name: "test reasoning_effort forwarded as reasoning_config",
+			input: openai.ChatCompletionRequest{
+				Model: "some-reasoning-model",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+						},
+					},
+				},
+				ReasoningEffort: "high",
+			},
+			output: awsbedrock.ConverseInput{
+				AdditionalModelRequestFields: map[string]interface{}{
+					"reasoning_config": "high",
+				},
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{{Text: ptr.To("Hello")}},
+					},
+				},
+			},
+		},
+		{
+			name: "test reasoning_effort coexists with thinking",
+			input: openai.ChatCompletionRequest{
+				Model: "some-reasoning-model",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+						},
+					},
+				},
+				Thinking: &openai.ThinkingUnion{
+					OfEnabled: &openai.ThinkingEnabled{
+						Type:         "enabled",
+						BudgetTokens: 2048,
+					},
+				},
+				ReasoningEffort: "medium",
+			},
+			output: awsbedrock.ConverseInput{
+				AdditionalModelRequestFields: map[string]interface{}{
+					"thinking":         map[string]interface{}{"type": "enabled", "budget_tokens": float64(2048)},
+					"reasoning_config": "medium",
+				},
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{{Text: ptr.To("Hello")}},
+					},
+				},
+			},
+		},
+		{
+			name: "test empty reasoning_effort is not forwarded",
+			input: openai.ChatCompletionRequest{
+				Model: "some-model",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "Hello"},
+						},
+					},
+				},
+			},
+			output: awsbedrock.ConverseInput{
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role:    openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{{Text: ptr.To("Hello")}},
 					},
 				},
 			},
@@ -1382,7 +1528,7 @@ data: {"id":"123","choices":[{"index":0,"delta":{"role":"assistant","tool_calls"
 
 data: {"id":"123","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls"}],"created":1731679200,"model":"claude-sonnet-4","object":"chat.completion.chunk"}
 
-data: {"id":"123","created":1731679200,"model":"claude-sonnet-4","object":"chat.completion.chunk","usage":{"prompt_tokens":386,"completion_tokens":75,"total_tokens":461}}
+data: {"id":"123","choices":[],"created":1731679200,"model":"claude-sonnet-4","service_tier":"default","object":"chat.completion.chunk","usage":{"prompt_tokens":386,"completion_tokens":75,"total_tokens":461}}
 
 data: [DONE]
 `, string(normalizedResults))
@@ -1501,6 +1647,7 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody(t *testing.T)
 					CompletionTokens: 20,
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens:        5,
+						CacheWriteTokens:    7,
 						CacheCreationTokens: 7,
 					},
 				},
@@ -1694,16 +1841,11 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody(t *testing.T)
 						Index:        0,
 						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
 						Message: openai.ChatCompletionResponseChoiceMessage{
-							Role:    awsbedrock.ConversationRoleAssistant,
-							Content: ptr.To("This is the final answer."),
-							ReasoningContent: &openai.ReasoningContentUnion{
-								Value: &openai.ReasoningContent{
-									ReasoningContent: &awsbedrock.ReasoningContentBlock{
-										ReasoningText: &awsbedrock.ReasoningTextBlock{
-											Text: "This is the model's thought process.",
-										},
-									},
-								},
+							Role:             awsbedrock.ConversationRoleAssistant,
+							Content:          ptr.To("This is the final answer."),
+							ReasoningContent: &openai.ReasoningContentUnion{Value: "This is the model's thought process."},
+							ThinkingBlocks: []openai.ThinkingBlock{
+								{Type: "thinking", Thinking: "This is the model's thought process."},
 							},
 						},
 					},
@@ -1748,15 +1890,16 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody(t *testing.T)
 					-1,
 					int32(tt.output.Usage.CompletionTokens), // nolint:gosec
 					int32(tt.output.Usage.TotalTokens),      // nolint:gosec
+					-1,
 				)
 				if tt.input.Usage.CacheReadInputTokens != nil {
 					expectedUsage.SetCachedInputTokens(uint32(tt.output.Usage.PromptTokensDetails.CachedTokens)) //nolint:gosec
 				}
 				if tt.input.Usage.CacheWriteInputTokens != nil {
-					expectedUsage.SetCacheCreationInputTokens(uint32(tt.output.Usage.PromptTokensDetails.CacheCreationTokens)) //nolint:gosec
+					expectedUsage.SetCacheCreationInputTokens(uint32(tt.output.Usage.PromptTokensDetails.CacheWriteTokens)) //nolint:gosec
 				}
 			} else {
-				expectedUsage = tokenUsageFrom(-1, -1, -1, -1, -1)
+				expectedUsage = tokenUsageFrom(-1, -1, -1, -1, -1, -1)
 			}
 			require.Equal(t, expectedUsage, usedToken)
 		})
@@ -1839,7 +1982,7 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBodyErr(t *testing.
 				},
 				ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: 123},
 			},
-			err: fmt.Errorf("unexpected type: int"),
+			err: internalapi.ErrInvalidRequestBody,
 		},
 	}
 	for _, tt := range tests {
@@ -1847,14 +1990,14 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBodyErr(t *testing.
 			o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
 			originalReq := tt.input
 			_, _, err := o.RequestBody(nil, &originalReq, false)
-			require.Equal(t, err.Error(), tt.err.Error())
+			require.ErrorIs(t, err, tt.err)
 		})
 	}
 }
 
 // base64RealStreamingEvents is the base64 encoded raw binary response from bedrock anthropic.claude model.
 // The request is to find the cosine of number 7 with a tool configuration.
-const base64RealStreamingEvents = "AAAAmwAAAFJGkfmwCzpldmVudC10eXBlBwAMbWVzc2FnZVN0YXJ0DTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDRCIsInJvbGUiOiJhc3Npc3RhbnQifbCidJ0AAACpAAAAV+0a5tkLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiVG8ifSwicCI6ImFiY2RlZmdoaWprbG1uIn0rY75JAAAAsQAAAFe9ijqaCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBjYWxjdWxhdGUgdGhlIGNvc2luZSJ9LCJwIjoiYWJjIn3hywqfAAAA2gAAAFdTaHzGCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBvZiA3LCJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTYifUsRwHsAAADXAAAAV6v4uHcLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiIHdlIGNhbiB1c2UgdGhlIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVSJ9jBuxjAAAALwAAABXRRr+Kws6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgXCIifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGIn3SOp66AAAA2wAAAFduCFV2CzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6ImNvc2luZVwiIGZ1bmN0aW9uIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXIn2f+1UQAAAA2QAAAFcUyAYWCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiB0aGF0In0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaMDEyMzQ1NiJ9uD7t8wAAAM8AAABX+2hkNAs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgaXMifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWSJ9p52nrQAAAMQAAABXjLhVJQs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgYXZhaWxhYmxlIHRvIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0QifYC08b0AAADTAAAAV154HrcLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiIHVzLiJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxIn0mTm4jAAAAtAAAAFd1arXqCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBMZXQifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3In34BFwTAAAA0AAAAFcZ2GRnCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IidzIHVzZSJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWVyJ9vfdBjQAAALwAAABXRRr+Kws6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgdGhpcyJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNEIn1Xtb4jAAAAuAAAAFewmljrCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBmdW5jdGlvbiB0byJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFycyJ9GYv84AAAALQAAABXdWq16gs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgZ2V0In0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2dyJ99bdUOgAAAN4AAABXpujaBgs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgdGhlIHJlc3VsdCJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NSJ9niPS/gAAAM0AAABXgag3VAs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIuIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFkifRc68JQAAACuAAAAVig9Cl8LOmV2ZW50LXR5cGUHABBjb250ZW50QmxvY2tTdG9wDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1AifY2eizoAAAEEAAAAV67xblsLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tTdGFydA06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjoxLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVIiLCJzdGFydCI6eyJ0b29sVXNlIjp7Im5hbWUiOiJjb3NpbmUiLCJ0b29sVXNlSWQiOiJ0b29sdXNlX1FrbHJFSEtqUnU2T2M0QlFVZnk3WlEifX19kpNGawAAAK0AAABXGJpAGQs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjEsImRlbHRhIjp7InRvb2xVc2UiOnsiaW5wdXQiOiIifX0sInAiOiJhYmNkZWZnIn3XeK+kAAAAswAAAFfHSmn6CzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MSwiZGVsdGEiOnsidG9vbFVzZSI6eyJpbnB1dCI6IntcInhcIjogN30ifX0sInAiOiJhYmMifaN4jhsAAACxAAAAVsqNCgwLOmV2ZW50LXR5cGUHABBjb250ZW50QmxvY2tTdG9wDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjEsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlMifUJp3UkAAACFAAAAUQBIgekLOmV2ZW50LXR5cGUHAAttZXNzYWdlU3RvcA06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7InAiOiJhYmNkIiwic3RvcFJlYXNvbiI6InRvb2xfdXNlIn3ejv14AAAAygAAAE5X40OECzpldmVudC10eXBlBwAIbWV0YWRhdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJtZXRyaWNzIjp7ImxhdGVuY3lNcyI6MTk1N30sInAiOiJhYmNkZWZnIiwidXNhZ2UiOnsiaW5wdXRUb2tlbnMiOjM4Niwib3V0cHV0VG9rZW5zIjo3NSwidG90YWxUb2tlbnMiOjQ2MX19Ke/W4Q=="
+const base64RealStreamingEvents = "AAAAmwAAAFJGkfmwCzpldmVudC10eXBlBwAMbWVzc2FnZVN0YXJ0DTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDRCIsInJvbGUiOiJhc3Npc3RhbnQifbCidJ0AAACpAAAAV+0a5tkLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiVG8ifSwicCI6ImFiY2RlZmdoaWprbG1uIn0rY75JAAAAsQAAAFe9ijqaCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBjYWxjdWxhdGUgdGhlIGNvc2luZSJ9LCJwIjoiYWJjIn3hywqfAAAA2gAAAFdTaHzGCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBvZiA3LCJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTYifUsRwHsAAADXAAAAV6v4uHcLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiIHdlIGNhbiB1c2UgdGhlIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVSJ9jBuxjAAAALwAAABXRRr+Kws6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgXCIifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGIn3SOp66AAAA2wAAAFduCFV2CzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6ImNvc2luZVwiIGZ1bmN0aW9uIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXIn2f+1UQAAAA2QAAAFcUyAYWCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiB0aGF0In0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaMDEyMzQ1NiJ9uD7t8wAAAM8AAABX+2hkNAs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgaXMifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWSJ9p52nrQAAAMQAAABXjLhVJQs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgYXZhaWxhYmxlIHRvIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0QifYC08b0AAADTAAAAV154HrcLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tEZWx0YQ06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjowLCJkZWx0YSI6eyJ0ZXh0IjoiIHVzLiJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxIn0mTm4jAAAAtAAAAFd1arXqCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBMZXQifSwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3In34BFwTAAAA0AAAAFcZ2GRnCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IidzIHVzZSJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWVyJ9vfdBjQAAALwAAABXRRr+Kws6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgdGhpcyJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNEIn1Xtb4jAAAAuAAAAFewmljrCzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MCwiZGVsdGEiOnsidGV4dCI6IiBmdW5jdGlvbiB0byJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFycyJ9GYv84AAAALQAAABXdWq16gs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgZ2V0In0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2dyJ99bdUOgAAAN4AAABXpujaBgs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIgdGhlIHJlc3VsdCJ9LCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NSJ9niPS/gAAAM0AAABXgag3VAs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsImRlbHRhIjp7InRleHQiOiIuIn0sInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFkifRc68JQAAACuAAAAVig9Cl8LOmV2ZW50LXR5cGUHABBjb250ZW50QmxvY2tTdG9wDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjAsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1AifY2eizoAAAEEAAAAV67xblsLOmV2ZW50LXR5cGUHABFjb250ZW50QmxvY2tTdGFydA06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImNvbnRlbnRCbG9ja0luZGV4IjoxLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVIiLCJzdGFydCI6eyJ0b29sVXNlIjp7Im5hbWUiOiJjb3NpbmUiLCJ0b29sVXNlSWQiOiJ0b29sdXNlX1FrbHJFSEtqUnU2T2M0QlFVZnk3WlEifX19kpNGawAAAK0AAABXGJpAGQs6ZXZlbnQtdHlwZQcAEWNvbnRlbnRCbG9ja0RlbHRhDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjEsImRlbHRhIjp7InRvb2xVc2UiOnsiaW5wdXQiOiIifX0sInAiOiJhYmNkZWZnIn3XeK+kAAAAswAAAFfHSmn6CzpldmVudC10eXBlBwARY29udGVudEJsb2NrRGVsdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJjb250ZW50QmxvY2tJbmRleCI6MSwiZGVsdGEiOnsidG9vbFVzZSI6eyJpbnB1dCI6IntcInhcIjogN30ifX0sInAiOiJhYmMifaN4jhsAAACxAAAAVsqNCgwLOmV2ZW50LXR5cGUHABBjb250ZW50QmxvY2tTdG9wDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiY29udGVudEJsb2NrSW5kZXgiOjEsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlMifUJp3UkAAACFAAAAUQBIgekLOmV2ZW50LXR5cGUHAAttZXNzYWdlU3RvcA06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7InAiOiJhYmNkIiwic3RvcFJlYXNvbiI6InRvb2xfdXNlIn3ejv14AAAA6wAAAE6rQkUwCzpldmVudC10eXBlBwAIbWV0YWRhdGENOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJtZXRyaWNzIjp7ImxhdGVuY3lNcyI6MTk1N30sInAiOiJhYmNkZWZnIiwic2VydmljZVRpZXIiOnsidHlwZSI6ImRlZmF1bHQifSwidXNhZ2UiOnsiaW5wdXRUb2tlbnMiOjM4Niwib3V0cHV0VG9rZW5zIjo3NSwidG90YWxUb2tlbnMiOjQ2MX19Oi638g=="
 
 func TestOpenAIToAWSBedrockTranslatorExtractAmazonEventStreamEvents(t *testing.T) {
 	buf := bytes.NewBuffer(nil)
@@ -1957,6 +2100,7 @@ func TestOpenAIToAWSBedrockTranslator_convertEvent(t *testing.T) {
 				Model:   "claude-sonnet-4",
 				Created: openai.JSONUNIXTime(time.Unix(releaseDateUnix, 0)), // 0 nanoseconds
 				Object:  "chat.completion.chunk",
+				Choices: []openai.ChatCompletionResponseChunkChoice{},
 				Usage: &openai.Usage{
 					TotalTokens:      35,
 					PromptTokens:     15,
@@ -2143,10 +2287,9 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_WithReasoning(t 
 						choices, _ := untypedChunk["choices"].([]interface{})
 						choice, _ := choices[0].(map[string]interface{})
 						deltaMap, _ := choice["delta"].(map[string]interface{})
-						reasoningContent, ok := deltaMap["reasoning_content"].(map[string]interface{})
-						require.True(t, ok, "Delta should have a 'reasoning_content' map")
-						_, textOk := reasoningContent["text"]
-						require.True(t, textOk, "Reasoning content should have a 'text' key")
+						reasoningContent, ok := deltaMap["reasoning_content"].(string)
+						require.True(t, ok, "Delta should have a 'reasoning_content' string")
+						require.NotEmpty(t, reasoningContent)
 					}
 				}
 			}
@@ -2208,15 +2351,19 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody_WithReasoning
 	require.Equal(t, "9.11 is greater than 9.8.", *message.Content)
 
 	require.NotNil(t, message.ReasoningContent, "Reasoning content should not be nil")
-	reasoningBlock, _ := message.ReasoningContent.Value.(*openai.ReasoningContent)
-	require.NotNil(t, reasoningBlock, "The nested reasoning content block should not be nil")
-	require.NotEmpty(t, reasoningBlock.ReasoningContent.ReasoningText.Text, "The reasoning text itself should not be empty")
+	reasoningText, ok := message.ReasoningContent.Value.(string)
+	require.True(t, ok, "reasoning_content should be a plain string")
+	require.Equal(t, "The user wants to compare two numbers. 9.11 is larger than 9.8.", reasoningText)
+
+	require.Len(t, message.ThinkingBlocks, 1, "Reasoning text should be echoed in thinking_blocks")
+	require.Equal(t, "thinking", message.ThinkingBlocks[0].Type)
+	require.Equal(t, reasoningText, message.ThinkingBlocks[0].Thinking)
 
 	var untypedResponse map[string]interface{}
 	err = json.Unmarshal(outputBody, &untypedResponse)
 	require.NoError(t, err)
 
-	// Traverse the map to verify the structure: reasoning_content["reasoningContent"].
+	// Verify reasoning_content is serialized as a plain string on the wire.
 	choices, ok := untypedResponse["choices"].([]interface{})
 	require.True(t, ok, "JSON should have a 'choices' array")
 	require.Len(t, choices, 1)
@@ -2226,11 +2373,120 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody_WithReasoning
 
 	messageMap, ok := choice["message"].(map[string]interface{})
 	require.True(t, ok, "Choice should have a 'message' map")
-	reasoningContent, ok := messageMap["reasoning_content"].(map[string]interface{})
-	require.True(t, ok, "Message should have a 'reasoning_content' map")
+	reasoningContent, ok := messageMap["reasoning_content"].(string)
+	require.True(t, ok, "Message should have a 'reasoning_content' string")
+	require.Equal(t, "The user wants to compare two numbers. 9.11 is larger than 9.8.", reasoningContent)
+}
 
-	_, ok = reasoningContent["reasoningContent"]
-	require.True(t, ok, "The 'reasoning_content' object should have a nested 'reasoningContent' key")
+func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureAndRedacted(t *testing.T) {
+	// A signature and redacted reasoning content cannot live in the plain-string
+	// reasoning_content, so they must surface via thinking_blocks.
+	redactedBytes := []byte("a redacted thought")
+	mockBedrockResponse := awsbedrock.ConverseResponse{
+		Output: &awsbedrock.ConverseOutput{
+			Message: awsbedrock.Message{
+				Role: awsbedrock.ConversationRoleAssistant,
+				Content: []*awsbedrock.ContentBlock{
+					{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							ReasoningText: &awsbedrock.ReasoningTextBlock{
+								Text:      "Let me think about this.",
+								Signature: "sig_xyz",
+							},
+						},
+					},
+					{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							RedactedContent: redactedBytes,
+						},
+					},
+					{
+						Text: ptr.To("The answer is 42."),
+					},
+				},
+			},
+		},
+		StopReason: ptr.To(awsbedrock.StopReasonEndTurn),
+	}
+
+	body, err := json.Marshal(mockBedrockResponse)
+	require.NoError(t, err)
+
+	o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+	_, outputBody, _, _, err := o.ResponseBody(nil, bytes.NewBuffer(body), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, outputBody)
+
+	var openAIResponse openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(outputBody, &openAIResponse))
+	require.Len(t, openAIResponse.Choices, 1)
+	message := openAIResponse.Choices[0].Message
+
+	require.NotNil(t, message.Content)
+	require.Equal(t, "The answer is 42.", *message.Content)
+
+	reasoningText, ok := message.ReasoningContent.Value.(string)
+	require.True(t, ok, "reasoning_content should be a plain string")
+	require.Equal(t, "Let me think about this.", reasoningText)
+
+	require.Len(t, message.ThinkingBlocks, 2)
+	require.Equal(t, "thinking", message.ThinkingBlocks[0].Type)
+	require.Equal(t, "Let me think about this.", message.ThinkingBlocks[0].Thinking)
+	require.Equal(t, "sig_xyz", message.ThinkingBlocks[0].Signature)
+	require.Equal(t, "redacted_thinking", message.ThinkingBlocks[1].Type)
+	require.Equal(t, base64.StdEncoding.EncodeToString(redactedBytes), message.ThinkingBlocks[1].Data)
+}
+
+func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureOnly(t *testing.T) {
+	// A reasoning block carrying only a signature (no text) must not emit an empty
+	// reasoning_content string; the signature still round-trips via thinking_blocks.
+	mockBedrockResponse := awsbedrock.ConverseResponse{
+		Output: &awsbedrock.ConverseOutput{
+			Message: awsbedrock.Message{
+				Role: awsbedrock.ConversationRoleAssistant,
+				Content: []*awsbedrock.ContentBlock{
+					{
+						ReasoningContent: &awsbedrock.ReasoningContentBlock{
+							ReasoningText: &awsbedrock.ReasoningTextBlock{
+								Signature: "sig_only",
+							},
+						},
+					},
+					{
+						Text: ptr.To("The answer is 42."),
+					},
+				},
+			},
+		},
+		StopReason: ptr.To(awsbedrock.StopReasonEndTurn),
+	}
+
+	body, err := json.Marshal(mockBedrockResponse)
+	require.NoError(t, err)
+
+	o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+	_, outputBody, _, _, err := o.ResponseBody(nil, bytes.NewBuffer(body), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, outputBody)
+
+	var openAIResponse openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(outputBody, &openAIResponse))
+	require.Len(t, openAIResponse.Choices, 1)
+	message := openAIResponse.Choices[0].Message
+
+	require.Nil(t, message.ReasoningContent, "reasoning_content must be absent when there is no reasoning text")
+	require.Len(t, message.ThinkingBlocks, 1)
+	require.Equal(t, "thinking", message.ThinkingBlocks[0].Type)
+	require.Empty(t, message.ThinkingBlocks[0].Thinking)
+	require.Equal(t, "sig_only", message.ThinkingBlocks[0].Signature)
+
+	// reasoning_content must not appear on the wire at all.
+	var untypedResponse map[string]interface{}
+	require.NoError(t, json.Unmarshal(outputBody, &untypedResponse))
+	choices := untypedResponse["choices"].([]interface{})
+	messageMap := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	_, hasReasoning := messageMap["reasoning_content"]
+	require.False(t, hasReasoning, "reasoning_content key must be omitted for a signature-only block")
 }
 
 func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_WithRedactedContent(t *testing.T) {
@@ -2288,23 +2544,12 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_WithRedactedCont
 			err := json.Unmarshal([]byte(data), &chunk)
 			require.NoError(t, err)
 
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil && chunk.Choices[0].Delta.ReasoningContent != nil {
-				reasoning := chunk.Choices[0].Delta.ReasoningContent
-				require.Equal(t, redactedBytes, reasoning.RedactedContent)
-				require.Empty(t, reasoning.Text)
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil && len(chunk.Choices[0].Delta.ThinkingBlocks) > 0 {
+				require.Nil(t, chunk.Choices[0].Delta.ReasoningContent)
+				block := chunk.Choices[0].Delta.ThinkingBlocks[0]
+				require.Equal(t, "redacted_thinking", block.Type)
+				require.Equal(t, base64.StdEncoding.EncodeToString(redactedBytes), block.Data)
 				foundReasoningChunk = true
-
-				var untypedChunk map[string]interface{}
-				err = json.Unmarshal([]byte(data), &untypedChunk)
-				require.NoError(t, err)
-
-				choices, _ := untypedChunk["choices"].([]interface{})
-				choice, _ := choices[0].(map[string]interface{})
-				deltaMap, _ := choice["delta"].(map[string]interface{})
-				reasoningContent, ok := deltaMap["reasoning_content"].(map[string]interface{})
-				require.True(t, ok, "Delta should have a 'reasoning_content' map")
-				_, redactedOk := reasoningContent["redactedContent"]
-				require.True(t, redactedOk, "Reasoning content should have a 'redactedContent' key")
 			}
 		}
 	}
@@ -2445,7 +2690,7 @@ func TestOpenAIToAWSBedrockTranslator_CacheControl(t *testing.T) {
 					},
 				},
 			},
-			expectedJSON: `{"inferenceConfig":{},"messages":[{"content":[{"text":"Test message"}],"role":"user"}],"toolConfig":{"tools":[{"toolSpec":{"description":"Get weather information","inputSchema":{"json":{"type":"object"}},"name":"get_weather"},"cachePoint":{"type":"default"}}]}}`,
+			expectedJSON: `{"inferenceConfig":{},"messages":[{"content":[{"text":"Test message"}],"role":"user"}],"toolConfig":{"tools":[{"toolSpec":{"description":"Get weather information","inputSchema":{"json":{"type":"object"}},"name":"get_weather"}},{"cachePoint":{"type":"default"}}]}}`,
 		},
 		{
 			name: "no cache control",
@@ -2513,4 +2758,160 @@ func TestCacheControlHelpers(t *testing.T) {
 		})
 		require.Nil(t, cachePoint3)
 	})
+}
+
+func TestOpenAIToAWSBedrockTranslator_EmptyContentMessages(t *testing.T) {
+	t.Run("empty assistant message without tool calls is dropped", func(t *testing.T) {
+		for _, name := range []string{"empty string", "nil content"} {
+			t.Run(name, func(t *testing.T) {
+				assistantMsg := &openai.ChatCompletionAssistantMessageParam{
+					Role: openai.ChatMessageRoleAssistant,
+				}
+				if name == "empty string" {
+					assistantMsg.Content = openai.StringOrAssistantRoleContentUnion{Value: ""}
+				}
+
+				o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+				req := openai.ChatCompletionRequest{
+					Model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+					Messages: []openai.ChatCompletionMessageParamUnion{
+						{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "Hello"}}},
+						{OfAssistant: assistantMsg},
+						{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "Can you help?"}}},
+					},
+				}
+
+				_, newBody, err := o.RequestBody(nil, &req, false)
+				require.NoError(t, err)
+
+				var awsReq awsbedrock.ConverseInput
+				require.NoError(t, json.Unmarshal(newBody, &awsReq))
+				requireNoEmptyAssistantContent(t, awsReq.Messages)
+			})
+		}
+	})
+
+	t.Run("assistant message with only tool calls and no content should work", func(t *testing.T) {
+		o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+		req := openai.ChatCompletionRequest{
+			Model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "What is the weather?"}}},
+				{OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+					Role: openai.ChatMessageRoleAssistant,
+					ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+						{ID: ptr.To("call_abc123"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "get_weather", Arguments: `{"location":"NYC"}`}},
+					},
+				}},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "call_abc123", Content: openai.ContentUnion{Value: `{"temp":72}`}}},
+			},
+		}
+
+		_, newBody, err := o.RequestBody(nil, &req, false)
+		require.NoError(t, err)
+
+		var awsReq awsbedrock.ConverseInput
+		require.NoError(t, json.Unmarshal(newBody, &awsReq))
+
+		var foundAssistant bool
+		for _, msg := range awsReq.Messages {
+			if msg.Role == openai.ChatMessageRoleAssistant {
+				foundAssistant = true
+				require.NotEmpty(t, msg.Content, "assistant message with tool calls should have non-empty content")
+				require.NotNil(t, msg.Content[0].ToolUse, "expected a ToolUse block")
+				require.Equal(t, "get_weather", msg.Content[0].ToolUse.Name)
+			}
+		}
+		require.True(t, foundAssistant, "should have found an assistant message")
+	})
+
+	t.Run("mixed messages with some empty assistant messages should handle correctly", func(t *testing.T) {
+		o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+		req := openai.ChatCompletionRequest{
+			Model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "Hello"}}},
+				{OfAssistant: &openai.ChatCompletionAssistantMessageParam{Role: openai.ChatMessageRoleAssistant, Content: openai.StringOrAssistantRoleContentUnion{Value: ""}}},
+				{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "Tell me more"}}},
+				{OfAssistant: &openai.ChatCompletionAssistantMessageParam{Role: openai.ChatMessageRoleAssistant, Content: openai.StringOrAssistantRoleContentUnion{Value: "Here is the info"}}},
+			},
+		}
+
+		_, newBody, err := o.RequestBody(nil, &req, false)
+		require.NoError(t, err)
+
+		var awsReq awsbedrock.ConverseInput
+		require.NoError(t, json.Unmarshal(newBody, &awsReq))
+		requireNoEmptyAssistantContent(t, awsReq.Messages)
+
+		var assistantWithContent bool
+		for _, msg := range awsReq.Messages {
+			if msg.Role == openai.ChatMessageRoleAssistant {
+				for _, block := range msg.Content {
+					if block.Text != nil && *block.Text == "Here is the info" {
+						assistantWithContent = true
+					}
+				}
+			}
+		}
+		require.True(t, assistantWithContent, "should preserve assistant message with actual content")
+	})
+}
+
+func requireNoEmptyAssistantContent(t *testing.T, messages []*awsbedrock.Message) {
+	t.Helper()
+	for i, msg := range messages {
+		if msg.Role == openai.ChatMessageRoleAssistant && len(msg.Content) == 0 {
+			t.Errorf("message at index %d is an assistant message with empty content array, which Bedrock will reject", i)
+		}
+	}
+}
+
+func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_Streaming_ResponseBody_MarshalError(t *testing.T) {
+	// Build a valid Bedrock streaming event that will be successfully decoded,
+	// but inject a json.Marshal failure to exercise the error return path
+	// that was previously a panic.
+	inputEvents := []awsbedrock.ConverseStreamEvent{
+		{Role: ptr.To(awsbedrock.ConversationRoleAssistant)},
+		{
+			ContentBlockIndex: 0,
+			EventType:         awsbedrock.ConverseStreamEventTypeContentBlockDelta.String(),
+			Delta: &awsbedrock.ConverseStreamEventContentBlockDelta{
+				Text: ptr.To("hello"),
+			},
+		},
+		{StopReason: ptr.To(awsbedrock.StopReasonEndTurn)},
+	}
+
+	buf := bytes.NewBuffer(nil)
+	encoder := eventstream.NewEncoder()
+	for _, event := range inputEvents {
+		payload, err := json.Marshal(event)
+		require.NoError(t, err)
+		err = encoder.Encode(buf, eventstream.Message{
+			Headers: eventstream.Headers{
+				{Name: ":event-type", Value: eventstream.StringValue("chunk")},
+			},
+			Payload: payload,
+		})
+		require.NoError(t, err)
+	}
+
+	// Override json.Marshal to force a failure during serializeOpenAIChatCompletionChunk.
+	orig := json.Marshal
+	t.Cleanup(func() { json.Marshal = orig })
+	json.Marshal = func(v interface{}) ([]byte, error) {
+		// Allow the eventstream decoding (internal json.Unmarshal) to succeed
+		// by only failing on ChatCompletionResponseChunk marshaling.
+		if _, ok := v.(*openai.ChatCompletionResponseChunk); ok {
+			return nil, fmt.Errorf("injected marshal error")
+		}
+		return orig(v)
+	}
+
+	o := &openAIToAWSBedrockTranslatorV1ChatCompletion{stream: true, requestModel: "test-model"}
+	_, _, _, _, err := o.ResponseBody(nil, buf, true, nil)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to marshal streaming event")
+	require.ErrorContains(t, err, "injected marshal error")
 }

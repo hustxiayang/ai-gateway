@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/cmd/envoy-gateway/root"
 	egextension "github.com/envoyproxy/gateway/proto/extension"
 	"github.com/go-logr/logr"
@@ -93,7 +94,7 @@ func run(ctx context.Context, c *cmdRun, o *runOpts, stdout, stderr io.Writer) e
 	// First, we need to create the self-signed certificates used for communication between the EG and Envoy.
 	// Certificates will be placed at ~/.config/envoy-gateway/certs, which is the default location used by Envoy Gateway.
 	certGenOut := &bytes.Buffer{}
-	certGen := root.GetRootCommand()
+	certGen := root.GetRootCommand(nil)
 	certGen.SetOut(certGenOut)
 	certGen.SetErr(certGenOut)
 	certGen.SetArgs([]string{"certgen", "--local"})
@@ -174,7 +175,15 @@ func run(ctx context.Context, c *cmdRun, o *runOpts, stdout, stderr io.Writer) e
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 	s := grpc.NewServer()
-	extSrv := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true)
+	requestHeaderAttributes := envOptional("OTEL_AIGW_REQUEST_HEADER_ATTRIBUTES")
+	logRequestHeaderAttributes := envOptional("OTEL_AIGW_LOG_REQUEST_HEADER_ATTRIBUTES")
+	quotaRateLimitServiceAddr := "envoy-ai-gateway-ratelimit.envoy-gateway-system"
+	const quotaRateLimitTimeout = 5
+	const quotaRateLimitFailureModeDeny = false
+	extSrv, err := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true, requestHeaderAttributes, logRequestHeaderAttributes, quotaRateLimitServiceAddr, quotaRateLimitTimeout, quotaRateLimitFailureModeDeny)
+	if err != nil {
+		return err
+	}
 	egextension.RegisterEnvoyGatewayExtensionServer(s, extSrv)
 	grpc_health_v1.RegisterHealthServer(s, extSrv)
 
@@ -201,8 +210,9 @@ func run(ctx context.Context, c *cmdRun, o *runOpts, stdout, stderr io.Writer) e
 	//
 	// Now running the `envoy-gateway` CLI alternative below by passing `--config-path` to `egConfigPath`.
 	// Then the agent will read the resources from the file pointed inside the config and start the Envoy process.
+	runnerErrorHandler := newRunnerErrorHandler(os.Stderr, serverCancel)
+	server := root.GetRootCommand(runnerErrorHandler)
 
-	server := root.GetRootCommand()
 	// TODO: enable the log by default after the issue is resolved: https://github.com/envoyproxy/gateway/issues/6596
 	if c.Debug {
 		server.SetOut(stdout)
@@ -331,23 +341,40 @@ func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Contex
 		runCtx.mustClearSetOwnerReferencesAndStatusAndWriteObj(&ep.TypeMeta, ep)
 	}
 
-	filterConfigSecret, err := runCtx.fakeClientSet.CoreV1().
+	// Get the filter config from the sharded config secrets.
+	filterConfigIndexSecret, err := runCtx.fakeClientSet.CoreV1().
 		Secrets("").Get(ctx,
-		controller.FilterConfigSecretPerGatewayName(gw.Name, gw.Namespace), metav1.GetOptions{})
+		controller.FilterConfigBundleIndexSecretName(gw.Name, gw.Namespace), metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to get filter config secret: %w", err)
 	}
 
-	rawConfig, ok := filterConfigSecret.StringData[controller.FilterConfigKeyInSecret]
+	filterConfigIndexRaw, ok := filterConfigIndexSecret.StringData[controller.FilterConfigBundleIndexKey]
 	if !ok {
-		return nil, nil, 0, fmt.Errorf("failed to get filter config from secret: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to get filter config index from secret %s", filterConfigIndexSecret.Name)
 	}
-	var fc filterapi.Config
-	if err = yaml.Unmarshal([]byte(rawConfig), &fc); err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to unmarshal filter config: %w", err)
+
+	filterConfigIndex, err := filterapi.UnmarshalConfigBundleIndex([]byte(filterConfigIndexRaw))
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to parse filter config index: %w", err)
 	}
-	runCtx.stderrLogger.Info("Running external process", "config", fc)
-	done := runCtx.mustStartExtProc(ctx, &fc)
+
+	fc, err := filterapi.ReassembleBundleConfig(filterConfigIndex, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+		partSecret, getErr := runCtx.fakeClientSet.CoreV1().Secrets("").Get(ctx, part.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		if b, exists := partSecret.Data[controller.FilterConfigBundlePartKey]; exists {
+			return b, nil
+		}
+		return nil, fmt.Errorf("missing key %q in part secret %s", controller.FilterConfigBundlePartKey, part.Name)
+	})
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to reassemble filter config bundle: %w", err)
+	}
+
+	runCtx.stderrLogger.Info("Running external process", "config", *fc)
+	done := runCtx.mustStartExtProc(ctx, fc)
 	return fakeClient, done, runCtx.tryFindEnvoyListenerPort(gw), nil
 }
 
@@ -360,14 +387,12 @@ func (runCtx *runCmdContext) mustStartExtProc(
 	if err != nil {
 		panic(fmt.Sprintf("BUG: failed to marshal filter config: %v", err))
 	}
-	configPath := filepath.Join(runCtx.tmpdir, "extproc-config.yaml")
-	_ = os.Remove(configPath)
-	err = os.WriteFile(configPath, marshaled, 0o600)
-	if err != nil {
-		panic(fmt.Sprintf("BUG: failed to write extension proc config: %v", err))
+	configBundlePath := filepath.Join(runCtx.tmpdir, "extproc-config-bundle")
+	if err = writeExtProcConfigBundle(configBundlePath, marshaled); err != nil {
+		panic(fmt.Sprintf("BUG: failed to write extension proc config bundle: %v", err))
 	}
 	args := []string{
-		"--configPath", configPath,
+		"--configBundlePath", configBundlePath,
 		"--extProcAddr", fmt.Sprintf("unix://%s", runCtx.udsPath),
 		"--adminPort", fmt.Sprintf("%d", runCtx.adminPort),
 		"--mcpAddr", ":" + strconv.Itoa(internalapi.MCPProxyPort),
@@ -379,11 +404,17 @@ func (runCtx *runCmdContext) mustStartExtProc(
 		args = append(args, "--logLevel", "warn")
 	}
 
-	if metricsAttrs := os.Getenv("OTEL_AIGW_METRICS_REQUEST_HEADER_ATTRIBUTES"); metricsAttrs != "" {
-		args = append(args, "-metricsRequestHeaderAttributes", metricsAttrs)
+	if value, ok := os.LookupEnv("OTEL_AIGW_REQUEST_HEADER_ATTRIBUTES"); ok {
+		args = append(args, "-requestHeaderAttributes", value)
 	}
-	if spanAttrs := os.Getenv("OTEL_AIGW_SPAN_REQUEST_HEADER_ATTRIBUTES"); spanAttrs != "" {
-		args = append(args, "-spanRequestHeaderAttributes", spanAttrs)
+	if value, ok := os.LookupEnv("OTEL_AIGW_SPAN_REQUEST_HEADER_ATTRIBUTES"); ok {
+		args = append(args, "-spanRequestHeaderAttributes", value)
+	}
+	if value, ok := os.LookupEnv("OTEL_AIGW_METRICS_REQUEST_HEADER_ATTRIBUTES"); ok {
+		args = append(args, "-metricsRequestHeaderAttributes", value)
+	}
+	if value, ok := os.LookupEnv("OTEL_AIGW_LOG_REQUEST_HEADER_ATTRIBUTES"); ok {
+		args = append(args, "-logRequestHeaderAttributes", value)
 	}
 
 	done := make(chan error)
@@ -395,6 +426,36 @@ func (runCtx *runCmdContext) mustStartExtProc(
 		close(done)
 	}()
 	return done
+}
+
+func writeExtProcConfigBundle(bundlePath string, raw []byte) error {
+	part := filterapi.ConfigBundlePart{
+		Name:      "extproc-config",
+		Path:      filterapi.ConfigBundlePartPath(0),
+		SizeBytes: len(raw),
+	}
+	partPath := filepath.Join(bundlePath, filepath.FromSlash(part.Path))
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(partPath, raw, 0o600); err != nil {
+		return err
+	}
+	indexRaw, err := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+		Checksum: filterapi.ConfigBundleChecksum(raw),
+		Parts:    []filterapi.ConfigBundlePart{part},
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(bundlePath, filterapi.ConfigBundleIndexFileName), indexRaw, 0o600)
+}
+
+func envOptional(name string) *string {
+	if value, ok := os.LookupEnv(name); ok {
+		return &value
+	}
+	return nil
 }
 
 // mustClearSetOwnerReferencesAndStatusAndWriteObj clears the owner references and status of the given object, marshals it
@@ -471,6 +532,18 @@ func (runCtx *runCmdContext) tryFindEnvoyListenerPort(gw *gwapiv1.Gateway) int {
 		return 0
 	}
 	return int(gw.Spec.Listeners[0].Port)
+}
+
+// newRunnerErrorHandler returns a callback that triggers a graceful shutdown
+// (via cancelFunc) when a critical Envoy Gateway runner fails.
+func newRunnerErrorHandler(stderr io.Writer, cancelFunc context.CancelFunc) func(string, error) {
+	return func(runner string, err error) {
+		if runner == string(egv1a1.LogComponentProviderRunner) ||
+			runner == string(egv1a1.LogComponentInfrastructureRunner) {
+			_, _ = fmt.Fprintf(stderr, "exiting on %s runner error: %v\n", runner, err)
+			cancelFunc()
+		}
+	}
 }
 
 func maybeResolveHome(p string) string {

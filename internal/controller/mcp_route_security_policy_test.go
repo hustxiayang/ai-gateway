@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
@@ -55,7 +55,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		mcpRoute       *aigv1a1.MCPRoute
+		mcpRoute       *aigv1b1.MCPRoute
 		extraObjs      []client.Object
 		wantSecPol     bool
 		wantJWT        bool
@@ -63,15 +63,18 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 		wantExtAuth    *egv1a1.ExtAuth
 		wantBTP        bool
 		wantFilter     bool
+		wantIssuer     string
 		wantJWKS       *egv1a1.RemoteJWKS
+		wantMergeType  *egv1a1.MergeType
+		wantBTPMerge   *egv1a1.MergeType
 		wantErr        bool
 	}{
 		{
 			name: "no authentication configured",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{},
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{},
 				},
 			},
 			wantSecPol: false,
@@ -82,19 +85,19 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 		},
 		{
 			name: "authentication configured",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
-						OAuth: &aigv1a1.MCPRouteOAuth{
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+						OAuth: &aigv1b1.MCPRouteOAuth{
 							Issuer:    server.URL,
 							Audiences: []string{"test-audience"},
-							JWKS: &aigv1a1.JWKS{
+							JWKS: &aigv1b1.JWKS{
 								RemoteJWKS: &egv1a1.RemoteJWKS{
 									URI: server.URL + "/.well-known/jwks.json",
 								},
 							},
-							ProtectedResourceMetadata: aigv1a1.ProtectedResourceMetadata{
+							ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
 								Resource:                          "https://api.example.com/mcp",
 								ScopesSupported:                   []string{"read", "write"},
 								ResourceName:                      ptr.To("my cool mcp tools"),
@@ -110,20 +113,21 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 			wantJWT:    true,
 			wantBTP:    true,
 			wantFilter: true,
+			wantIssuer: server.URL,
 			// For HTTP JWKS we don't need a cluster with TLS config.
 			wantJWKS: &egv1a1.RemoteJWKS{URI: server.URL + "/.well-known/jwks.json"},
 			wantErr:  false,
 		},
 		{
 			name: "authentication configured without jwks - auto discovery",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
-						OAuth: &aigv1a1.MCPRouteOAuth{
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+						OAuth: &aigv1b1.MCPRouteOAuth{
 							Issuer:    server.URL,
 							Audiences: []string{"test-audience"},
-							ProtectedResourceMetadata: aigv1a1.ProtectedResourceMetadata{
+							ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
 								Resource:        "https://api.example.com/mcp",
 								ScopesSupported: []string{"read", "write"},
 							},
@@ -167,6 +171,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 			wantJWT:    true,
 			wantBTP:    true,
 			wantFilter: true,
+			wantIssuer: server.URL,
 			// For HTTPS JWKS we need a cluster with TLS config.
 			wantJWKS: &egv1a1.RemoteJWKS{
 				URI: fmt.Sprintf("https://%s/.well-known/jwks.json", serverURL.Host),
@@ -186,10 +191,10 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 		},
 		{
 			name: "api key authentication configured",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
 						APIKeyAuth: &egv1a1.APIKeyAuth{
 							CredentialRefs: []gwapiv1.SecretObjectReference{
 								{Name: "client-keys"},
@@ -222,10 +227,10 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 		},
 		{
 			name: "ext auth configured",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
 						ExtAuth: &egv1a1.ExtAuth{
 							GRPC: &egv1a1.GRPCExtAuthService{
 								BackendCluster: egv1a1.BackendCluster{
@@ -266,10 +271,10 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 		},
 		{
 			name: "api key authentication and ext auth configured",
-			mcpRoute: &aigv1a1.MCPRoute{
+			mcpRoute: &aigv1b1.MCPRoute{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-				Spec: aigv1a1.MCPRouteSpec{
-					SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
 						APIKeyAuth: &egv1a1.APIKeyAuth{
 							CredentialRefs: []gwapiv1.SecretObjectReference{
 								{Name: "client-keys"},
@@ -328,6 +333,75 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 			wantJWKS:   nil,
 			wantErr:    false,
 		},
+		{
+			name: "oauth configured with mergeType on SecurityPolicy and BackendTrafficPolicy",
+			mcpRoute: &aigv1b1.MCPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+						MergeType: ptr.To(egv1a1.StrategicMerge),
+						OAuth: &aigv1b1.MCPRouteOAuth{
+							Issuer:    server.URL,
+							Audiences: []string{"test-audience"},
+							JWKS: &aigv1b1.JWKS{
+								RemoteJWKS: &egv1a1.RemoteJWKS{
+									URI: server.URL + "/.well-known/jwks.json",
+								},
+							},
+							ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
+								Resource:        "https://api.example.com/mcp",
+								ScopesSupported: []string{"read", "write"},
+							},
+						},
+					},
+					BackendTrafficPolicy: &aigv1b1.MCPRouteBackendTrafficPolicy{
+						MergeType: ptr.To(egv1a1.StrategicMerge),
+					},
+				},
+			},
+			wantSecPol:    true,
+			wantJWT:       true,
+			wantBTP:       true,
+			wantFilter:    true,
+			wantIssuer:    server.URL,
+			wantJWKS:      &egv1a1.RemoteJWKS{URI: server.URL + "/.well-known/jwks.json"},
+			wantMergeType: ptr.To(egv1a1.StrategicMerge),
+			wantBTPMerge:  ptr.To(egv1a1.StrategicMerge),
+			wantErr:       false,
+		},
+		{
+			name: "api key authentication configured with mergeType on SecurityPolicy only",
+			mcpRoute: &aigv1b1.MCPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+						MergeType: ptr.To(egv1a1.StrategicMerge),
+						APIKeyAuth: &egv1a1.APIKeyAuth{
+							CredentialRefs: []gwapiv1.SecretObjectReference{
+								{Name: "client-keys"},
+							},
+							ExtractFrom: []*egv1a1.ExtractFrom{
+								{Headers: []string{"x-api-key"}},
+							},
+						},
+					},
+				},
+			},
+			wantSecPol: true,
+			wantJWT:    false,
+			wantAPIKeyAuth: &egv1a1.APIKeyAuth{
+				CredentialRefs: []gwapiv1.SecretObjectReference{
+					{Name: "client-keys"},
+				},
+				ExtractFrom: []*egv1a1.ExtractFrom{
+					{Headers: []string{"x-api-key"}},
+				},
+			},
+			wantBTP:       false,
+			wantFilter:    false,
+			wantMergeType: ptr.To(egv1a1.StrategicMerge),
+			wantErr:       false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -361,6 +435,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 				if tt.wantJWT {
 					require.NotNil(t, securityPolicy.Spec.JWT)
 					require.NotEmpty(t, securityPolicy.Spec.JWT.Providers)
+					require.Equal(t, tt.wantIssuer, securityPolicy.Spec.JWT.Providers[0].Issuer)
 					if tt.wantJWKS != nil {
 						require.Equal(t, tt.wantJWKS, securityPolicy.Spec.JWT.Providers[0].RemoteJWKS)
 					}
@@ -389,6 +464,8 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 				// TODO: use sectionName to target the MCP proxy rule only when the HTTPRouteRule name is in stable channel.
 				require.Nil(t, securityPolicy.Spec.TargetRefs[0].SectionName)
 
+				require.Equal(t, tt.wantMergeType, securityPolicy.Spec.MergeType)
+
 			} else {
 				require.Error(t, secPolErr, "SecurityPolicy should not exist")
 			}
@@ -399,6 +476,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 
 			if tt.wantBTP {
 				require.NoError(t, btpErr, "BackendTrafficPolicy should exist")
+				require.Equal(t, tt.wantBTPMerge, backendTrafficPolicy.Spec.MergeType)
 			} else {
 				require.Error(t, btpErr, "BackendTrafficPolicy should not exist")
 			}
@@ -421,19 +499,19 @@ func TestMCPRouteControllerCleanupSecurityPolicyResources(t *testing.T) {
 	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
 	c := NewMCPRouteController(fakeClient, nil, logr.Discard(), eventCh.Ch)
 
-	mcpRoute := &aigv1a1.MCPRoute{
+	mcpRoute := &aigv1b1.MCPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-		Spec: aigv1a1.MCPRouteSpec{
-			SecurityPolicy: &aigv1a1.MCPRouteSecurityPolicy{
-				OAuth: &aigv1a1.MCPRouteOAuth{
+		Spec: aigv1b1.MCPRouteSpec{
+			SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+				OAuth: &aigv1b1.MCPRouteOAuth{
 					Issuer:    "https://auth.example.com",
 					Audiences: []string{"test-audience"},
-					JWKS: &aigv1a1.JWKS{
+					JWKS: &aigv1b1.JWKS{
 						RemoteJWKS: &egv1a1.RemoteJWKS{
 							URI: "https://auth.example.com/.well-known/jwks.json",
 						},
 					},
-					ProtectedResourceMetadata: aigv1a1.ProtectedResourceMetadata{
+					ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
 						Resource:        "https://api.example.com/mcp",
 						ScopesSupported: []string{"read", "write"},
 					},
@@ -499,15 +577,15 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
 	c := NewMCPRouteController(fakeClient, nil, logr.Discard(), eventCh.Ch)
 
-	securityPolicy := &aigv1a1.MCPRouteSecurityPolicy{
-		OAuth: &aigv1a1.MCPRouteOAuth{
+	securityPolicy := &aigv1b1.MCPRouteSecurityPolicy{
+		OAuth: &aigv1b1.MCPRouteOAuth{
 			Issuer: "https://auth.example.com",
-			JWKS: &aigv1a1.JWKS{
+			JWKS: &aigv1b1.JWKS{
 				RemoteJWKS: &egv1a1.RemoteJWKS{
 					URI: "https://auth.example.com/.well-known/jwks.json",
 				},
 			},
-			ProtectedResourceMetadata: aigv1a1.ProtectedResourceMetadata{Resource: "https://api.example.com/mcp"},
+			ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{Resource: "https://api.example.com/mcp"},
 		},
 		APIKeyAuth: &egv1a1.APIKeyAuth{
 			CredentialRefs: []gwapiv1.SecretObjectReference{{Name: "client-keys"}},
@@ -515,9 +593,9 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 		},
 	}
 
-	mcpRoute := &aigv1a1.MCPRoute{
+	mcpRoute := &aigv1b1.MCPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
-		Spec:       aigv1a1.MCPRouteSpec{SecurityPolicy: securityPolicy.DeepCopy()},
+		Spec:       aigv1b1.MCPRouteSpec{SecurityPolicy: securityPolicy.DeepCopy()},
 	}
 
 	require.NoError(t, fakeClient.Create(t.Context(), mcpRoute))
@@ -564,10 +642,65 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 	require.True(t, apierrors.IsNotFound(err))
 }
 
+func TestMCPRouteController_syncMCPRouteSecurityPolicy_ClaimToHeaders(t *testing.T) {
+	// Test that ClaimToHeaders from MCPRoute OAuth config are correctly configured
+	// in the SecurityPolicy's JWTProvider.
+	fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	c := NewMCPRouteController(fakeClient, nil, logr.Discard(), eventCh.Ch)
+
+	mcpRoute := &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+		Spec: aigv1b1.MCPRouteSpec{
+			SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{
+				OAuth: &aigv1b1.MCPRouteOAuth{
+					Issuer:    "https://auth.example.com",
+					Audiences: []string{"test-audience"},
+					JWKS: &aigv1b1.JWKS{
+						RemoteJWKS: &egv1a1.RemoteJWKS{
+							URI: "https://auth.example.com/.well-known/jwks.json",
+						},
+					},
+					ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
+						Resource: "https://api.example.com/mcp",
+					},
+					ClaimToHeaders: []egv1a1.ClaimToHeader{
+						{Claim: "sub", Header: "X-User-Id"},
+						{Claim: "email", Header: "X-User-Email"},
+						{Claim: "realm_access.roles", Header: "X-User-Roles"},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, fakeClient.Create(t.Context(), mcpRoute))
+
+	httpRouteName := "test-http-route"
+	require.NoError(t, c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName))
+
+	// Verify SecurityPolicy was created with ClaimToHeaders.
+	securityPolicyName := internalapi.MCPGeneratedResourceCommonPrefix + mcpRoute.Name
+	var sp egv1a1.SecurityPolicy
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKey{Name: securityPolicyName, Namespace: mcpRoute.Namespace}, &sp))
+
+	require.NotNil(t, sp.Spec.JWT)
+	require.Len(t, sp.Spec.JWT.Providers, 1)
+
+	provider := sp.Spec.JWT.Providers[0]
+	require.Len(t, provider.ClaimToHeaders, 4)
+	// The gateway always projects the verified "sub" claim into the trusted subject header first,
+	// so the MCP proxy can read the subject without re-parsing the client-controlled token.
+	require.Equal(t, egv1a1.ClaimToHeader{Claim: "sub", Header: internalapi.MCPSubjectHeader}, provider.ClaimToHeaders[0])
+	require.Equal(t, egv1a1.ClaimToHeader{Claim: "sub", Header: "X-User-Id"}, provider.ClaimToHeaders[1])
+	require.Equal(t, egv1a1.ClaimToHeader{Claim: "email", Header: "X-User-Email"}, provider.ClaimToHeaders[2])
+	require.Equal(t, egv1a1.ClaimToHeader{Claim: "realm_access.roles", Header: "X-User-Roles"}, provider.ClaimToHeaders[3])
+}
+
 func Test_buildOAuthProtectedResourceMetadataJSON(t *testing.T) {
-	auth := &aigv1a1.MCPRouteOAuth{
+	auth := &aigv1b1.MCPRouteOAuth{
 		Issuer: "https://auth.example.com",
-		ProtectedResourceMetadata: aigv1a1.ProtectedResourceMetadata{
+		ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
 			Resource:        "https://api.example.com/mcp",
 			ScopesSupported: []string{"read", "write", "admin"},
 		},
@@ -588,75 +721,75 @@ func Test_buildOAuthProtectedResourceMetadataJSON(t *testing.T) {
 func Test_buildWWWAuthenticateHeaderValue(t *testing.T) {
 	tests := []struct {
 		name     string
-		metadata *aigv1a1.ProtectedResourceMetadata
+		metadata *aigv1b1.ProtectedResourceMetadata
 		expected string
 	}{
 		{
 			name: "https URL with path",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "https://api.example.com/mcp/v1",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp/v1"`,
 		},
 		{
 			name: "https URL without path",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "https://api.example.com",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="https://api.example.com/.well-known/oauth-protected-resource"`,
 		},
 		{
 			name: "https URL with trailing slash",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "https://api.example.com/mcp/",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/mcp"`,
 		},
 		{
 			name: "http URL with path",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "http://api.example.com/mcp/v1",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="http://api.example.com/.well-known/oauth-protected-resource/mcp/v1"`,
 		},
 		{
 			name: "http URL without path",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "http://api.example.com",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="http://api.example.com/.well-known/oauth-protected-resource"`,
 		},
 		{
 			name: "http URL with trailing slash",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "http://api.example.com/mcp/",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="http://api.example.com/.well-known/oauth-protected-resource/mcp"`,
 		},
 		{
 			name: "URL with port number https",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "https://api.example.com:8080/mcp",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="https://api.example.com:8080/.well-known/oauth-protected-resource/mcp"`,
 		},
 		{
 			name: "URL with port number http",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "http://api.example.com:8080/mcp",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="http://api.example.com:8080/.well-known/oauth-protected-resource/mcp"`,
 		},
 		{
 			name: "complex path with multiple segments",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource: "https://api.example.com/v1/mcp/endpoint",
 			},
 			expected: `Bearer error="invalid_token", error_description="The access token is missing or invalid", resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/v1/mcp/endpoint"`,
 		},
 		{
 			name: "with empty scopes supported",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource:        "https://api.example.com/mcp",
 				ScopesSupported: []string{},
 			},
@@ -664,7 +797,7 @@ func Test_buildWWWAuthenticateHeaderValue(t *testing.T) {
 		},
 		{
 			name: "with single scope supported",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource:        "https://api.example.com/mcp",
 				ScopesSupported: []string{"read"},
 			},
@@ -672,7 +805,7 @@ func Test_buildWWWAuthenticateHeaderValue(t *testing.T) {
 		},
 		{
 			name: "with multiple scopes supported",
-			metadata: &aigv1a1.ProtectedResourceMetadata{
+			metadata: &aigv1b1.ProtectedResourceMetadata{
 				Resource:        "https://api.example.com/mcp",
 				ScopesSupported: []string{"read", "write"},
 			},
@@ -793,7 +926,7 @@ func Test_fetchOAuthServerMetadata(t *testing.T) {
 
 			// Use a small backoff timeout that allows the test to configure a number of attempts
 			// to force failures or self-healing.
-			metadata, err := fetchOAuthAuthServerMetadata(server.URL+tt.issuerPath, 1*time.Second)
+			metadata, err := fetchOAuthAuthServerMetadata(server.URL+tt.issuerPath, "", 1*time.Second)
 
 			if tt.wantStatusCode != http.StatusOK {
 				var httpError *httpError
@@ -809,4 +942,231 @@ func Test_fetchOAuthServerMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Test_fetchOAuthServerMetadata_unusableDocument covers authorization servers that answer 200 at a
+// well-known path they do not actually implement, returning an empty or incomplete document.
+// Those must count as a miss so that the remaining URL variants are still tried.
+func Test_fetchOAuthServerMetadata_unusableDocument(t *testing.T) {
+	const issuerPath = "/some/path"
+
+	// The URL variants are tried in this order.
+	var (
+		firstVariant = "/.well-known/oauth-authorization-server" + issuerPath
+		lastVariant  = issuerPath + "/.well-known/openid-configuration"
+	)
+
+	writeJSON := func(body map[string]interface{}) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(body)
+		}
+	}
+
+	completeDocument := func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(map[string]interface{}{
+			"issuer":                 "http://" + r.Host + issuerPath,
+			"authorization_endpoint": "http://" + r.Host + "/auth",
+			"token_endpoint":         "http://" + r.Host + "/token",
+		})(w, r)
+	}
+
+	t.Run("falls through an empty document to a later variant", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc(firstVariant, writeJSON(map[string]interface{}{}))
+		mux.HandleFunc(lastVariant, completeDocument)
+
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		addr := server.Listener.Addr().String()
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, "", 1*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "http://"+addr+issuerPath, metadata.Issuer)
+		require.Equal(t, "http://"+addr+"/auth", metadata.AuthorizationEndpoint)
+		require.Equal(t, "http://"+addr+"/token", metadata.TokenEndpoint)
+	})
+
+	t.Run("does not leak fields from an incomplete document", func(t *testing.T) {
+		mux := http.NewServeMux()
+		// Valid JSON, but without the members needed to drive an authorization flow.
+		mux.HandleFunc(firstVariant, writeJSON(map[string]interface{}{
+			"jwks_uri": "https://leaked.example.com/keys",
+		}))
+		mux.HandleFunc(lastVariant, completeDocument)
+
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, "", 1*time.Second)
+		require.NoError(t, err)
+		require.Empty(t, metadata.JwksURI, "jwks_uri from a rejected variant must not survive")
+	})
+
+	t.Run("fails when no variant yields a usable document", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc(lastVariant, writeJSON(map[string]interface{}{}))
+
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, "", 1*time.Second)
+		require.Nil(t, metadata)
+		var invalidErr *invalidMetadataError
+		require.ErrorAs(t, err, &invalidErr)
+		require.ErrorContains(t, err, "missing issuer")
+	})
+
+	// discoverJWKSURI only needs jwks_uri, so a document without the authorization flow endpoints
+	// must still reach that caller rather than being rejected by the fetcher.
+	t.Run("accepts a document without the authorization flow endpoints", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc(firstVariant, writeJSON(map[string]interface{}{}))
+		mux.HandleFunc(lastVariant, writeJSON(map[string]interface{}{
+			"issuer":   "https://idp.example.com",
+			"jwks_uri": "https://idp.example.com/keys",
+		}))
+
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, "", 1*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "https://idp.example.com/keys", metadata.JwksURI)
+	})
+
+	t.Run("falls through a non-JSON body to a later variant", func(t *testing.T) {
+		mux := http.NewServeMux()
+		// A catch-all route that serves HTML with a 200 for every unknown path.
+		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html><body>not found</body></html>"))
+		})
+		mux.HandleFunc(lastVariant, completeDocument)
+
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		addr := server.Listener.Addr().String()
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, "", 1*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "http://"+addr+issuerPath, metadata.Issuer)
+	})
+}
+
+func Test_fetchOAuthServerMetadata_explicitURL(t *testing.T) {
+	const (
+		issuerPath = "/api/idp/authn"
+		// The document lives at a versioned path that cannot be derived from the issuer.
+		versionedPath = "/api/idp/v4/authn/.well-known/openid-configuration"
+	)
+
+	newServer := func(t *testing.T, register func(*http.ServeMux)) *httptest.Server {
+		mux := http.NewServeMux()
+		register(mux)
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		return server
+	}
+
+	completeDocument := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"issuer":                 "http://" + r.Host + issuerPath,
+			"authorization_endpoint": "http://" + r.Host + "/authn/v1/oidc/auth",
+			"token_endpoint":         "http://" + r.Host + "/v4/authn/oidc/token",
+			"jwks_uri":               "http://" + r.Host + "/v4/authn/oidc/keys",
+		})
+	}
+
+	t.Run("fetches from the configured URL", func(t *testing.T) {
+		server := newServer(t, func(mux *http.ServeMux) {
+			mux.HandleFunc(versionedPath, completeDocument)
+		})
+		addr := server.Listener.Addr().String()
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, server.URL+versionedPath, 1*time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "http://"+addr+issuerPath, metadata.Issuer)
+		require.Equal(t, "http://"+addr+"/authn/v1/oidc/auth", metadata.AuthorizationEndpoint)
+		require.Equal(t, "http://"+addr+"/v4/authn/oidc/token", metadata.TokenEndpoint)
+	})
+
+	t.Run("does not probe the URL variants derived from the issuer", func(t *testing.T) {
+		var derivedHits int
+		server := newServer(t, func(mux *http.ServeMux) {
+			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+				derivedHits++
+				w.WriteHeader(http.StatusNotFound)
+			})
+			mux.HandleFunc(versionedPath, completeDocument)
+		})
+
+		_, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, server.URL+versionedPath, 1*time.Second)
+		require.NoError(t, err)
+		require.Zero(t, derivedHits, "the derived well-known URLs must not be probed")
+	})
+
+	t.Run("fails when the configured URL serves an unusable document", func(t *testing.T) {
+		server := newServer(t, func(mux *http.ServeMux) {
+			// The legacy issuer path serves a usable document, but it is not what was configured.
+			mux.HandleFunc(issuerPath+"/.well-known/openid-configuration", completeDocument)
+			mux.HandleFunc(versionedPath, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("{}"))
+			})
+		})
+
+		metadata, err := fetchOAuthAuthServerMetadata(server.URL+issuerPath, server.URL+versionedPath, 1*time.Second)
+		require.Nil(t, metadata)
+		var invalidErr *invalidMetadataError
+		require.ErrorAs(t, err, &invalidErr)
+	})
+}
+
+func Test_buildOAuthAuthServerMetadataJSON_explicitURL(t *testing.T) {
+	c := &MCPRouteController{logger: logr.Discard()}
+
+	t.Run("serves the document from the configured URL", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/versioned/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issuer":                 "http://" + r.Host + "/legacy",
+				"authorization_endpoint": "http://" + r.Host + "/oidc/auth",
+				"token_endpoint":         "http://" + r.Host + "/oidc/token",
+			})
+		})
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+
+		metadataJSON, err := c.buildOAuthAuthServerMetadataJSON(&aigv1b1.MCPRouteOAuth{
+			Issuer:                         server.URL + "/legacy",
+			AuthorizationServerMetadataURL: ptr.To(server.URL + "/versioned/.well-known/openid-configuration"),
+		})
+		require.NoError(t, err)
+		require.Contains(t, metadataJSON, `"authorization_endpoint":"`+server.URL+`/oidc/auth"`)
+		// The Keycloak-shaped defaults must not appear.
+		require.NotContains(t, metadataJSON, "/protocol/openid-connect/")
+	})
+
+	t.Run("fails rather than substituting defaults", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/versioned/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+
+		_, err := c.buildOAuthAuthServerMetadataJSON(&aigv1b1.MCPRouteOAuth{
+			Issuer:                         server.URL + "/legacy",
+			AuthorizationServerMetadataURL: ptr.To(server.URL + "/versioned/.well-known/openid-configuration"),
+		})
+		require.ErrorContains(t, err, "failed to fetch OAuth authorization server metadata")
+	})
 }

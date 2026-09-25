@@ -34,10 +34,15 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/extensionserver"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/pprof"
+	"github.com/envoyproxy/ai-gateway/internal/ratelimit/runner"
 )
 
 type flags struct {
+	envoyGatewayNamespace          string
 	extProcLogLevel                string
+	extProcLogFormat               string
+	logFormat                      string
+	extProcEnableRedaction         bool
 	extProcImage                   string
 	extProcImagePullPolicy         corev1.PullPolicy
 	enableLeaderElection           bool
@@ -47,12 +52,16 @@ type flags struct {
 	tlsCertName                    string
 	tlsKeyName                     string
 	caBundleName                   string
-	metricsRequestHeaderAttributes string
-	spanRequestHeaderAttributes    string
+	requestHeaderAttributes        *string
+	spanRequestHeaderAttributes    *string
+	metricsRequestHeaderAttributes *string
+	logRequestHeaderAttributes     *string
 	endpointPrefixes               string
 	rootPrefix                     string
 	extProcExtraEnvVars            string
 	extProcImagePullSecrets        string
+	// webhookPort is the port for the mutating webhook server.
+	webhookPort int
 	// extProcMaxRecvMsgSize is the maximum message size in bytes that the gRPC server can receive.
 	extProcMaxRecvMsgSize int
 	// maxRecvMsgSize is the maximum message size in bytes that the gRPC extension server can receive.
@@ -63,6 +72,16 @@ type flags struct {
 	mcpFallbackSessionEncryptionIterations int
 	watchNamespaces                        []string
 	cacheSyncTimeout                       time.Duration
+	quotaRateLimitServiceAddr              string
+	quotaRateLimitTimeout                  int64
+	quotaRateLimitFailureModeDeny          bool
+}
+
+func setOptionalString(dst **string) func(string) error {
+	return func(value string) error {
+		*dst = &value
+		return nil
+	}
 }
 
 // parsePullPolicy parses string into a k8s PullPolicy.
@@ -92,10 +111,25 @@ func parseWatchNamespaces(s string) []string {
 func parseAndValidateFlags(args []string) (*flags, error) {
 	fs := flag.NewFlagSet("AI Gateway Controller", flag.ContinueOnError)
 
+	envoyGatewayNamespace := fs.String(
+		"envoyGatewayNamespace",
+		"envoy-gateway-system",
+		"The namespace where Envoy Gateway is deployed.",
+	)
 	extProcLogLevelPtr := fs.String(
 		"extProcLogLevel",
 		"info",
 		"The log level for the external processor. One of 'debug', 'info', 'warn', or 'error'.",
+	)
+	extProcLogFormatPtr := fs.String(
+		"extProcLogFormat",
+		internalapi.LogFormatText,
+		"The log output format for the external processor. One of 'text' or 'json'.",
+	)
+	extProcEnableRedactionPtr := fs.Bool(
+		"extProcEnableRedaction",
+		false,
+		"Enable redaction of sensitive information in debug logs for the external processor.",
 	)
 	extProcImagePtr := fs.String(
 		"extProcImage",
@@ -117,10 +151,20 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		"info",
 		"The log level for the controller manager. One of 'debug', 'info', 'warn', or 'error'.",
 	)
+	logFormatPtr := fs.String(
+		"logFormat",
+		internalapi.LogFormatText,
+		"The log output format for the controller manager. One of 'text' or 'json'.",
+	)
 	extensionServerPortPtr := fs.String(
 		"port",
 		":1063",
 		"gRPC port for the extension server",
+	)
+	webhookPort := fs.Int(
+		"webhookPort",
+		9443,
+		"The port for the mutating webhook server.",
 	)
 	tlsCertDir := fs.String(
 		"tlsCertDir",
@@ -142,20 +186,30 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		"tls.key",
 		"The name of the TLS key file.",
 	)
-	metricsRequestHeaderAttributes := fs.String(
-		"metricsRequestHeaderAttributes",
-		"",
-		"Comma-separated key-value pairs for mapping HTTP request headers to Otel metric attributes. Format: x-team-id:team.id,x-user-id:user.id.",
+	var requestHeaderAttributes *string
+	fs.Func("requestHeaderAttributes",
+		"Comma-separated key-value pairs for mapping HTTP request headers to Otel attributes shared across metrics, spans, and access logs. Format: x-tenant-id:tenant.id.",
+		setOptionalString(&requestHeaderAttributes),
 	)
-	spanRequestHeaderAttributes := fs.String(
-		"spanRequestHeaderAttributes",
-		"",
-		"Comma-separated key-value pairs for mapping HTTP request headers to otel span attributes. Format: x-session-id:session.id,x-user-id:user.id.",
+	var spanRequestHeaderAttributes *string
+	fs.Func("spanRequestHeaderAttributes",
+		"Comma-separated key-value pairs for mapping HTTP request headers to otel span attributes. Format: agent-session-id:session.id,x-tenant-id:tenant.id. Default: agent-session-id:session.id (when unset). Set to empty to disable.",
+		setOptionalString(&spanRequestHeaderAttributes),
+	)
+	var metricsRequestHeaderAttributes *string
+	fs.Func("metricsRequestHeaderAttributes",
+		"Comma-separated key-value pairs for mapping HTTP request headers to Otel metric attributes. Format: x-tenant-id:tenant.id,x-tenant-id:tenant.id.",
+		setOptionalString(&metricsRequestHeaderAttributes),
+	)
+	var logRequestHeaderAttributes *string
+	fs.Func("logRequestHeaderAttributes",
+		"Comma-separated key-value pairs for mapping HTTP request headers to access log attributes. Format: agent-session-id:session.id,x-tenant-id:tenant.id. Default: agent-session-id:session.id (when unset). Set to empty to disable.",
+		setOptionalString(&logRequestHeaderAttributes),
 	)
 	endpointPrefixes := fs.String(
 		"endpointPrefixes",
 		"",
-		"Comma-separated key-value pairs for endpoint prefixes. Format: openai:/,cohere:/cohere,anthropic:/anthropic.",
+		"Comma-separated key-value pairs for endpoint prefixes. Format: openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe.",
 	)
 	rootPrefix := fs.String(
 		"rootPrefix",
@@ -200,6 +254,12 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		"Optional fallback seed used for MCP session key rotation")
 	mcpFallbackSessionEncryptionIterations := fs.Int("mcpFallbackSessionEncryptionIterations", 100_000,
 		"Number of iterations used in the fallback PBKDF2 key derivation for MCP session encryption.")
+	quotaRateLimitServiceAddr := fs.String("quotaRateLimitServiceAddr", "envoy-ai-gateway-ratelimit.envoy-gateway-system",
+		"Host (or host:port) for the AI Gateway quota rate limit service. If no port is specified, 8081 is used.")
+	quotaRateLimitTimeout := fs.Int64("quotaRateLimitTimeout", 5,
+		"Timeout in seconds for the quota rate limit service.")
+	quotaRateLimitFailureModeDeny := fs.Bool("quotaRateLimitFailureModeDeny", false,
+		"If true, the rate limit filter will deny requests when the rate limit service is unavailable.")
 
 	if err := fs.Parse(args); err != nil {
 		err = fmt.Errorf("failed to parse flags: %w", err)
@@ -218,24 +278,47 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		return nil, err
 	}
 
+	if err := internalapi.ValidateLogFormat(*logFormatPtr); err != nil {
+		return nil, err
+	}
+	if err := internalapi.ValidateLogFormat(*extProcLogFormatPtr); err != nil {
+		return nil, fmt.Errorf("external processor: %w", err)
+	}
+
 	extProcPullPolicy, err := parsePullPolicy(*extProcImagePullPolicyPtr)
 	if err != nil {
 		return nil, err
 	}
 
+	// Validate request header attributes if provided.
+	if requestHeaderAttributes != nil && *requestHeaderAttributes != "" {
+		_, err := internalapi.ParseRequestHeaderAttributeMapping(*requestHeaderAttributes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid request header attributes: %w", err)
+		}
+	}
+
+	// Validate tracing header attributes if provided.
+	if spanRequestHeaderAttributes != nil && *spanRequestHeaderAttributes != "" {
+		_, err := internalapi.ParseRequestHeaderAttributeMapping(*spanRequestHeaderAttributes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tracing header attributes: %w", err)
+		}
+	}
+
 	// Validate metrics header attributes if provided.
-	if *metricsRequestHeaderAttributes != "" {
+	if metricsRequestHeaderAttributes != nil && *metricsRequestHeaderAttributes != "" {
 		_, err := internalapi.ParseRequestHeaderAttributeMapping(*metricsRequestHeaderAttributes)
 		if err != nil {
 			return nil, fmt.Errorf("invalid metrics header attributes: %w", err)
 		}
 	}
 
-	// Validate tracing header attributes if provided.
-	if *spanRequestHeaderAttributes != "" {
-		_, err := internalapi.ParseRequestHeaderAttributeMapping(*spanRequestHeaderAttributes)
+	// Validate access log header attributes if provided.
+	if logRequestHeaderAttributes != nil && *logRequestHeaderAttributes != "" {
+		_, err := internalapi.ParseRequestHeaderAttributeMapping(*logRequestHeaderAttributes)
 		if err != nil {
-			return nil, fmt.Errorf("invalid tracing header attributes: %w", err)
+			return nil, fmt.Errorf("invalid access log header attributes: %w", err)
 		}
 	}
 
@@ -270,7 +353,11 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 	}
 
 	return &flags{
+		envoyGatewayNamespace:                  *envoyGatewayNamespace,
 		extProcLogLevel:                        *extProcLogLevelPtr,
+		extProcLogFormat:                       *extProcLogFormatPtr,
+		logFormat:                              *logFormatPtr,
+		extProcEnableRedaction:                 *extProcEnableRedactionPtr,
 		extProcImage:                           *extProcImagePtr,
 		extProcImagePullPolicy:                 extProcPullPolicy,
 		enableLeaderElection:                   *enableLeaderElectionPtr,
@@ -280,12 +367,15 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		tlsCertName:                            *tlsCertName,
 		tlsKeyName:                             *tlsKeyName,
 		caBundleName:                           *caBundleName,
-		metricsRequestHeaderAttributes:         *metricsRequestHeaderAttributes,
-		spanRequestHeaderAttributes:            *spanRequestHeaderAttributes,
+		requestHeaderAttributes:                requestHeaderAttributes,
+		spanRequestHeaderAttributes:            spanRequestHeaderAttributes,
+		metricsRequestHeaderAttributes:         metricsRequestHeaderAttributes,
+		logRequestHeaderAttributes:             logRequestHeaderAttributes,
 		endpointPrefixes:                       *endpointPrefixes,
 		rootPrefix:                             *rootPrefix,
 		extProcExtraEnvVars:                    *extProcExtraEnvVars,
 		extProcImagePullSecrets:                *extProcImagePullSecrets,
+		webhookPort:                            *webhookPort,
 		extProcMaxRecvMsgSize:                  *extProcMaxRecvMsgSize,
 		maxRecvMsgSize:                         *maxRecvMsgSize,
 		watchNamespaces:                        parseWatchNamespaces(*watchNamespaces),
@@ -294,7 +384,28 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		mcpFallbackSessionEncryptionSeed:       *mcpFallbackSessionEncryptionSeed,
 		mcpSessionEncryptionIterations:         *mcpSessionEncryptionIterations,
 		mcpFallbackSessionEncryptionIterations: *mcpFallbackSessionEncryptionIterations,
+		quotaRateLimitServiceAddr:              *quotaRateLimitServiceAddr,
+		quotaRateLimitTimeout:                  *quotaRateLimitTimeout,
+		quotaRateLimitFailureModeDeny:          *quotaRateLimitFailureModeDeny,
 	}, nil
+}
+
+// newZapOpts builds the controller-runtime logger options for the requested log output format.
+//
+// zap.UseFlagOptions assigns the whole Options struct, so it has to stay first: an encoder chosen
+// before it would be silently discarded and the logger would fall back to console output.
+func newZapOpts(logFormat string, level zapcore.LevelEnabler) []zap.Opts {
+	opts := []zap.Opts{zap.UseFlagOptions(&zap.Options{Development: true, Level: level})}
+	if logFormat == internalapi.LogFormatJSON {
+		// Development defaults the encoder to console; override it so structured log pipelines get JSON.
+		// zap.JSONEncoder builds the encoder eagerly, which skips the RFC3339 time encoder that
+		// controller-runtime would otherwise apply, so pass it explicitly to keep timestamps in the
+		// same format the console encoder prints instead of zap's production epoch float.
+		opts = append(opts, zap.JSONEncoder(func(ec *zapcore.EncoderConfig) {
+			ec.EncodeTime = zapcore.RFC3339TimeEncoder
+		}))
+	}
+	return opts
 }
 
 func main() {
@@ -306,7 +417,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: parsedFlags.logLevel})))
+	ctrl.SetLogger(zap.New(newZapOpts(parsedFlags.logFormat, parsedFlags.logLevel)...))
 	k8sConfig := ctrl.GetConfigOrDie()
 
 	lis, err := net.Listen("tcp", parsedFlags.extensionServerPort)
@@ -329,7 +440,7 @@ func main() {
 			CertDir:  parsedFlags.tlsCertDir,
 			CertName: parsedFlags.tlsCertName,
 			KeyName:  parsedFlags.tlsKeyName,
-			Port:     9443,
+			Port:     parsedFlags.webhookPort,
 		}),
 	}
 	mgr, err := ctrl.NewManager(k8sConfig, mgrOpts)
@@ -343,7 +454,7 @@ func main() {
 		setupLog.Error(err, "failed to create client")
 		os.Exit(1)
 	}
-	if err := maybePatchAdmissionWebhook(ctx, cli, filepath.Join(parsedFlags.tlsCertDir, parsedFlags.caBundleName)); err != nil {
+	if err = maybePatchAdmissionWebhook(ctx, cli, filepath.Join(parsedFlags.tlsCertDir, parsedFlags.caBundleName)); err != nil {
 		setupLog.Error(err, "failed to patch admission webhook")
 		os.Exit(1)
 	}
@@ -351,7 +462,11 @@ func main() {
 	// Start the extension server running alongside the controller.
 	const extProcUDSPath = "/etc/ai-gateway-extproc-uds/run.sock"
 	s := grpc.NewServer(grpc.MaxRecvMsgSize(parsedFlags.maxRecvMsgSize))
-	extSrv := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false)
+	extSrv, err := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false, parsedFlags.requestHeaderAttributes, parsedFlags.logRequestHeaderAttributes, parsedFlags.quotaRateLimitServiceAddr, parsedFlags.quotaRateLimitTimeout, parsedFlags.quotaRateLimitFailureModeDeny)
+	if err != nil {
+		setupLog.Error(err, "failed to create extension server")
+		os.Exit(1)
+	}
 	egextension.RegisterEnvoyGatewayExtensionServer(s, extSrv)
 	grpc_health_v1.RegisterHealthServer(s, extSrv)
 	go func() {
@@ -364,15 +479,29 @@ func main() {
 		}
 	}()
 
+	// Start the rate limit xDS config server.
+	rlRunner := runner.New(ctrl.Log, runner.DefaultPort)
+	go func() {
+		if err := rlRunner.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start rate limit xDS server")
+			os.Exit(1)
+		}
+	}()
+
 	// Start the controller.
 	if err := controller.StartControllers(ctx, mgr, k8sConfig, ctrl.Log.WithName("controller"), &controller.Options{
+		EnvoyGatewayNamespace:                  parsedFlags.envoyGatewayNamespace,
 		ExtProcImage:                           parsedFlags.extProcImage,
 		ExtProcImagePullPolicy:                 parsedFlags.extProcImagePullPolicy,
 		ExtProcLogLevel:                        parsedFlags.extProcLogLevel,
+		ExtProcLogFormat:                       parsedFlags.extProcLogFormat,
+		ExtProcEnableRedaction:                 parsedFlags.extProcEnableRedaction,
 		EnableLeaderElection:                   parsedFlags.enableLeaderElection,
 		UDSPath:                                extProcUDSPath,
-		MetricsRequestHeaderAttributes:         parsedFlags.metricsRequestHeaderAttributes,
+		RequestHeaderAttributes:                parsedFlags.requestHeaderAttributes,
 		TracingRequestHeaderAttributes:         parsedFlags.spanRequestHeaderAttributes,
+		MetricsRequestHeaderAttributes:         parsedFlags.metricsRequestHeaderAttributes,
+		LogRequestHeaderAttributes:             parsedFlags.logRequestHeaderAttributes,
 		EndpointPrefixes:                       parsedFlags.endpointPrefixes,
 		RootPrefix:                             parsedFlags.rootPrefix,
 		ExtProcExtraEnvVars:                    parsedFlags.extProcExtraEnvVars,
@@ -382,6 +511,7 @@ func main() {
 		MCPSessionEncryptionIterations:         parsedFlags.mcpSessionEncryptionIterations,
 		MCPFallbackSessionEncryptionSeed:       parsedFlags.mcpFallbackSessionEncryptionSeed,
 		MCPFallbackSessionEncryptionIterations: parsedFlags.mcpFallbackSessionEncryptionIterations,
+		RateLimitRunner:                        rlRunner,
 	}); err != nil {
 		setupLog.Error(err, "failed to start controller")
 	}

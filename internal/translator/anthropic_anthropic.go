@@ -10,6 +10,8 @@ import (
 	"cmp"
 	"fmt"
 	"io"
+	"log/slog"
+	"path"
 	"strconv"
 	"strings"
 
@@ -20,25 +22,32 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
+	"github.com/envoyproxy/ai-gateway/internal/redaction"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 )
 
 // NewAnthropicToAnthropicTranslator creates a passthrough translator for Anthropic.
-func NewAnthropicToAnthropicTranslator(version string, modelNameOverride internalapi.ModelNameOverride) AnthropicMessagesTranslator {
-	// TODO: use "version" in APISchema struct to set the specific prefix if needed like OpenAI does. However, two questions:
-	// 	* Is there any "Anthropic compatible" API that uses a different prefix like OpenAI does?
-	// 	* Even if there is, we should refactor the APISchema struct to have "prefix" field instead of abusing "version" field.
-	_ = version
-	return &anthropicToAnthropicTranslator{modelNameOverride: modelNameOverride}
+// The prefix defaults to "v1" via schemaToFilterAPI, producing "/v1/messages".
+// AWS and GCP Anthropic wrappers pass empty prefix as they override the request path entirely.
+func NewAnthropicToAnthropicTranslator(prefix string, modelNameOverride internalapi.ModelNameOverride) AnthropicMessagesTranslator {
+	return &anthropicToAnthropicTranslator{
+		modelNameOverride: modelNameOverride,
+		path:              path.Join("/", prefix, "messages"),
+	}
 }
 
 type anthropicToAnthropicTranslator struct {
 	modelNameOverride      internalapi.ModelNameOverride
+	path                   string
 	requestModel           internalapi.RequestModel
 	stream                 bool
 	buffered               []byte
 	streamingResponseModel internalapi.ResponseModel
 	streamingTokenUsage    metrics.TokenUsage
+	// Redaction configuration for debug logging
+	debugLogEnabled bool
+	enableRedaction bool
+	logger          *slog.Logger
 }
 
 // RequestBody implements [AnthropicMessagesTranslator.RequestBody].
@@ -58,11 +67,9 @@ func (a *anthropicToAnthropicTranslator) RequestBody(original []byte, body *anth
 		a.requestModel = a.modelNameOverride
 	}
 
-	if forceBodyMutation && len(newBody) == 0 {
-		newBody = original
-	}
+	newBody = forceOriginalBodyIfEmpty(forceBodyMutation, newBody, original)
 
-	newHeaders = []internalapi.Header{{pathHeaderName, "/v1/messages"}}
+	newHeaders = []internalapi.Header{{pathHeaderName, a.path}}
 	if len(newBody) > 0 {
 		newHeaders = append(newHeaders, internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))})
 	}
@@ -99,6 +106,15 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 	if err := json.NewDecoder(body).Decode(anthropicResp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
+
+	// Redact and log response when enabled
+	if a.debugLogEnabled && a.enableRedaction && a.logger != nil {
+		redactedResp := a.RedactAnthropicBody(anthropicResp)
+		if jsonBody, marshalErr := json.Marshal(redactedResp); marshalErr == nil {
+			a.logger.Debug("response body processing", slog.Any("response", string(jsonBody)))
+		}
+	}
+
 	usage := anthropicResp.Usage
 	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 		int64(usage.InputTokens),
@@ -125,42 +141,79 @@ func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(s tracingap
 		}
 		line := a.buffered[:i]
 		a.buffered = a.buffered[i+1:]
-		if !bytes.HasPrefix(line, sseDataPrefix) {
+		data, ok := cutSSEDataPrefix(line)
+		if !ok {
 			continue
 		}
 		eventUnion := &anthropic.MessagesStreamChunk{}
-		if err := json.Unmarshal(bytes.TrimPrefix(line, sseDataPrefix), eventUnion); err != nil {
+		if err := json.Unmarshal(data, eventUnion); err != nil {
 			continue
 		}
 		if s != nil {
 			s.RecordResponseChunk(eventUnion)
 		}
+		a.reflectStreamingEvent(eventUnion)
+	}
+}
 
-		switch {
-		case eventUnion.MessageStart != nil:
-			message := eventUnion.MessageStart
-			// Store the response model for future batches
-			if message.Model != "" {
-				a.streamingResponseModel = message.Model
+func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthropic.MessagesStreamChunk) {
+	switch {
+	case eventUnion.MessageStart != nil:
+		message := eventUnion.MessageStart
+		// Store the response model for future batches
+		if message.Model != "" {
+			a.streamingResponseModel = message.Model
+		}
+		// Extract usage from message_start event - this sets the baseline input tokens
+		if u := message.Usage; u != nil {
+			messageStartUsage := metrics.ExtractTokenUsageFromExplicitCaching(
+				int64(u.InputTokens),
+				int64(u.OutputTokens),
+				ptr.To(int64(u.CacheReadInputTokens)),
+				ptr.To(int64(u.CacheCreationInputTokens)),
+			)
+			// Override with message_start usage (contains input tokens and initial state)
+			a.streamingTokenUsage.Override(messageStartUsage)
+		}
+	case eventUnion.MessageDelta != nil:
+		u := eventUnion.MessageDelta.Usage
+		// message_delta carries the final counts. Standard Anthropic only reports output_tokens
+		// here, but some Anthropic-compatible backends report the final input/cache counts on
+		// message_delta instead of message_start. See https://github.com/envoyproxy/ai-gateway/issues/2290.
+		//
+		// output_tokens is always the final value on message_delta, so take it unconditionally.
+		if u.OutputTokens >= 0 {
+			a.streamingTokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
+		}
+		// Merge the input/cache counts per field rather than replacing the whole usage snapshot:
+		// a delta may report only the fields that apply (the rest arrive as zero), so overwriting
+		// every field would clobber values already set on message_start. We can only treat a field
+		// as "present" when it is non-zero, since the upstream usage fields are not pointers.
+		if u.InputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
+			// The unified input_tokens is the sum of raw input + cache-read + cache-creation, so
+			// recover the latest known value of each component and overwrite only the ones present
+			// on this delta before recomputing the sum.
+			cacheRead, _ := a.streamingTokenUsage.CachedInputTokens()
+			cacheCreation, _ := a.streamingTokenUsage.CacheCreationInputTokens()
+			unifiedInput, _ := a.streamingTokenUsage.InputTokens()
+			var rawInput uint32
+			if unifiedInput >= cacheRead+cacheCreation {
+				rawInput = unifiedInput - cacheRead - cacheCreation
 			}
-			// Extract usage from message_start event - this sets the baseline input tokens
-			if u := message.Usage; u != nil {
-				messageStartUsage := metrics.ExtractTokenUsageFromExplicitCaching(
-					int64(u.InputTokens),
-					int64(u.OutputTokens),
-					ptr.To(int64(u.CacheReadInputTokens)),
-					ptr.To(int64(u.CacheCreationInputTokens)),
-				)
-				// Override with message_start usage (contains input tokens and initial state)
-				a.streamingTokenUsage.Override(messageStartUsage)
+
+			if u.InputTokens > 0 {
+				rawInput = uint32(u.InputTokens) //nolint:gosec
 			}
-		case eventUnion.MessageDelta != nil:
-			u := eventUnion.MessageDelta.Usage
-			// message_delta events provide final counts for specific token types
-			// Update output tokens from message_delta (final count)
-			if u.OutputTokens >= 0 {
-				a.streamingTokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
+			if u.CacheReadInputTokens > 0 {
+				cacheRead = uint32(u.CacheReadInputTokens) //nolint:gosec
 			}
+			if u.CacheCreationInputTokens > 0 {
+				cacheCreation = uint32(u.CacheCreationInputTokens) //nolint:gosec
+			}
+
+			a.streamingTokenUsage.SetCachedInputTokens(cacheRead)
+			a.streamingTokenUsage.SetCacheCreationInputTokens(cacheCreation)
+			a.streamingTokenUsage.SetInputTokens(rawInput + cacheRead + cacheCreation)
 		}
 	}
 }
@@ -241,4 +294,65 @@ func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]st
 		)
 	}
 	return
+}
+
+// SetRedactionConfig implements [AnthropicResponseRedactor.SetRedactionConfig].
+func (a *anthropicToAnthropicTranslator) SetRedactionConfig(debugLogEnabled, enableRedaction bool, logger *slog.Logger) {
+	a.debugLogEnabled = debugLogEnabled
+	a.enableRedaction = enableRedaction
+	a.logger = logger
+}
+
+// RedactAnthropicBody implements [AnthropicResponseRedactor.RedactAnthropicBody].
+// Creates a redacted copy of the Anthropic response for safe logging without modifying the original.
+func (a *anthropicToAnthropicTranslator) RedactAnthropicBody(resp *anthropic.MessagesResponse) *anthropic.MessagesResponse {
+	if resp == nil {
+		return nil
+	}
+
+	// Create a shallow copy of the response
+	redacted := *resp
+
+	// Redact content blocks (contains AI-generated content)
+	if len(resp.Content) > 0 {
+		redacted.Content = make([]anthropic.MessagesContentBlock, len(resp.Content))
+		for i := range resp.Content {
+			redacted.Content[i] = redactAnthropicContent(&resp.Content[i])
+		}
+	}
+
+	return &redacted
+}
+
+// redactAnthropicContent redacts sensitive content from an Anthropic content block.
+func redactAnthropicContent(content *anthropic.MessagesContentBlock) anthropic.MessagesContentBlock {
+	redactedContent := *content
+
+	// Redact text content
+	if content.Text != nil {
+		textCopy := *content.Text
+		textCopy.Text = redaction.RedactString(content.Text.Text)
+		redactedContent.Text = &textCopy
+	}
+
+	// Redact thinking content
+	if content.Thinking != nil {
+		thinkingCopy := *content.Thinking
+		thinkingCopy.Thinking = redaction.RedactString(content.Thinking.Thinking)
+		redactedContent.Thinking = &thinkingCopy
+	}
+
+	// Redact tool use input (may contain sensitive data)
+	if content.Tool != nil {
+		toolCopy := *content.Tool
+		// For tool use, we redact by replacing the input with a placeholder
+		toolCopy.Input = map[string]any{
+			"redacted": redaction.RedactString(fmt.Sprintf("%v", content.Tool.Input)),
+		}
+		redactedContent.Tool = &toolCopy
+	}
+
+	// Note: tool_use_id and function names are metadata, not sensitive content
+
+	return redactedContent
 }

@@ -7,8 +7,9 @@ package metrics
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -51,6 +52,8 @@ const (
 	mcpAttributeCapabilityType = "capability.type"
 	// MCP capability side, which is either "client" or "server". See mcpCapabilitySide for all sides.
 	mcpAttributeCapabilitySide = "capability.side"
+	// MCP backend attribute, which identifies the upstream MCP backend that handled the request.
+	mcpAttributeBackend = "mcp.backend"
 )
 
 // MCPErrorType defines the type of error that occurred during an MCP request.
@@ -109,6 +112,9 @@ const (
 type MCPMetrics interface {
 	// WithRequestAttributes returns a new MCPMetrics instance with default attributes extracted from the HTTP request.
 	WithRequestAttributes(req *http.Request) MCPMetrics
+	// WithBackend returns a new MCPMetrics instance with the backend attribute set.
+	// This allows metrics to be filtered/sorted by the upstream MCP backend that handled the request.
+	WithBackend(backend string) MCPMetrics
 	// RecordRequestDuration records the duration of a success MCP request.
 	RecordRequestDuration(ctx context.Context, startAt time.Time, meta mcpsdk.Params)
 	// RecordRequestErrorDuration records the duration of an MCP request that resulted in an error.
@@ -169,6 +175,23 @@ func NewMCP(meter metric.Meter, requestHeaderAttributeMapping map[string]string)
 	}
 }
 
+// WithBackend returns a new MCPMetrics instance with the backend attribute set.
+func (m *mcp) WithBackend(backend string) MCPMetrics {
+	withBackend := &mcp{
+		requestDuration:               m.requestDuration,
+		methodCount:                   m.methodCount,
+		initializationDuration:        m.initializationDuration,
+		capabilitiesNegotiated:        m.capabilitiesNegotiated,
+		progressNotifications:         m.progressNotifications,
+		requestHeaderAttributeMapping: m.requestHeaderAttributeMapping,
+		defaultAttributes: append(
+			slices.Clone(m.defaultAttributes),
+			attribute.String(mcpAttributeBackend, backend),
+		),
+	}
+	return withBackend
+}
+
 // WithRequestAttributes returns a new MCPMetrics instance with default attributes extracted from
 // the HTTP request headers.
 func (m *mcp) WithRequestAttributes(req *http.Request) MCPMetrics {
@@ -181,7 +204,6 @@ func (m *mcp) WithRequestAttributes(req *http.Request) MCPMetrics {
 		requestHeaderAttributeMapping: m.requestHeaderAttributeMapping,
 	}
 
-	// Apply header-to-attribute mapping if configured.
 	for headerName, attrName := range m.requestHeaderAttributeMapping {
 		if headerValue := req.Header.Get(headerName); headerValue != "" {
 			withAttrs.defaultAttributes = append(
@@ -329,17 +351,36 @@ func (m *mcp) RecordServerCapabilities(ctx context.Context, serverCapa *mcpsdk.S
 	}
 }
 
-// withDefaultAttributes appends default attributes to the provided attributes.
+// withDefaultAttributes merges defaults, request-mapped, and call-site attrs,
+// preferring later values and emitting a stable key order.
 func (m *mcp) withDefaultAttributes(params mcpsdk.Params, attrs ...attribute.KeyValue) metric.MeasurementOption {
-	all := make([]attribute.KeyValue, 0, len(m.defaultAttributes)+len(m.requestHeaderAttributeMapping)+len(attrs))
-	all = append(all, m.defaultAttributes...)
+	merged := make(map[attribute.Key]attribute.Value, len(m.defaultAttributes)+len(attrs))
+
+	for _, kv := range m.defaultAttributes {
+		merged[kv.Key] = kv.Value
+	}
+
 	if params != nil {
 		for src, target := range m.requestHeaderAttributeMapping {
 			if v := lang.CaseInsensitiveValue(params.GetMeta(), src); v != "" {
-				all = append(all, attribute.String(target, fmt.Sprintf("%v", v)))
+				merged[attribute.Key(target)] = attribute.StringValue(v)
 			}
 		}
 	}
-	all = append(all, attrs...)
+
+	for _, kv := range attrs {
+		merged[kv.Key] = kv.Value
+	}
+
+	all := make([]attribute.KeyValue, 0, len(merged))
+	for key, value := range merged {
+		all = append(all, attribute.KeyValue{Key: key, Value: value})
+	}
+
+	// Sort attributes by key for consistency.
+	slices.SortFunc(all, func(a, b attribute.KeyValue) int {
+		return strings.Compare(string(a.Key), string(b.Key))
+	})
+
 	return metric.WithAttributes(all...)
 }

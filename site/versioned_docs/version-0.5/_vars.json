@@ -1,0 +1,7 @@
+{
+  "aigwVersion": "0.5.0",
+  "aigwGitRef": "main",
+  "egVersion": "1.6.0",
+  "egMinVersion": "1.5.0",
+  "k8sMinVersion": "1.32"
+}

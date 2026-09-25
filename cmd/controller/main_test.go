@@ -6,23 +6,34 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 func Test_parseAndValidateFlags(t *testing.T) {
 	t.Run("no flags", func(t *testing.T) {
 		f, err := parseAndValidateFlags([]string{})
+		require.Equal(t, "envoy-gateway-system", f.envoyGatewayNamespace)
 		require.Equal(t, "info", f.extProcLogLevel)
+		require.Equal(t, "text", f.extProcLogFormat)
+		require.Equal(t, "text", f.logFormat)
+		require.False(t, f.extProcEnableRedaction)
 		require.Equal(t, "docker.io/envoyproxy/ai-gateway-extproc:latest", f.extProcImage)
 		require.Equal(t, corev1.PullIfNotPresent, f.extProcImagePullPolicy)
 		require.True(t, f.enableLeaderElection)
@@ -31,7 +42,10 @@ func Test_parseAndValidateFlags(t *testing.T) {
 		require.Equal(t, "/certs", f.tlsCertDir)
 		require.Equal(t, "tls.crt", f.tlsCertName)
 		require.Equal(t, "tls.key", f.tlsKeyName)
+		require.Equal(t, 9443, f.webhookPort)
 		require.Equal(t, 4*1024*1024, f.maxRecvMsgSize)
+		require.Nil(t, f.spanRequestHeaderAttributes)
+		require.Nil(t, f.logRequestHeaderAttributes)
 		require.NoError(t, err)
 	})
 	t.Run("all flags", func(t *testing.T) {
@@ -44,14 +58,21 @@ func Test_parseAndValidateFlags(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				args := []string{
+					tc.dash + "envoyGatewayNamespace=eg-system",
 					tc.dash + "extProcLogLevel=debug",
+					tc.dash + "extProcLogFormat=json",
+					tc.dash + "logFormat=json",
+					tc.dash + "extProcEnableRedaction=true",
 					tc.dash + "extProcImage=example.com/extproc:latest",
 					tc.dash + "extProcImagePullPolicy=Always",
 					tc.dash + "enableLeaderElection=false",
 					tc.dash + "logLevel=debug",
 					tc.dash + "port=:8080",
+					tc.dash + "webhookPort=19443",
 					tc.dash + "extProcExtraEnvVars=OTEL_SERVICE_NAME=test;OTEL_TRACES_EXPORTER=console",
-					tc.dash + "spanRequestHeaderAttributes=x-session-id:session.id",
+					tc.dash + "requestHeaderAttributes=x-tenant-id:tenant.id",
+					tc.dash + "spanRequestHeaderAttributes=x-forwarded-proto:url.scheme",
+					tc.dash + "logRequestHeaderAttributes=x-forwarded-proto:url.scheme",
 					tc.dash + "endpointPrefixes=openai:/v1,cohere:/cohere/v2,anthropic:/anthropic/v1",
 					tc.dash + "maxRecvMsgSize=33554432",
 					tc.dash + "watchNamespaces=default,envoy-ai-gateway-system",
@@ -62,14 +83,24 @@ func Test_parseAndValidateFlags(t *testing.T) {
 					tc.dash + "mcpFallbackSessionEncryptionIterations=200",
 				}
 				f, err := parseAndValidateFlags(args)
+				require.Equal(t, "eg-system", f.envoyGatewayNamespace)
 				require.Equal(t, "debug", f.extProcLogLevel)
+				require.Equal(t, "json", f.extProcLogFormat)
+				require.Equal(t, "json", f.logFormat)
+				require.True(t, f.extProcEnableRedaction)
 				require.Equal(t, "example.com/extproc:latest", f.extProcImage)
 				require.Equal(t, corev1.PullAlways, f.extProcImagePullPolicy)
 				require.False(t, f.enableLeaderElection)
 				require.Equal(t, "debug", f.logLevel.String())
 				require.Equal(t, ":8080", f.extensionServerPort)
+				require.Equal(t, 19443, f.webhookPort)
 				require.Equal(t, "OTEL_SERVICE_NAME=test;OTEL_TRACES_EXPORTER=console", f.extProcExtraEnvVars)
-				require.Equal(t, "x-session-id:session.id", f.spanRequestHeaderAttributes)
+				require.NotNil(t, f.requestHeaderAttributes)
+				require.Equal(t, "x-tenant-id:tenant.id", *f.requestHeaderAttributes)
+				require.NotNil(t, f.spanRequestHeaderAttributes)
+				require.Equal(t, "x-forwarded-proto:url.scheme", *f.spanRequestHeaderAttributes)
+				require.NotNil(t, f.logRequestHeaderAttributes)
+				require.Equal(t, "x-forwarded-proto:url.scheme", *f.logRequestHeaderAttributes)
 				require.Equal(t, "openai:/v1,cohere:/cohere/v2,anthropic:/anthropic/v1", f.endpointPrefixes)
 				require.Equal(t, 32*1024*1024, f.maxRecvMsgSize)
 				require.Equal(t, []string{"default", "envoy-ai-gateway-system"}, f.watchNamespaces)
@@ -116,8 +147,18 @@ func Test_parseAndValidateFlags(t *testing.T) {
 			},
 			{
 				name:   "invalid spanRequestHeaderAttributes - missing colon",
-				flags:  []string{"--spanRequestHeaderAttributes=x-session-id"},
+				flags:  []string{"--spanRequestHeaderAttributes=agent-session-id"},
 				expErr: "invalid tracing header attributes",
+			},
+			{
+				name:   "invalid logRequestHeaderAttributes - missing colon",
+				flags:  []string{"--logRequestHeaderAttributes=agent-session-id"},
+				expErr: "invalid access log header attributes",
+			},
+			{
+				name:   "invalid requestHeaderAttributes - missing colon",
+				flags:  []string{"--requestHeaderAttributes=agent-session-id"},
+				expErr: "invalid request header attributes",
 			},
 			{
 				name:   "invalid spanRequestHeaderAttributes - empty header",
@@ -133,6 +174,16 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				name:   "invalid endpointPrefixes - missing colon",
 				flags:  []string{"--endpointPrefixes=openai"},
 				expErr: "invalid endpoint prefixes",
+			},
+			{
+				name:   "invalid log format",
+				flags:  []string{"--logFormat=yaml"},
+				expErr: `invalid log format: "yaml", must be "text" or "json"`,
+			},
+			{
+				name:   "invalid extproc log format",
+				flags:  []string{"--extProcLogFormat=yaml"},
+				expErr: `external processor: invalid log format: "yaml", must be "text" or "json"`,
 			},
 			{
 				name:   "invalid mcp session encryption iterations",
@@ -159,6 +210,45 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				_, err := parseAndValidateFlags(tc.flags)
 				require.ErrorContains(t, err, tc.expErr)
 			})
+		}
+	})
+}
+
+func Test_newZapOpts(t *testing.T) {
+	logTo := func(t *testing.T, logFormat string) string {
+		t.Helper()
+		var buf bytes.Buffer
+		opts := append(newZapOpts(logFormat, zapcore.InfoLevel), zap.WriteTo(&buf))
+		zap.New(opts...).Info("starting controller", "address", ":1063")
+		return buf.String()
+	}
+
+	t.Run("json emits parseable records", func(t *testing.T) {
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(logTo(t, internalapi.LogFormatJSON)), &record))
+		require.Equal(t, "starting controller", record["msg"])
+		require.Equal(t, ":1063", record["address"])
+		require.Equal(t, "info", record["level"])
+	})
+
+	t.Run("json timestamps stay RFC3339", func(t *testing.T) {
+		// zap.JSONEncoder builds the encoder eagerly, which drops controller-runtime's default time
+		// encoder unless it is passed explicitly. Without that the ts field is an epoch float, which
+		// disagrees with what the console format prints.
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(logTo(t, internalapi.LogFormatJSON)), &record))
+		ts, ok := record["ts"].(string)
+		require.True(t, ok, "ts must be a string, got %T", record["ts"])
+		_, err := time.Parse(time.RFC3339, ts)
+		require.NoError(t, err)
+	})
+
+	t.Run("text stays console and is the fallback", func(t *testing.T) {
+		for _, format := range []string{internalapi.LogFormatText, ""} {
+			out := logTo(t, format)
+			require.Contains(t, out, "starting controller")
+			var record map[string]any
+			require.Error(t, json.Unmarshal([]byte(strings.TrimSpace(out)), &record), "console output must not be JSON")
 		}
 	})
 }

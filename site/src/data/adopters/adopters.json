@@ -8,7 +8,7 @@
     "name": "Tetrate",
     "logoUrl": "/img/adopters/tetrate.svg",
     "url": "https://tetrate.io/",
-    "description": "Tetrate provides trusted connectivity and control for AI. Empower developers while safeguarding the business. Built atop the proven Envoy proxy & Envoy AI Gateway."
+    "description": "Tetrate provides trusted connectivity and control for AI. Empower developers while safeguarding the business. Built atop the proven Envoy proxy & Agent Router."
   },
   {
     "name": "Nutanix",
@@ -36,9 +36,32 @@
     "url": "https://nrp.ai"
   },
   {
+    "name": "Paper Compute Co.",
+    "logoUrl": "/img/adopters/papercompute-logo.png",
+    "url": "https://papercompute.com"
+  },
+  {
+    "name": "Simplifai",
+    "logoUrl": "/img/adopters/Simplifai.png",
+    "url": "https://simplifai.ai",
+    "description": "Agentic AI platform for insurance"
+  },
+    {
+    "name": "Stacklok",
+    "logoUrl": "/img/adopters/stacklok.png",
+    "url": "https://stacklok.com",
+    "description": "Agentic AI platform"
+  },
+  {
+    "name": "Unwrap",
+    "logoUrl": "/img/adopters/unwrap-logo.svg",
+    "url": "https://unwrap.ai",
+    "description": "AI-powered customer intelligence platform"
+  },
+  {
     "name": "Your Logo Here",
     "logoUrl": "/img/adopters/placeholder-company.svg",
     "description": "Add your logo to show support for the project",
-    "url": "https://github.com/envoyproxy/ai-gateway/edit/main/site/src/data/adopters/adopters.json"
+    "url": "https://github.com/theagentrouter/agent-router/edit/main/site/src/data/adopters/adopters.json"
   }
 ]

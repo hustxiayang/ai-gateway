@@ -12,7 +12,7 @@
 package filterapi
 
 import (
-	"cmp"
+	"log/slog"
 	"os"
 	"time"
 
@@ -32,6 +32,9 @@ type Config struct {
 	Version string `json:"version,omitempty"`
 	// UUID is the unique identifier of the filter configuration assigned by the AI Gateway when the configuration is updated.
 	UUID string `json:"uuid,omitempty"`
+	// GlobalLLMRequestCosts configures gateway-level default costs for LLM requests.
+	// These costs apply to all routes unless overridden by route-specific LLMRequestCosts.
+	GlobalLLMRequestCosts []GlobalLLMRequestCost `json:"globalLLMRequestCosts,omitempty"`
 	// LLMRequestCost configures the cost of each LLM-related request. Optional. If this is provided, the filter will populate
 	// the "calculated" cost in the filter metadata at the end of the response body processing.
 	LLMRequestCosts []LLMRequestCost `json:"llmRequestCosts,omitempty"`
@@ -39,6 +42,14 @@ type Config struct {
 	Backends []Backend `json:"backends,omitempty"`
 	// Models is the list of models that this route is aware of. Used to populate the "/models" endpoint in OpenAI-compatible APIs.
 	Models []Model `json:"models,omitempty"`
+	// ModelsByHost is the list of models keyed by hostname. When present, the extproc "/v1/models" processor will prefer
+	// the hostname-specific list over the global Models slice. Each per-host list also includes UnscopedModels so that
+	// routes without hostname scoping remain visible alongside the host-specific routes.
+	ModelsByHost map[string][]Model `json:"modelsByHost,omitempty"`
+	// UnscopedModels is the list of models contributed by routes that did NOT declare hostnames. When ModelsByHost is
+	// configured, requests to a host that doesn't match any entry fall back to this list (rather than to Models, which
+	// would leak host-scoped models to unknown hosts).
+	UnscopedModels []Model `json:"unscopedModels,omitempty"`
 	// MCPConfig is the configuration for the MCPRoute implementations.
 	MCPConfig *MCPConfig `json:"mcpConfig,omitempty"`
 }
@@ -54,6 +65,19 @@ type Model struct {
 	CreatedAt time.Time
 }
 
+// GlobalLLMRequestCost specifies gateway-level default request cost configuration.
+// This is identical to LLMRequestCost but without the RouteName field, as global costs
+// apply to all routes and are not scoped to a specific route.
+type GlobalLLMRequestCost struct {
+	// MetadataKey is the key of the metadata storing the request cost.
+	MetadataKey string `json:"metadataKey"`
+	// Type is the kind of the request cost calculation.
+	Type LLMRequestCostType `json:"type"`
+	// CEL is the CEL expression to calculate the cost of the request.
+	// This is not empty when the Type is LLMRequestCostTypeCEL.
+	CEL string `json:"cel,omitempty"`
+}
+
 // LLMRequestCost specifies "where" the request cost is stored in the filter metadata as well as
 // "how" the cost is calculated. By default, the cost is retrieved from "output token" in the response body.
 //
@@ -64,11 +88,25 @@ type Model struct {
 type LLMRequestCost struct {
 	// MetadataKey is the key of the metadata storing the request cost.
 	MetadataKey string `json:"metadataKey"`
+	// RouteName scopes this cost to a single AIGatewayRoute (format "namespace/name").
+	// When empty, the cost applies to any request (wildcard). The controller sets this for each route.
+	RouteName string `json:"routeName,omitempty"`
 	// Type is the kind of the request cost calculation.
 	Type LLMRequestCostType `json:"type"`
 	// CEL is the CEL expression to calculate the cost of the request.
 	// This is not empty when the Type is LLMRequestCostTypeCEL.
 	CEL string `json:"cel,omitempty"`
+	// Backend is an optional filter set exclusively by the QuotaPolicy controller.
+	// It is NOT exposed in any user-facing CRD. When non-empty, this cost entry is
+	// only evaluated when the serving backend's short name (namespace/name) matches.
+	// This allows different QuotaPolicies targeting different backends to use different
+	// cost expressions while sharing the same metadata key.
+	Backend string `json:"backend,omitempty"`
+	// Model is an optional filter set exclusively by the QuotaPolicy controller.
+	// It is NOT exposed in any user-facing CRD. When non-empty, this cost entry is
+	// only evaluated when the request's model name matches. This allows a single
+	// metadata key to be shared across models without conflicting overwrites.
+	Model string `json:"model,omitempty"`
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.
@@ -85,6 +123,8 @@ const (
 	LLMRequestCostTypeCacheCreationInputToken LLMRequestCostType = "CacheCreationInputToken"
 	// LLMRequestCostTypeTotalToken specifies that the request cost is calculated from the total token.
 	LLMRequestCostTypeTotalToken LLMRequestCostType = "TotalToken"
+	// LLMRequestCostTypeReasoningToken specifies that the request cost is calculated from the reasoning token.
+	LLMRequestCostTypeReasoningToken LLMRequestCostType = "ReasoningToken"
 	// LLMRequestCostTypeCEL specifies that the request cost is calculated from the CEL expression.
 	LLMRequestCostTypeCEL LLMRequestCostType = "CEL"
 )
@@ -95,15 +135,24 @@ type VersionedAPISchema struct {
 	Name APISchemaName `json:"name"`
 	// Version is the version of the API schema. Optional.
 	Version string `json:"version,omitempty"`
-	// Prefix is the prefix of the API schema. Optional. Currently, only used for OpenAI.
+	// Prefix is the prefix of the API schema. Optional. Used for OpenAI and Anthropic schemas.
 	Prefix string `json:"prefix,omitempty"`
 }
 
 // OpenAIPrefix returns the OpenAI API prefix for the VersionedAPISchema.
-// This is for backwards compatibility with existing users. This won't be
-// necessary after v0.5 release when we can use Prefix directly.
 func (v VersionedAPISchema) OpenAIPrefix() string {
-	return cmp.Or(v.Version, v.Prefix)
+	if v.Name == APISchemaAWSOpenAI && v.Prefix == "" {
+		return "openai/v1"
+	}
+	return v.Prefix
+}
+
+// AnthropicPrefix returns the Anthropic API prefix for the VersionedAPISchema.
+func (v VersionedAPISchema) AnthropicPrefix() string {
+	if v.Prefix == "" {
+		return "v1"
+	}
+	return v.Prefix
 }
 
 // APISchemaName corresponds to APISchemaName in api/v1alpha1/api.go.
@@ -115,6 +164,8 @@ const (
 	// APISchemaCohere represents the Cohere API schema.
 	APISchemaCohere APISchemaName = "Cohere"
 	// APISchemaAWSBedrock represents the AWS Bedrock API schema.
+	// Used for models hosted on AWS Bedrock. Chat completions use the Converse API,
+	// while embeddings use the InvokeModel API.
 	APISchemaAWSBedrock APISchemaName = "AWSBedrock"
 	// APISchemaAzureOpenAI represents the Azure OpenAI API schema.
 	APISchemaAzureOpenAI APISchemaName = "AzureOpenAI"
@@ -127,8 +178,13 @@ const (
 	// APISchemaAnthropic represents the standard Anthropic API schema.
 	APISchemaAnthropic APISchemaName = "Anthropic"
 	// APISchemaAWSAnthropic represents the AWS Bedrock Anthropic API schema.
-	// Used for Claude models hosted on AWS Bedrock using the native Anthropic Messages API.
+	// Used for Claude models hosted on AWS Bedrock. Supports both OpenAI and Anthropic input formats
+	// depending on the endpoint path, similar to APISchemaGCPAnthropic.
 	APISchemaAWSAnthropic APISchemaName = "AWSAnthropic"
+	// APISchemaAWSOpenAI represents the AWS OpenAI-compatible API schema.
+	APISchemaAWSOpenAI APISchemaName = "AWSOpenAI"
+	// APISchemaTypeSafe represents the native TypeSafe AI System One API schema (Jev).
+	APISchemaTypeSafe APISchemaName = "TypeSafe"
 )
 
 // RouteRuleName is the name of the route rule.
@@ -148,6 +204,9 @@ type Backend struct {
 	HeaderMutation *HTTPHeaderMutation `json:"httpHeaderMutation,omitempty"`
 	// Body mutations to be applied to the request before sending to the backend. Optional.
 	BodyMutation *HTTPBodyMutation `json:"httpBodyMutation,omitempty"`
+	// HeaderValueFilters filter individual values out of multi-valued request headers before sending
+	// the request to the backend. Optional.
+	HeaderValueFilters []HTTPHeaderValueFilter `json:"headerValueFilters,omitempty"`
 }
 
 // BackendAuth corresponds partially to BackendSecurityPolicy in api/v1alpha1/api.go.
@@ -164,6 +223,33 @@ type BackendAuth struct {
 	AzureAuth *AzureAuth `json:"azure,omitempty"`
 	// GCPAuth specifies the location of GCP credential file.
 	GCPAuth *GCPAuth `json:"gcp,omitempty"`
+	// CredentialOverride, when non-nil, sources the credential per-request instead of the
+	// static credential above. nil disables per-request sourcing (the default).
+	CredentialOverride *CredentialOverride `json:"credentialOverride,omitempty"`
+}
+
+// CredentialOverride configures per-request credential sourcing for a backend.
+// Exactly one of HeaderName or DynamicMetadataNamespace is set (resolved by the controller).
+type CredentialOverride struct {
+	// HeaderName is the request header that carries the per-request credential.
+	// Set for fromRequestHeaders source; empty for fromDynamicMetadata source.
+	// For AWS this is a prefix, not a full header name: see
+	// internalapi.AWSCredentialOverrideHeaderNames for the three names derived from it.
+	HeaderName string `json:"headerName,omitempty"`
+	// DynamicMetadataNamespace is the Envoy metadata namespace to read from.
+	// Set for fromDynamicMetadata source; empty for fromRequestHeaders source.
+	DynamicMetadataNamespace string `json:"dynamicMetadataNamespace,omitempty"`
+	// DynamicMetadataKey is the key within DynamicMetadataNamespace.
+	// For AWS the value is a struct with accessKeyId/secretAccessKey/sessionToken, not a string.
+	DynamicMetadataKey string `json:"dynamicMetadataKey,omitempty"`
+	// FallbackToConfigured controls behaviour when the source value is absent.
+	// true falls back to the static credential; false returns 401 to the caller.
+	FallbackToConfigured bool `json:"fallbackToConfigured"`
+	// InputHeadersToRemove are stripped before the request reaches the backend. Only set for the
+	// HeaderName source; one entry for every auth type except AWS, which has three.
+	// The controller adds these to HeaderMutation.Remove, so Envoy drops them upstream while they
+	// stay visible in the local requestHeaders map for the handler to read.
+	InputHeadersToRemove []string `json:"inputHeadersToRemove,omitempty"`
 }
 
 // AWSAuth defines the credentials needed to access AWS.
@@ -174,10 +260,23 @@ type AWSAuth struct {
 	Region                string `json:"region"`
 }
 
+// LogValue implements slog.LogValuer for AWSAuth to redact sensitive information.
+func (a AWSAuth) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("credentialFileLiteral", "[REDACTED]"),
+		slog.String("region", a.Region),
+	)
+}
+
 // APIKeyAuth defines the file that will be mounted to the external proc.
 type APIKeyAuth struct {
 	// Key is the API key as a literal string.
 	Key string `json:"key"`
+}
+
+// LogValue implements slog.LogValuer for APIKeyAuth to redact sensitive information.
+func (a APIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
 }
 
 // AzureAPIKeyAuth defines the Azure OpenAI API key.
@@ -186,16 +285,31 @@ type AzureAPIKeyAuth struct {
 	Key string `json:"key"`
 }
 
+// LogValue implements slog.LogValuer for AzureAPIKeyAuth to redact sensitive information.
+func (a AzureAPIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
+}
+
 // AnthropicAPIKeyAuth defines the Anthropic API key.
 type AnthropicAPIKeyAuth struct {
 	// Key is the Anthropic API key as a literal string.
 	Key string `json:"key"`
 }
 
+// LogValue implements slog.LogValuer for AnthropicAPIKeyAuth to redact sensitive information.
+func (a AnthropicAPIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
+}
+
 // AzureAuth defines the file containing azure access token that will be mounted to the external proc.
 type AzureAuth struct {
 	// AccessToken is the access token as a literal string.
 	AccessToken string `json:"accessToken"`
+}
+
+// LogValue implements slog.LogValuer for AzureAuth to redact sensitive information.
+func (a AzureAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("accessToken", "[REDACTED]"))
 }
 
 // GCPAuth defines the GCP authentication configuration used to access Google Cloud AI services.
@@ -212,6 +326,25 @@ type GCPAuth struct {
 	// This is used in URL path templates when making requests to GCP Vertex AI endpoints.
 	// This should be the project where Vertex AI APIs are enabled.
 	ProjectName string `json:"projectName"`
+}
+
+// LogValue implements slog.LogValuer for GCPAuth to redact sensitive information.
+func (g GCPAuth) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("accessToken", "[REDACTED]"),
+		slog.String("region", g.Region),
+		slog.String("projectName", g.ProjectName),
+	)
+}
+
+// HTTPHeaderValueFilter filters individual values out of a multi-valued request header before
+// forwarding upstream. Mode is either "Denylist" (drop the listed Values) or "Allowlist" (keep only
+// the listed Values).
+type HTTPHeaderValueFilter struct {
+	// Name is the lower-cased name of the header whose values are filtered.
+	Name   string   `json:"name"`
+	Mode   string   `json:"mode"`
+	Values []string `json:"values,omitempty"`
 }
 
 // HTTPHeaderMutation defines the mutation of HTTP headers that will be applied to the request
@@ -232,6 +365,14 @@ type HTTPHeader struct {
 	Name string `json:"name"`
 	// Value is the value of HTTP Header to be matched.
 	Value string `json:"value"`
+}
+
+// LogValue implements slog.LogValuer for HTTPHeader to redact sensitive information.
+func (h HTTPHeader) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("name", h.Name),
+		slog.String("value", "[REDACTED]"),
+	)
 }
 
 // HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will be applied to the request

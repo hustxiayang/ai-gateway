@@ -30,6 +30,19 @@ type contentDecodingResult struct {
 // Currently, supports gzip and brotli encoding, but can be extended to support other encodings in the future.
 // Returns a reader for the (potentially decompressed) body and metadata about the encoding.
 func decodeContentIfNeeded(body []byte, contentEncoding string) (contentDecodingResult, error) {
+	// An empty body has nothing to decompress. gzip.NewReader reads the gzip
+	// header eagerly, so building it over zero bytes fails immediately with
+	// io.EOF. That gets surfaced as a fatal "failed to decode gzip: EOF" and
+	// aborts an otherwise-successful upstream response. This can happen when the
+	// upstream sends Content-Encoding: gzip with an empty body, or when a
+	// streaming response is buffered to end-of-stream with no payload. Treat an
+	// empty body as nothing to decode and pass it through unchanged.
+	if len(body) == 0 {
+		return contentDecodingResult{
+			reader:    bytes.NewReader(body),
+			isEncoded: false,
+		}, nil
+	}
 	switch contentEncoding {
 	case "gzip":
 		reader, err := gzip.NewReader(bytes.NewReader(body))
@@ -104,13 +117,13 @@ func mutationsFromTranslationResult(newHeaders []internalapi.Header, newBody []b
 
 // applyBodyMutation applies body mutations from the route and also restores original body on retry.
 // This utility function handles both creating new mutations and modifying existing ones.
-func applyBodyMutation(bodyMutator *bodymutator.BodyMutator, bodyMutation *extprocv3.BodyMutation, originalRequestBodyRaw []byte, onRetry bool, logger *slog.Logger) *extprocv3.BodyMutation {
+func applyBodyMutation(bodyMutator *bodymutator.BodyMutator, bodyMutation *extprocv3.BodyMutation, originalRequestBodyRaw []byte, logger *slog.Logger) *extprocv3.BodyMutation {
 	if bodyMutator == nil {
 		return bodyMutation
 	}
 
 	if bodyMutation == nil {
-		mutatedBody, mutationErr := bodyMutator.Mutate(originalRequestBodyRaw, onRetry)
+		mutatedBody, mutationErr := bodyMutator.Mutate(originalRequestBodyRaw)
 		if mutationErr != nil {
 			logger.Error("failed to apply body mutation on original request body", "error", mutationErr)
 		} else {
@@ -119,7 +132,7 @@ func applyBodyMutation(bodyMutator *bodymutator.BodyMutator, bodyMutation *extpr
 			}
 		}
 	} else if bodyMutation.GetBody() != nil && len(bodyMutation.GetBody()) > 0 {
-		mutatedBody, mutationErr := bodyMutator.Mutate(bodyMutation.GetBody(), onRetry)
+		mutatedBody, mutationErr := bodyMutator.Mutate(bodyMutation.GetBody())
 		if mutationErr != nil {
 			logger.Error("failed to apply body mutation", "error", mutationErr)
 		} else {

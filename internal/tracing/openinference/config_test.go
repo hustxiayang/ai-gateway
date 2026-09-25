@@ -128,79 +128,48 @@ func TestNewTraceConfigFromEnv(t *testing.T) {
 	}
 }
 
-func TestGetBoolEnv(t *testing.T) {
-	// We use strconv.ParseBool, so only test a few cases for coverage.
+func TestTraceConfig_CapturesMessages(t *testing.T) {
 	tests := []struct {
-		name         string
-		envValue     string
-		defaultValue bool
-		expected     bool
+		name   string
+		config TraceConfig
+		want   bool
 	}{
 		{
-			name:         "true",
-			envValue:     "true",
-			defaultValue: false,
-			expected:     true,
+			name:   "defaults capture both sides",
+			config: TraceConfig{},
+			want:   true,
 		},
 		{
-			name:         "false",
-			envValue:     "false",
-			defaultValue: true,
-			expected:     false,
+			name:   "input side hidden, output side still captured",
+			config: TraceConfig{HideInputs: true, HideInputMessages: true},
+			want:   true,
 		},
 		{
-			name:         "empty",
-			envValue:     "",
-			defaultValue: true,
-			expected:     true,
+			name:   "output side hidden, input side still captured",
+			config: TraceConfig{HideOutputs: true, HideOutputMessages: true},
+			want:   true,
+		},
+		{
+			name: "HideInputs and HideOutputs alone suppress both sides",
+			config: TraceConfig{
+				HideInputs:  true,
+				HideOutputs: true,
+			},
+			want: false,
+		},
+		{
+			name: "all four message hides suppress both sides",
+			config: TraceConfig{
+				HideInputs: true, HideInputMessages: true,
+				HideOutputs: true, HideOutputMessages: true,
+			},
+			want: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key := "TEST_BOOL_ENV"
-			if tt.envValue != "" {
-				t.Setenv(key, tt.envValue)
-			}
-			result := getBoolEnv(key, tt.defaultValue)
-			require.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestGetIntEnv(t *testing.T) {
-	// We use strconv.Atoi, so only test a few cases for coverage.
-	defaultValue := 100
-	tests := []struct {
-		name     string
-		envValue string
-		expected int
-	}{
-		{
-			name:     "positive",
-			envValue: "12345",
-			expected: 12345,
-		},
-		{
-			name:     "zero",
-			envValue: "0",
-			expected: 0,
-		},
-		{
-			name:     "empty",
-			envValue: "",
-			expected: defaultValue,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key := "TEST_INT_ENV"
-			if tt.envValue != "" {
-				t.Setenv(key, tt.envValue)
-			}
-			result := getIntEnv(key, defaultValue)
-			require.Equal(t, tt.expected, result)
+			require.Equal(t, tt.want, tt.config.CapturesMessages())
 		})
 	}
 }

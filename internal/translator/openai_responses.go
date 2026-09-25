@@ -30,11 +30,22 @@ func NewResponsesOpenAIToOpenAITranslator(prefix string, modelNameOverride inter
 	}
 }
 
+// NewResponsesOpenAIToAWSOpenAITranslator implements [OpenAIResponsesTranslator] for OpenAI to AWS OpenAI-compatible translation.
+// The request body is always returned so that AWS SigV4 authentication signs the body Envoy sends upstream.
+func NewResponsesOpenAIToAWSOpenAITranslator(prefix string, modelNameOverride internalapi.ModelNameOverride) OpenAIResponsesTranslator {
+	return &openAIToOpenAITranslatorV1Responses{
+		modelNameOverride:        modelNameOverride,
+		path:                     path.Join("/", prefix, "responses"),
+		forceRequestBodyMutation: true,
+	}
+}
+
 // openAIToOpenAITranslatorV1Responses is a passthrough translator for OpenAI Responses API.
 // May apply model overrides but otherwise preserves the OpenAI format:
 // https://platform.openai.com/docs/api-reference/responses/create
 type openAIToOpenAITranslatorV1Responses struct {
-	modelNameOverride internalapi.ModelNameOverride
+	modelNameOverride        internalapi.ModelNameOverride
+	forceRequestBodyMutation bool
 	// The path of the responses endpoint to be used for the request. It is prefixed with the OpenAI path prefix.
 	path string
 	// stream indicates whether the request is for streaming.
@@ -44,6 +55,8 @@ type openAIToOpenAITranslatorV1Responses struct {
 	// requestModel serves as fallback for non-compliant OpenAI backends that
 	// don't return model in responses, ensuring metrics/tracing always have a model.
 	requestModel internalapi.RequestModel
+	// buffered stores incomplete SSE bytes across ResponseBody calls.
+	buffered []byte
 }
 
 // RequestBody implements [OpenAIResponsesTranslator.RequestBody].
@@ -67,9 +80,7 @@ func (o *openAIToOpenAITranslatorV1Responses) RequestBody(original []byte, req *
 	// Always set the path header to the responses endpoint so that the request is routed correctly.
 	newHeaders = []internalapi.Header{{pathHeaderName, o.path}}
 
-	if forceBodyMutation && len(newBody) == 0 {
-		newBody = original
-	}
+	newBody = forceOriginalBodyIfEmpty(forceBodyMutation || o.forceRequestBodyMutation, newBody, original)
 
 	if len(newBody) > 0 {
 		newHeaders = append(newHeaders, internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))})
@@ -102,12 +113,12 @@ func (o *openAIToOpenAITranslatorV1Responses) ResponseBody(_ map[string]string, 
 func (o *openAIToOpenAITranslatorV1Responses) handleStreamingResponse(body io.Reader, span tracingapi.ResponsesSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
-	// Buffer the incoming SSE data
 	chunks, err := io.ReadAll(body)
 	if err != nil {
 		return nil, nil, tokenUsage, "", fmt.Errorf("failed to read body: %w", err)
 	}
-	tokenUsage = o.extractUsageFromBufferEvent(span, chunks)
+	o.buffered = append(o.buffered, chunks...)
+	tokenUsage = o.extractUsageFromBufferEvent(span)
 	// Use stored streaming response model, fallback to request model for non-compliant backends
 	responseModel = cmp.Or(o.streamingResponseModel, o.requestModel)
 	return
@@ -125,13 +136,13 @@ func (o *openAIToOpenAITranslatorV1Responses) handleNonStreamingResponse(body io
 	// Fallback to request model for test or non-compliant OpenAI backends
 	responseModel = cmp.Or(resp.Model, o.requestModel)
 
-	// TODO: Add reasoning token usage
 	if resp.Usage != nil {
-		tokenUsage.SetInputTokens(uint32(resp.Usage.InputTokens))                                         // #nosec G115
-		tokenUsage.SetOutputTokens(uint32(resp.Usage.OutputTokens))                                       // #nosec G115
-		tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))                                         // #nosec G115
-		tokenUsage.SetCachedInputTokens(uint32(resp.Usage.InputTokensDetails.CachedTokens))               // #nosec G115
-		tokenUsage.SetCacheCreationInputTokens(uint32(resp.Usage.InputTokensDetails.CacheCreationTokens)) // #nosec G115
+		tokenUsage.SetInputTokens(uint32(resp.Usage.InputTokens))                                             // #nosec G115
+		tokenUsage.SetOutputTokens(uint32(resp.Usage.OutputTokens))                                           // #nosec G115
+		tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))                                             // #nosec G115
+		tokenUsage.SetCachedInputTokens(uint32(resp.Usage.InputTokensDetails.CachedTokens))                   // #nosec G115
+		tokenUsage.SetCacheCreationInputTokens(uint32(resp.Usage.InputTokensDetails.CacheWriteTokensValue())) // #nosec G115
+		tokenUsage.SetReasoningTokens(uint32(resp.Usage.OutputTokensDetails.ReasoningTokens))                 // #nosec G115
 	}
 
 	// Record non-streaming response to span if tracing is enabled.
@@ -141,19 +152,39 @@ func (o *openAIToOpenAITranslatorV1Responses) handleNonStreamingResponse(body io
 	return
 }
 
+// setTokenUsageFromResponse populates tokenUsage from a Response's Usage field,
+// guarding against a nil Usage (e.g. response.failed before any tokens were generated).
+func setTokenUsageFromResponse(tokenUsage *metrics.TokenUsage, resp *openai.Response) {
+	if resp == nil || resp.Usage == nil {
+		return
+	}
+	tokenUsage.SetInputTokens(uint32(resp.Usage.InputTokens))                                             // #nosec G115
+	tokenUsage.SetOutputTokens(uint32(resp.Usage.OutputTokens))                                           // #nosec G115
+	tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))                                             // #nosec G115
+	tokenUsage.SetCachedInputTokens(uint32(resp.Usage.InputTokensDetails.CachedTokens))                   // #nosec G115
+	tokenUsage.SetCacheCreationInputTokens(uint32(resp.Usage.InputTokensDetails.CacheWriteTokensValue())) // #nosec G115
+	tokenUsage.SetReasoningTokens(uint32(resp.Usage.OutputTokensDetails.ReasoningTokens))                 // #nosec G115
+}
+
 // extractUsageFromBufferEvent extracts the token usage and model from the buffered SSE events.
-// It scans complete lines and returns the latest usage found in response.completed event.
-func (o *openAIToOpenAITranslatorV1Responses) extractUsageFromBufferEvent(span tracingapi.ResponsesSpan, chunks []byte) (tokenUsage metrics.TokenUsage) {
-	// Parse SSE events from the buffered data
-	// SSE format: "data: {json}\n\n"
-	for event := range bytes.SplitSeq(chunks, []byte("\n\n")) {
+// It scans complete SSE events and returns the latest usage found in response.completed,
+// response.incomplete or response.failed events.
+func (o *openAIToOpenAITranslatorV1Responses) extractUsageFromBufferEvent(span tracingapi.ResponsesSpan) (tokenUsage metrics.TokenUsage) {
+	for {
+		// SSE event boundary is a blank line: "data: {json}\n\n".
+		i := bytes.Index(o.buffered, []byte("\n\n"))
+		if i == -1 {
+			return tokenUsage
+		}
+		event := o.buffered[:i]
+		o.buffered = o.buffered[i+2:]
 		for line := range bytes.SplitSeq(event, []byte("\n")) {
-			// Look for lines starting with "data: "
-			if !bytes.HasPrefix(line, sseDataPrefix) {
+			// Look for lines carrying the "data" field.
+			data, ok := cutSSEDataPrefix(line)
+			if !ok {
 				continue
 			}
 
-			data := bytes.TrimPrefix(line, sseDataPrefix)
 			if len(data) == 0 || bytes.Equal(data, sseDoneMessage) {
 				continue
 			}
@@ -163,23 +194,24 @@ func (o *openAIToOpenAITranslatorV1Responses) extractUsageFromBufferEvent(span t
 				continue // skip invalid JSON
 			}
 
-			switch eventUnion.Type {
+			switch eventUnion.GetEventType() {
 			case "response.created":
 				// Extract model from the first streaming event.
-				respCreatedEvent := eventUnion.AsResponseCreated()
+				respCreatedEvent := eventUnion.OfResponseCreated
 				if respCreatedEvent.Response.Model != "" {
 					o.streamingResponseModel = respCreatedEvent.Response.Model
 				}
 			case "response.completed":
-				// Extract token usage from response.completed event.
-				// Only response.completed contains usage information.
-				respComplEvent := eventUnion.AsResponseCompleted()
-				tokenUsage.SetInputTokens(uint32(respComplEvent.Response.Usage.InputTokens))                           // #nosec G115
-				tokenUsage.SetOutputTokens(uint32(respComplEvent.Response.Usage.OutputTokens))                         // #nosec G115
-				tokenUsage.SetTotalTokens(uint32(respComplEvent.Response.Usage.TotalTokens))                           // #nosec G115
-				tokenUsage.SetCachedInputTokens(uint32(respComplEvent.Response.Usage.InputTokensDetails.CachedTokens)) // #nosec G115
-				// Openai does not support cache creation response.
-				tokenUsage.SetCacheCreationInputTokens(uint32(0)) // #nosec G115
+				// response.completed always carries a populated usage object.
+				setTokenUsageFromResponse(&tokenUsage, &eventUnion.OfResponseCompleted.Response)
+			case "response.incomplete":
+				// response.incomplete (e.g. hit max_output_tokens or content filter)
+				// reports tokens generated so far.
+				setTokenUsageFromResponse(&tokenUsage, &eventUnion.OfResponseIncomplete.Response)
+			case "response.failed":
+				// response.failed may carry usage if the failure happened after
+				// generation started; pre-generation failures leave it nil.
+				setTokenUsageFromResponse(&tokenUsage, &eventUnion.OfResponseFailed.Response)
 			}
 			// Record streaming chunk to span if tracing is enabled.
 			if span != nil {
@@ -187,7 +219,6 @@ func (o *openAIToOpenAITranslatorV1Responses) extractUsageFromBufferEvent(span t
 			}
 		}
 	}
-	return tokenUsage
 }
 
 // ResponseError implements [OpenAIResponsesTranslator.ResponseError].

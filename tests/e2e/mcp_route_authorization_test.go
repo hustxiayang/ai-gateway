@@ -120,7 +120,7 @@ func TestMCPRouteAuthorization(t *testing.T) {
 		token := makeSignedJWT(t, "echo")
 		authHTTPClient := &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: &bearerTokenTransport{token: token, headers: map[string]string{"x-tenant": "t-123"}},
+			Transport: &bearerTokenTransport{token: token, headers: map[string]string{"x-tenant-id": "t-123"}},
 		}
 
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -148,7 +148,7 @@ func TestMCPRouteAuthorization(t *testing.T) {
 		token := makeSignedJWT(t, "echo")
 		authHTTPClient := &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: &bearerTokenTransport{token: token, headers: map[string]string{"x-tenant": "t-123"}},
+			Transport: &bearerTokenTransport{token: token, headers: map[string]string{"x-tenant-id": "t-123"}},
 		}
 
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -220,7 +220,7 @@ func TestMCPRouteAuthorization(t *testing.T) {
 		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-tenant", "t-123")
+		req.Header.Set("x-tenant-id", "t-123")
 		req.Header.Set("mcp-session-id", sess.ID())
 		req.Header.Set("x-ai-eg-mcp-route", routeHeader)
 
@@ -325,6 +325,7 @@ func makeSignedJWT(t *testing.T, scopes ...string) string {
 func makeSignedJWTWithClaims(t *testing.T, claims jwt.MapClaims, scopes ...string) string {
 	t.Helper()
 
+	claims["iss"] = "https://auth-server.example.com"
 	if len(scopes) > 0 {
 		claims["scope"] = strings.Join(scopes, " ")
 		claims["exp"] = time.Now().Add(30 * time.Minute).Unix()

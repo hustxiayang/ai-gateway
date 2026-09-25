@@ -15,12 +15,10 @@ type Talk = {
 };
 
 function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric'
-  });
+  const months = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  const [year, month, day] = dateString.split('-').map(Number);
+  return `${months[month - 1]} ${day}, ${year}`;
 }
 
 function TalkItem({ talk }: { talk: Talk }) {
@@ -60,18 +58,18 @@ export default function Talks(): React.ReactElement {
   return (
     <Layout
       title="Talks and Presentations"
-      description="Talks and presentations about Envoy AI Gateway">
+      description="Talks and presentations about Agent Router">
       <main className={styles.talksPage}>
         <div className="container">
           <div className={styles.header}>
             <Heading as="h1">Talks and Presentations</Heading>
             <p className={styles.description}>
-              Watch talks and presentations about Envoy AI Gateway from conferences, meetups, and community events.
+              Watch talks and presentations about Agent Router from conferences, meetups, and community events.
             </p>
             <div className={styles.contributeButton}>
               <Link
                 className="button button--primary button--lg"
-                href="https://github.com/envoyproxy/ai-gateway/edit/main/site/src/data/talks.json"
+                href="https://github.com/theagentrouter/agent-router/edit/main/site/src/data/talks.json"
                 target="_blank"
                 rel="noopener noreferrer">
                 Add your session!
