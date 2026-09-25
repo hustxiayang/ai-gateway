@@ -46,6 +46,36 @@ var anthropicInputSchemaKeysToSkip = map[string]struct{}{
 	"properties": {},
 }
 
+type anthropicCacheCreationUsage struct {
+	CacheCreation *struct {
+		Ephemeral5mInputTokens *int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
+}
+
+func applyCacheCreationTTLUsage(tokenUsage *metrics.TokenUsage, ephemeral5mInputTokens, ephemeral1hInputTokens *int64) {
+	if ephemeral5mInputTokens != nil && *ephemeral5mInputTokens >= 0 {
+		tokenUsage.SetCacheCreation5mInputTokens(uint32(*ephemeral5mInputTokens)) //nolint:gosec
+	}
+	if ephemeral1hInputTokens != nil && *ephemeral1hInputTokens >= 0 {
+		tokenUsage.SetCacheCreation1hInputTokens(uint32(*ephemeral1hInputTokens)) //nolint:gosec
+	}
+}
+
+func applyCacheCreationTTLUsageFromJSON(tokenUsage *metrics.TokenUsage, rawJSON string) {
+	if rawJSON == "" {
+		return
+	}
+	var usage anthropicCacheCreationUsage
+	if err := json.Unmarshal([]byte(rawJSON), &usage); err != nil || usage.CacheCreation == nil {
+		return
+	}
+	applyCacheCreationTTLUsage(tokenUsage,
+		usage.CacheCreation.Ephemeral5mInputTokens,
+		usage.CacheCreation.Ephemeral1hInputTokens,
+	)
+}
+
 // openAIToolParamsToAnthropicInputSchema converts OpenAI function parameters to an Anthropic ToolInputSchemaParam.
 func openAIToolParamsToAnthropicInputSchema(parameters any) (anthropic.ToolInputSchemaParam, error) {
 	var schema anthropic.ToolInputSchemaParam
@@ -888,6 +918,10 @@ type messageDeltaUsageFields struct {
 		InputTokens              *int64 `json:"input_tokens"`
 		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+		CacheCreation            *struct {
+			Ephemeral5mInputTokens *int64 `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
 	} `json:"usage"`
 }
 
@@ -908,6 +942,12 @@ func (p *anthropicStreamParser) updateInputUsageFromMessageDelta(data []byte) er
 	}
 
 	u := event.Usage
+	if u.CacheCreation != nil {
+		applyCacheCreationTTLUsage(&p.tokenUsage,
+			u.CacheCreation.Ephemeral5mInputTokens,
+			u.CacheCreation.Ephemeral1hInputTokens,
+		)
+	}
 	inputPresent := u.InputTokens != nil && *u.InputTokens >= 0
 	cacheReadPresent := u.CacheReadInputTokens != nil && *u.CacheReadInputTokens >= 0
 	cacheCreationPresent := u.CacheCreationInputTokens != nil && *u.CacheCreationInputTokens >= 0
@@ -1096,6 +1136,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if cacheCreation, ok := usage.CacheCreationInputTokens(); ok {
 			p.tokenUsage.SetCacheCreationInputTokens(cacheCreation)
 		}
+		applyCacheCreationTTLUsageFromJSON(&p.tokenUsage, u.RawJSON())
 
 		// reset the toolIndex for each message
 		p.toolIndex = -1
@@ -1320,6 +1361,7 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 		&usage.CacheReadInputTokens,
 		&usage.CacheCreationInputTokens,
 	)
+	applyCacheCreationTTLUsageFromJSON(&tokenUsage, usage.RawJSON())
 	tokenUsage.SetReasoningTokens(uint32(usage.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 	inputTokens, _ := tokenUsage.InputTokens()
 	outputTokens, _ := tokenUsage.OutputTokens()

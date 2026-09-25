@@ -661,6 +661,8 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 				int32(tt.expectedOpenAIResponse.Usage.TotalTokens),                             // nolint:gosec
 				int32(tt.expectedOpenAIResponse.Usage.CompletionTokensDetails.ReasoningTokens), // nolint:gosec
 			)
+			expectedTokenUsage.SetCacheCreation5mInputTokens(0)
+			expectedTokenUsage.SetCacheCreation1hInputTokens(0)
 			require.Equal(t, expectedTokenUsage, usedToken)
 
 			if diff := cmp.Diff(tt.expectedOpenAIResponse, gotResp, cmpopts.IgnoreFields(openai.ChatCompletionResponse{}, "Created")); diff != "" {

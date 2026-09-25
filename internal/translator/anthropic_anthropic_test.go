@@ -130,14 +130,18 @@ func TestAnthropicToAnthropic_ResponseHeaders(t *testing.T) {
 func TestAnthropicToAnthropic_ResponseBody_non_streaming(t *testing.T) {
 	translator := NewAnthropicToAnthropicTranslator("", "")
 	require.NotNil(t, translator)
-	const responseBody = `{"model":"claude-sonnet-4-5-20250929","id":"msg_01J5gW6Sffiem6avXSAooZZw","type":"message","role":"assistant","content":[{"type":"text","text":"Hi! 👋 How can I help you today?"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":16,"service_tier":"standard"}}`
+	const responseBody = `{"model":"claude-sonnet-4-5-20250929","id":"msg_01J5gW6Sffiem6avXSAooZZw","type":"message","role":"assistant","content":[{"type":"text","text":"Hi! 👋 How can I help you today?"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":7,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":2},"output_tokens":16,"service_tier":"standard"}}`
 
 	headerMutation, bodyMutation, tokenUsage, responseModel, err := translator.ResponseBody(nil, strings.NewReader(responseBody), true, nil)
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
 	require.Nil(t, bodyMutation)
-	expected := tokenUsageFrom(9, 0, 0, 16, 25, -1)
+	expected := tokenUsageFrom(16, 0, 7, 16, 32, -1)
+	expected.SetCacheCreation5mInputTokens(5)
+	expected.SetCacheCreation1hInputTokens(2)
 	require.Equal(t, expected, tokenUsage)
+	requireTokenUsageValue(t, 5, tokenUsage.CacheCreation5mInputTokens)
+	requireTokenUsageValue(t, 2, tokenUsage.CacheCreation1hInputTokens)
 	require.Equal(t, "claude-sonnet-4-5-20250929", responseModel)
 }
 
@@ -149,7 +153,7 @@ func TestAnthropicToAnthropic_ResponseBody_streaming(t *testing.T) {
 	// We split the response into two parts to simulate streaming where each part can end in the
 	// middle of an event.
 	const responseHead = `event: message_start
-data: {"type":"message_start","message":{"model":"claude-sonnet-4-5-20250929","id":"msg_01BfvfMsg2gBzwsk6PZRLtDg","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":0,"service_tier":"standard"}}    }
+data: {"type":"message_start","message":{"model":"claude-sonnet-4-5-20250929","id":"msg_01BfvfMsg2gBzwsk6PZRLtDg","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":7,"cache_read_input_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":2},"output_tokens":0,"service_tier":"standard"}}    }
 
 event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}      }
@@ -182,17 +186,32 @@ data: {"type":"message_stop"       }`
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
 	require.Nil(t, bodyMutation)
-	expected := tokenUsageFrom(10, 1, 0, 0, 10, -1)
+	expected := tokenUsageFrom(17, 1, 7, 0, 17, -1)
+	expected.SetCacheCreation5mInputTokens(5)
+	expected.SetCacheCreation1hInputTokens(2)
 	require.Equal(t, expected, tokenUsage)
+	requireTokenUsageValue(t, 5, tokenUsage.CacheCreation5mInputTokens)
+	requireTokenUsageValue(t, 2, tokenUsage.CacheCreation1hInputTokens)
 	require.Equal(t, "claude-sonnet-4-5-20250929", responseModel)
 
 	headerMutation, bodyMutation, tokenUsage, responseModel, err = translator.ResponseBody(nil, strings.NewReader(responseTail), false, nil)
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
 	require.Nil(t, bodyMutation)
-	expected = tokenUsageFrom(10, 1, 0, 16, 26, -1)
+	expected = tokenUsageFrom(17, 1, 7, 16, 33, -1)
+	expected.SetCacheCreation5mInputTokens(5)
+	expected.SetCacheCreation1hInputTokens(2)
 	require.Equal(t, expected, tokenUsage)
+	requireTokenUsageValue(t, 5, tokenUsage.CacheCreation5mInputTokens)
+	requireTokenUsageValue(t, 2, tokenUsage.CacheCreation1hInputTokens)
 	require.Equal(t, "claude-sonnet-4-5-20250929", responseModel)
+}
+
+func requireTokenUsageValue(t *testing.T, expected uint32, getter func() (uint32, bool)) {
+	t.Helper()
+	value, set := getter()
+	require.True(t, set)
+	require.Equal(t, expected, value)
 }
 
 func TestAnthropicToAnthropic_ResponseBody_streaming_usageOnMessageDelta(t *testing.T) {

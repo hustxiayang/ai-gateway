@@ -1742,7 +1742,7 @@ LLMRequestCost configures each request cost.
   name="type"
   type="[LLMRequestCostType](#github-com-envoyproxy-ai-gateway-api-v1alpha1-llmrequestcosttype)"
   required="true"
-  description="Type specifies the type of the request cost. The default is `OutputToken`,<br />and it uses `output token` as the cost. The other types are `InputToken`, `TotalToken`,<br />`CachedInputToken`, `CacheCreationInputToken`, `ReasoningToken`, and `CEL`."
+  description="Type specifies the type of the request cost. The default is `OutputToken`,<br />and it uses `output token` as the cost. The other types are `InputToken`, `TotalToken`,<br />`CachedInputToken`, `CacheCreationInputToken`, `CacheCreation5mInputToken`,<br />`CacheCreation1hInputToken`, `ReasoningToken`, and `CEL`."
 /><ApiField
   name="cel"
   type="string"
@@ -1778,7 +1778,17 @@ LLMRequestCostType specifies the type of the LLMRequestCost.
   name="CacheCreationInputToken"
   type="enum"
   required="false"
-  description="LLMRequestCostTypeCacheCreationInputToken is the cost type of the cached input token.<br />"
+  description="LLMRequestCostTypeCacheCreationInputToken is the cost type of all cache creation input tokens.<br />"
+/><ApiField
+  name="CacheCreation5mInputToken"
+  type="enum"
+  required="false"
+  description="LLMRequestCostTypeCacheCreation5mInputToken is the cost type of input tokens written to a five-minute cache.<br />"
+/><ApiField
+  name="CacheCreation1hInputToken"
+  type="enum"
+  required="false"
+  description="LLMRequestCostTypeCacheCreation1hInputToken is the cost type of input tokens written to a one-hour cache.<br />"
 /><ApiField
   name="OutputToken"
   type="enum"
@@ -4483,7 +4493,7 @@ LLMRequestCost configures each request cost.
   name="type"
   type="[LLMRequestCostType](#github-com-envoyproxy-ai-gateway-api-v1beta1-llmrequestcosttype)"
   required="true"
-  description="Type specifies the type of the request cost. The default is `OutputToken`,<br />and it uses `output token` as the cost. The other types are `InputToken`, `TotalToken`,<br />`CachedInputToken`, `CacheCreationInputToken`, `ReasoningToken`, and `CEL`."
+  description="Type specifies the type of the request cost. The default is `OutputToken`,<br />and it uses `output token` as the cost. The other types are `InputToken`, `TotalToken`,<br />`CachedInputToken`, `CacheCreationInputToken`, `CacheCreation5mInputToken`,<br />`CacheCreation1hInputToken`, `ReasoningToken`, and `CEL`."
 /><ApiField
   name="cel"
   type="string"
@@ -4519,7 +4529,17 @@ LLMRequestCostType specifies the type of the LLMRequestCost.
   name="CacheCreationInputToken"
   type="enum"
   required="false"
-  description="LLMRequestCostTypeCacheCreationInputToken is the cost type of the cached input token.<br />"
+  description="LLMRequestCostTypeCacheCreationInputToken is the cost type of all cache creation input tokens.<br />"
+/><ApiField
+  name="CacheCreation5mInputToken"
+  type="enum"
+  required="false"
+  description="LLMRequestCostTypeCacheCreation5mInputToken is the cost type of input tokens written to a five-minute cache.<br />"
+/><ApiField
+  name="CacheCreation1hInputToken"
+  type="enum"
+  required="false"
+  description="LLMRequestCostTypeCacheCreation1hInputToken is the cost type of input tokens written to a one-hour cache.<br />"
 /><ApiField
   name="OutputToken"
   type="enum"

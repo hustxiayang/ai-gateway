@@ -368,6 +368,8 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		mt.retUsedToken.SetInputTokens(1)
 		mt.retUsedToken.SetCachedInputTokens(1)
 		mt.retUsedToken.SetCacheCreationInputTokens(3)
+		mt.retUsedToken.SetCacheCreation5mInputTokens(2)
+		mt.retUsedToken.SetCacheCreation1hInputTokens(1)
 
 		celProgInt, err := llmcostcel.NewProgram("54321")
 		require.NoError(t, err)
@@ -384,6 +386,8 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeInputToken, MetadataKey: "input_token_usage"}},
 						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeCachedInputToken, MetadataKey: "cached_input_token_usage"}},
 						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeCacheCreationInputToken, MetadataKey: "cache_creation_input_token_usage"}},
+						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeCacheCreation5mInputToken, MetadataKey: "cache_creation_5m_input_token_usage"}},
+						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeCacheCreation1hInputToken, MetadataKey: "cache_creation_1h_input_token_usage"}},
 						{
 							CELProg:        celProgInt,
 							LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeCEL, MetadataKey: "cel_int"},
@@ -422,6 +426,10 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 			GetStructValue().Fields["cached_input_token_usage"].GetNumberValue())
 		require.Equal(t, float64(3), md.Fields[internalapi.AIGatewayFilterMetadataNamespace].
 			GetStructValue().Fields["cache_creation_input_token_usage"].GetNumberValue())
+		require.Equal(t, float64(2), md.Fields[internalapi.AIGatewayFilterMetadataNamespace].
+			GetStructValue().Fields["cache_creation_5m_input_token_usage"].GetNumberValue())
+		require.Equal(t, float64(1), md.Fields[internalapi.AIGatewayFilterMetadataNamespace].
+			GetStructValue().Fields["cache_creation_1h_input_token_usage"].GetNumberValue())
 		require.Equal(t, float64(54321), md.Fields[internalapi.AIGatewayFilterMetadataNamespace].
 			GetStructValue().Fields["cel_int"].GetNumberValue())
 		require.Equal(t, float64(9999), md.Fields[internalapi.AIGatewayFilterMetadataNamespace].

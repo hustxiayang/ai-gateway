@@ -122,6 +122,12 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		ptr.To(int64(usage.CacheReadInputTokens)),
 		ptr.To(int64(usage.CacheCreationInputTokens)),
 	)
+	if usage.CacheCreation != nil {
+		applyCacheCreationTTLUsage(&tokenUsage,
+			ptr.To(int64(usage.CacheCreation.Ephemeral5mInputTokens)),
+			ptr.To(int64(usage.CacheCreation.Ephemeral1hInputTokens)),
+		)
+	}
 	if span != nil {
 		span.RecordResponse(anthropicResp)
 	}
@@ -174,9 +180,21 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 			)
 			// Override with message_start usage (contains input tokens and initial state)
 			a.streamingTokenUsage.Override(messageStartUsage)
+			if u.CacheCreation != nil {
+				applyCacheCreationTTLUsage(&a.streamingTokenUsage,
+					ptr.To(int64(u.CacheCreation.Ephemeral5mInputTokens)),
+					ptr.To(int64(u.CacheCreation.Ephemeral1hInputTokens)),
+				)
+			}
 		}
 	case eventUnion.MessageDelta != nil:
 		u := eventUnion.MessageDelta.Usage
+		if u.CacheCreation != nil {
+			applyCacheCreationTTLUsage(&a.streamingTokenUsage,
+				ptr.To(int64(u.CacheCreation.Ephemeral5mInputTokens)),
+				ptr.To(int64(u.CacheCreation.Ephemeral1hInputTokens)),
+			)
+		}
 		// message_delta carries the final counts. Standard Anthropic only reports output_tokens
 		// here, but some Anthropic-compatible backends report the final input/cache counts on
 		// message_delta instead of message_start. See https://github.com/envoyproxy/ai-gateway/issues/2290.

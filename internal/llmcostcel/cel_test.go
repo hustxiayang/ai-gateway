@@ -56,6 +56,13 @@ func TestNewProgram(t *testing.T) {
 }
 
 func TestEvaluateProgram(t *testing.T) {
+	t.Run("fixed point monetary cost", func(t *testing.T) {
+		prog, err := NewProgram("input_tokens * 150u + output_tokens * 600u")
+		require.NoError(t, err)
+		v, err := EvaluateProgram(prog, "classifier", "hosted", "default/route", 1000, 0, 0, 250, 1250, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(300_000), v)
+	})
 	t.Run("signed integer negative", func(t *testing.T) {
 		prog, err := NewProgram("int(input_tokens) - int(output_tokens)")
 		require.NoError(t, err)

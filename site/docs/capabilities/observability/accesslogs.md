@@ -161,6 +161,57 @@ With this configuration, the access log entries will include the AI Gateway meta
 }
 ```
 
+### Fixed-point monetary attribution
+
+`llmRequestCosts` can also emit a monetary cost calculated from token usage. Agent Router does not supply
+provider prices, so the expression must encode the prices that apply to the route. Use an integer fixed-point
+unit instead of a decimal currency value: CEL cost expressions must return an integer, and integer arithmetic
+avoids rounding sub-cent amounts.
+
+For example, suppose input tokens cost $0.15 per million and output tokens cost $0.60 per million. Those rates
+are 150 and 600 nano-dollars per token, respectively. This configuration emits the cost in nano-dollars:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: ai-gateway-route
+spec:
+  llmRequestCosts:
+    - metadataKey: billing_cost_nanodollars
+      type: CEL
+      cel: "input_tokens * 150u + output_tokens * 600u"
+  rules:
+    (...)
+```
+
+Expose the value in the JSON access log alongside the request ID and other attribution fields:
+
+```yaml
+format:
+  type: JSON
+  json:
+    billing.currency: "USD"
+    billing.cost.unit: "nanodollar"
+    billing.cost.units: "%DYNAMIC_METADATA(io.envoy.ai_gateway:billing_cost_nanodollars)%"
+    x-request-id: "%REQ(X-REQUEST-ID)%"
+```
+
+A request with 1,000 input tokens and 250 output tokens emits `300000` nano-dollars, exactly $0.0003 at the
+configured rates. The downstream billing or settlement consumer converts the integer to its decimal
+representation. The example logs the request ID for correlation; a settlement consumer must validate that its
+chosen event identifier is stable and unique before using it as an idempotency key.
+
+The metadata value is transported as a Protocol Buffers `number`, so fixed-point integers are exact only through
+9,007,199,254,740,991 (`2^53 - 1`). At nano-dollar scale, this supports up to $9,007,199.254740991 for one
+request. Choose a coarser unit if a single request can exceed that bound.
+
+:::note
+Access logs are telemetry, not a transactional settlement hook. Agent Router emits this cost only when it can
+extract usage from a successful provider response. Durable delivery, retries, deduplication, currency conversion,
+and payment execution remain the responsibility of the downstream consumer.
+:::
+
 ### Trying it out
 
 You can deploy the example to quickly try the access log configuration against a local backend:

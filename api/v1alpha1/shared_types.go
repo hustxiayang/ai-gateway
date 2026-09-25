@@ -112,9 +112,10 @@ type LLMRequestCost struct {
 	MetadataKey string `json:"metadataKey"`
 	// Type specifies the type of the request cost. The default is "OutputToken",
 	// and it uses "output token" as the cost. The other types are "InputToken", "TotalToken",
-	// "CachedInputToken", "CacheCreationInputToken", "ReasoningToken", and "CEL".
+	// "CachedInputToken", "CacheCreationInputToken", "CacheCreation5mInputToken",
+	// "CacheCreation1hInputToken", "ReasoningToken", and "CEL".
 	//
-	// +kubebuilder:validation:Enum=OutputToken;InputToken;CachedInputToken;CacheCreationInputToken;TotalToken;ReasoningToken;CEL
+	// +kubebuilder:validation:Enum=OutputToken;InputToken;CachedInputToken;CacheCreationInputToken;CacheCreation5mInputToken;CacheCreation1hInputToken;TotalToken;ReasoningToken;CEL
 	Type LLMRequestCostType `json:"type"`
 	// CEL is the CEL expression to calculate the cost of the request.
 	// The CEL expression must return a signed or unsigned integer. If the
@@ -151,8 +152,12 @@ const (
 	LLMRequestCostTypeInputToken LLMRequestCostType = "InputToken"
 	// LLMRequestCostTypeCachedInputToken is the cost type of the cached input token.
 	LLMRequestCostTypeCachedInputToken LLMRequestCostType = "CachedInputToken"
-	// LLMRequestCostTypeCacheCreationInputToken is the cost type of the cached input token.
+	// LLMRequestCostTypeCacheCreationInputToken is the cost type of all cache creation input tokens.
 	LLMRequestCostTypeCacheCreationInputToken LLMRequestCostType = "CacheCreationInputToken"
+	// LLMRequestCostTypeCacheCreation5mInputToken is the cost type of input tokens written to a five-minute cache.
+	LLMRequestCostTypeCacheCreation5mInputToken LLMRequestCostType = "CacheCreation5mInputToken"
+	// LLMRequestCostTypeCacheCreation1hInputToken is the cost type of input tokens written to a one-hour cache.
+	LLMRequestCostTypeCacheCreation1hInputToken LLMRequestCostType = "CacheCreation1hInputToken"
 	// LLMRequestCostTypeOutputToken is the cost type of the output token.
 	LLMRequestCostTypeOutputToken LLMRequestCostType = "OutputToken"
 	// LLMRequestCostTypeTotalToken is the cost type of the total token.
