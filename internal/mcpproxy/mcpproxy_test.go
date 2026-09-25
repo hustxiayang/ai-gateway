@@ -31,13 +31,33 @@ var (
 )
 
 type fakeSpan struct {
-	backends []string
-	errType  string
-	err      error
+	backends        []string
+	clientSessionID string
+	events          []string
+	listResults     []any
+	toolCallResult  []byte
+	errType         string
+	err             error
 }
 
 func (f *fakeSpan) RecordRouteToBackend(backend string, _ string, _ bool) {
 	f.backends = append(f.backends, backend)
+}
+
+func (f *fakeSpan) RecordClientSession(sessionID string) {
+	f.clientSessionID = sessionID
+}
+
+func (f *fakeSpan) AddEvent(name string) {
+	f.events = append(f.events, name)
+}
+
+func (f *fakeSpan) RecordListResult(result any) {
+	f.listResults = append(f.listResults, result)
+}
+
+func (f *fakeSpan) RecordToolCallResult(resultJSON []byte) {
+	f.toolCallResult = resultJSON
 }
 
 func (f *fakeSpan) EndSpan() {}
@@ -48,10 +68,12 @@ func (f *fakeSpan) EndSpanOnError(errType string, err error) {
 }
 
 type fakeTracer struct {
-	span *fakeSpan
+	span   *fakeSpan
+	starts int
 }
 
 func (f *fakeTracer) StartSpanAndInjectMeta(context.Context, *jsonrpc.Request, mcp.Params, http.Header) tracingapi.MCPSpan {
+	f.starts++
 	if f.span == nil {
 		f.span = &fakeSpan{}
 	}

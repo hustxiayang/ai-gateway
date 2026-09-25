@@ -583,6 +583,23 @@ spec:
                     - message: Either image or imageRepository can be set.
                       rule: '!has(self.image) || !has(self.imageRepository)'
                 type: object
+              forwardProxy:
+                description: |-
+                  ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this
+                  GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes
+                  in locked-down networks where direct egress to providers is not permitted and all
+                  outbound traffic must traverse a proxy.
+                properties:
+                  address:
+                    description: |-
+                      Address is the "host:port" of the HTTP CONNECT proxy. The host may be a hostname or an
+                      IP address; the port is required. Upstream connections are tunnelled through this proxy
+                      via Envoy's http_11_proxy transport socket, preserving the upstream TLS session.
+                    minLength: 1
+                    type: string
+                required:
+                - address
+                type: object
               globalLLMRequestCosts:
                 description: |-
                   GlobalLLMRequestCosts defines default LLM request costs that apply to all
@@ -1279,6 +1296,40 @@ spec:
                     x-kubernetes-validations:
                     - message: Either image or imageRepository can be set.
                       rule: '!has(self.image) || !has(self.imageRepository)'
+                  metadataForwardingNamespaces:
+                    description: |-
+                      MetadataForwardingNamespaces lists the untyped dynamic metadata namespaces Envoy forwards
+                      to the external processor for this Gateway's AI traffic. A BackendSecurityPolicy using
+                      credentialOverride.fromDynamicMetadata receives metadata only from a namespace listed here.
+
+                      Under Envoy Gateway's mergeGateways, every Gateway in the class shares one Envoy, so a
+                      namespace any one of them declares is forwarded for all of their AI traffic.
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-validations:
+                    - message: metadata namespaces may only contain letters, digits,
+                        '.', '_', '/' and '-'
+                      rule: self.all(n, n.matches('^[A-Za-z0-9._/-]+$'))
+                type: object
+              forwardProxy:
+                description: |-
+                  ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this
+                  GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes
+                  in locked-down networks where direct egress to providers is not permitted and all
+                  outbound traffic must traverse a proxy.
+                properties:
+                  address:
+                    description: |-
+                      Address is the "host:port" of the HTTP CONNECT proxy. The host may be a hostname or an
+                      IP address; the port is required. Upstream connections are tunnelled through this proxy
+                      via Envoy's http_11_proxy transport socket, preserving the upstream TLS session.
+                    minLength: 1
+                    type: string
+                required:
+                - address
                 type: object
               globalLLMRequestCosts:
                 description: |-

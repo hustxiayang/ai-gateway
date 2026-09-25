@@ -1475,6 +1475,70 @@ func TestOpenAIReqToGeminiGenerationConfig(t *testing.T) {
 			requestModel:   "gemini-2.5-flash",
 		},
 		{
+			name: "structured_outputs choice",
+			input: &openai.ChatCompletionRequest{
+				StructuredOutputs: &openai.StructuredOutputs{Choice: []string{"Positive", "Negative"}},
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				ResponseMIMEType: "text/x.enum",
+				ResponseSchema:   &genai.Schema{Type: "STRING", Enum: []string{"Positive", "Negative"}},
+			},
+			expectedResponseMode: responseModeEnum,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
+			name: "structured_outputs regex",
+			input: &openai.ChatCompletionRequest{
+				StructuredOutputs: &openai.StructuredOutputs{Regex: "\\w+@\\w+\\.com\\n"},
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				ResponseMIMEType: "application/json",
+				ResponseSchema:   &genai.Schema{Type: "STRING", Pattern: "\\w+@\\w+\\.com\\n"},
+			},
+			expectedResponseMode: responseModeRegex,
+			requestModel:         "gemini-2.5-flash",
+		},
+		{
+			name: "structured_outputs json",
+			input: &openai.ChatCompletionRequest{
+				StructuredOutputs: &openai.StructuredOutputs{JSON: json.RawMessage(`{"type": "string"}`)},
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				ResponseMIMEType:   "application/json",
+				ResponseJsonSchema: json.RawMessage(`{"type": "string"}`),
+			},
+			expectedResponseMode: responseModeJSON,
+		},
+		{
+			name: "structured_outputs grammar unsupported on gemini",
+			input: &openai.ChatCompletionRequest{
+				StructuredOutputs: &openai.StructuredOutputs{Grammar: "root ::= \"a\""},
+			},
+			expectedErrMsg: "structured_outputs grammar/structural_tag/whitespace_pattern are not supported on GCP/Gemini",
+			requestModel:   "gemini-2.5-flash",
+		},
+		{
+			name: "structured_outputs.json takes precedence over guided_json",
+			input: &openai.ChatCompletionRequest{
+				GuidedJSON:        json.RawMessage(`{"type": "number"}`),
+				StructuredOutputs: &openai.StructuredOutputs{JSON: json.RawMessage(`{"type": "string"}`)},
+			},
+			expectedGenerationConfig: &genai.GenerationConfig{
+				ResponseMIMEType:   "application/json",
+				ResponseJsonSchema: json.RawMessage(`{"type": "string"}`),
+			},
+			expectedResponseMode: responseModeJSON,
+		},
+		{
+			name: "multiple format specifiers - structured_outputs.json and GuidedChoice",
+			input: &openai.ChatCompletionRequest{
+				GuidedChoice:      []string{"A", "B"},
+				StructuredOutputs: &openai.StructuredOutputs{JSON: json.RawMessage(`{"type": "string"}`)},
+			},
+			expectedErrMsg: "duplicate json schema specifications",
+			requestModel:   "gemini-2.5-flash",
+		},
+		{
 			name: "reasoning effort low",
 			input: &openai.ChatCompletionRequest{
 				ReasoningEffort: openai.ReasoningEffortLow,
@@ -2577,6 +2641,24 @@ func TestExtractTextAndThoughtSummaryFromGeminiParts(t *testing.T) {
 			responseMode:           responseModeRegex,
 			expectedThoughtSummary: "",
 			expectedText:           `He said \"hello\" to me`,
+		},
+		{
+			name: "enum mode trims surrounding whitespace",
+			parts: []*genai.Part{
+				{Text: " negative"},
+			},
+			responseMode:           responseModeEnum,
+			expectedThoughtSummary: "",
+			expectedText:           "negative",
+		},
+		{
+			name: "non-enum mode preserves surrounding whitespace",
+			parts: []*genai.Part{
+				{Text: " negative"},
+			},
+			responseMode:           responseModeJSON,
+			expectedThoughtSummary: "",
+			expectedText:           " negative",
 		},
 		{
 			name: "test thought summary",
