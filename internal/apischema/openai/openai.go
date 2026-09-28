@@ -1258,6 +1258,7 @@ const (
 	ToolTypeImageGeneration     ToolType = "image_generation"
 	ToolTypeEnterpriseWebSearch ToolType = "enterprise_search"
 	ToolTypeGoogleSearch        ToolType = "google_search"
+	ToolTypeAnthropicWebSearch  ToolType = "web_search_20260209"
 )
 
 // GCPGoogleSearchConfig contains GCP-specific configuration for Google Search grounding.
@@ -1276,6 +1277,7 @@ type GCPTimeRangeFilter struct {
 
 type Tool struct {
 	Type         ToolType               `json:"type"`
+	Name         string                 `json:"name,omitempty"`
 	Function     *FunctionDefinition    `json:"function,omitempty"`
 	GoogleSearch *GCPGoogleSearchConfig `json:"google_search,omitempty"` //nolint:tagliatelle
 }
