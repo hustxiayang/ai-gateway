@@ -378,7 +378,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 			t:               t,
 			expResponseBody: inBody,
 			retBodyMutation: []byte(overloadEvent),
-			retErr:          &translator.AnthropicStreamError{Type: "overloaded_error", Message: "Overloaded"},
+			retErr:          &translator.StreamOverloadedError{Err: errors.New("overloaded")},
 		}
 		p := &chatCompletionProcessorUpstreamFilter{
 			translator:      mt,
@@ -418,7 +418,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		overloadBody := &extprocv3.HttpBody{Body: []byte("overload")}
 		mt.expResponseBody = overloadBody
 		mt.retBodyMutation = []byte(overloadEvent)
-		mt.retErr = &translator.AnthropicStreamError{Type: "overloaded_error", Message: "Overloaded"}
+		mt.retErr = &translator.StreamOverloadedError{Err: errors.New("overloaded")}
 		res, err := p.ProcessResponseBody(t.Context(), overloadBody)
 		require.NoError(t, err)
 		require.Equal(t, overloadEvent, string(res.GetResponseBody().GetResponse().GetBodyMutation().GetBody()))
@@ -426,11 +426,11 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		mm.RequireRequestFailure(t)
 	})
 
-	t.Run("non-overload Anthropic stream error", func(t *testing.T) {
+	t.Run("non-overload stream error", func(t *testing.T) {
 		mm := &mockMetrics{}
 		mt := &mockTranslator{
 			t:      t,
-			retErr: &translator.AnthropicStreamError{Type: "api_error", Message: "Upstream error"},
+			retErr: errors.New("upstream stream error"),
 		}
 		p := &chatCompletionProcessorUpstreamFilter{
 			translator: mt,
@@ -440,7 +440,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 
 		res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{})
 		require.Nil(t, res)
-		require.ErrorContains(t, err, "anthropic stream error: api_error")
+		require.ErrorContains(t, err, "upstream stream error")
 		mm.RequireRequestFailure(t)
 	})
 

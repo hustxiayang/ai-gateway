@@ -2150,10 +2150,12 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}
 			p := newAnthropicStreamParser("claude-sonnet-4-5")
 			_, body, _, _, err := p.Process(strings.NewReader(tt.stream), false, nil)
 
-			var streamErr *AnthropicStreamError
+			var streamErr *StreamOverloadedError
 			require.ErrorAs(t, err, &streamErr)
-			require.Equal(t, "overloaded_error", streamErr.Type)
-			require.Equal(t, "Overloaded", streamErr.Message)
+			var anthropicErr *anthropicStreamError
+			require.ErrorAs(t, err, &anthropicErr)
+			require.Equal(t, "overloaded_error", anthropicErr.Type)
+			require.Equal(t, "Overloaded", anthropicErr.Message)
 			require.Equal(t, wantErrorEvent, string(body))
 		})
 	}
@@ -2176,7 +2178,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}
 
 `
 		_, body, _, _, err = p.Process(strings.NewReader(overload), false, nil)
-		var streamErr *AnthropicStreamError
+		var streamErr *StreamOverloadedError
 		require.ErrorAs(t, err, &streamErr)
 		require.Equal(t, wantErrorEvent, string(body))
 	})
@@ -2194,7 +2196,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}
 
 `
 		_, body, _, _, err := p.Process(strings.NewReader(stream), false, nil)
-		var streamErr *AnthropicStreamError
+		var streamErr *StreamOverloadedError
 		require.ErrorAs(t, err, &streamErr)
 		require.Contains(t, string(body), `"content":"partial"`)
 		require.True(t, strings.HasSuffix(string(body), wantErrorEvent))
@@ -2208,9 +2210,11 @@ data: {"type":"error","error":{"type":"api_error","message":"Upstream error"}}
 
 `
 		_, body, _, _, err := p.Process(strings.NewReader(stream), false, nil)
-		var streamErr *AnthropicStreamError
-		require.ErrorAs(t, err, &streamErr)
-		require.Equal(t, "api_error", streamErr.Type)
+		var streamErr *StreamOverloadedError
+		require.NotErrorAs(t, err, &streamErr)
+		var anthropicErr *anthropicStreamError
+		require.ErrorAs(t, err, &anthropicErr)
+		require.Equal(t, "api_error", anthropicErr.Type)
 		require.Empty(t, body)
 	})
 }

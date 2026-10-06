@@ -620,8 +620,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
 	if err != nil {
-		var streamErr *translator.AnthropicStreamError
-		if u.parent.stream && errors.As(err, &streamErr) && streamErr.Type == "overloaded_error" && len(newBody) > 0 {
+		var streamErr *translator.StreamOverloadedError
+		if u.parent.stream && errors.As(err, &streamErr) && len(newBody) > 0 {
 			if u.logger != nil {
 				u.logger.Warn("upstream returned an overload error in the response stream")
 			}
