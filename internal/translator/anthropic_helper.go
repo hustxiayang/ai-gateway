@@ -22,6 +22,7 @@ import (
 	openAIconstant "github.com/openai/openai-go/shared/constant"
 	"k8s.io/utils/ptr"
 
+	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
@@ -877,14 +878,12 @@ type anthropicStreamParser struct {
 	created         openai.JSONUNIXTime
 }
 
-// anthropicOverloadedErrorType is the error type of an Anthropic "error" stream event that reports an overload.
-const anthropicOverloadedErrorType = "overloaded_error"
+// overloadedErrorType is the error type of Anthropic's in-stream overload event. The gateway sends the same
+// type to clients, which match on it, so it must not change.
+const overloadedErrorType = "overloaded_error"
 
-// anthropicStreamError represents an error event received in an Anthropic SSE stream.
-type anthropicStreamError struct {
-	Type    string
-	Message string
-}
+// anthropicStreamError is the error of an Anthropic SSE error event.
+type anthropicStreamError anthropicschema.ErrorResponseMessage
 
 // Error implements error.
 func (e *anthropicStreamError) Error() string {
@@ -905,7 +904,7 @@ func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error
 	chunk, err := p.parseAndHandleEvent(eventBlock)
 	if err != nil {
 		var streamErr *anthropicStreamError
-		if errors.As(err, &streamErr) && streamErr.Type == anthropicOverloadedErrorType {
+		if errors.As(err, &streamErr) && streamErr.Type == overloadedErrorType {
 			if serializeErr := serializeOpenAIOverloadedStreamError(streamErr.Message, buf); serializeErr != nil {
 				return serializeErr
 			}
@@ -922,24 +921,12 @@ func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error
 	return nil
 }
 
-// openAIOverloadedErrorType is the error type that clients match on to detect a mid-stream overload.
-const openAIOverloadedErrorType = "overloaded_error"
-
 // serializeOpenAIOverloadedStreamError writes an OpenAI-style SSE error event for a mid-stream overload.
 func serializeOpenAIOverloadedStreamError(message string, buf *[]byte) error {
-	type streamErrorDetail struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	}
-	type streamErrorEnvelope struct {
-		Error streamErrorDetail `json:"error"`
-	}
-
-	errorBytes, err := json.Marshal(streamErrorEnvelope{
-		Error: streamErrorDetail{
-			Type:    openAIOverloadedErrorType,
-			Message: message,
-		},
+	errorBytes, err := json.Marshal(struct {
+		Error openai.ErrorType `json:"error"`
+	}{
+		Error: openai.ErrorType{Type: overloadedErrorType, Message: message},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal overloaded stream error: %w", err)
@@ -1329,11 +1316,11 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		return p.constructOpenAIChatCompletionChunk(&openai.ChatCompletionResponseChunkChoiceDelta{}, finishReason), nil
 
 	case string(constant.ValueOf[constant.Error]()):
-		var errEvent anthropic.ErrorResponse
+		var errEvent anthropicschema.ErrorResponse
 		if err := json.Unmarshal(data, &errEvent); err != nil {
 			return nil, fmt.Errorf("unparsable error event: %s", string(data))
 		}
-		return nil, &anthropicStreamError{Type: errEvent.Error.Type, Message: errEvent.Error.Message}
+		return nil, (*anthropicStreamError)(&errEvent.Error)
 
 	case "ping":
 		// Anthropic sends ping events periodically to keep the stream alive.
