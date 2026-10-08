@@ -556,7 +556,7 @@ func TestDecisionsEndpointSpec(t *testing.T) {
 }
 
 func TestDecisionsEndpointSpec_RedactSensitiveInfoFromRequest(t *testing.T) {
-	body := []byte(`{"model":"gpt-6-luna","input":"customer complaint","questions":[{"type":"choice","name":"department","instructions":"route this complaint","choices":[{"value":"billing","description":"payment issues"}]},{"type":"score","name":"severity","instructions":"score it","levels":[{"label":"critical","description":"no workaround"}]}]}`)
+	body := []byte(`{"model":"gpt-6-luna","input":"customer complaint","safety_identifier":"user-hash-123","questions":[{"type":"choice","name":"department","instructions":"route this complaint","choices":[{"value":"billing","description":"payment issues"}]},{"type":"score","name":"severity","instructions":"score it","levels":[{"label":"critical","description":"no workaround"}]}]}`)
 	_, req, _, _, err := DecisionsEndpointSpec{}.ParseBody(body, false)
 	require.NoError(t, err)
 	redacted, err := DecisionsEndpointSpec{}.RedactSensitiveInfoFromRequest(req)
@@ -569,6 +569,8 @@ func TestDecisionsEndpointSpec_RedactSensitiveInfoFromRequest(t *testing.T) {
 	require.NotContains(t, text, "customer complaint")
 	require.NotContains(t, text, "payment issues")
 	require.NotContains(t, text, "critical")
+	require.NotContains(t, text, "user-hash-123")
+	require.Contains(t, text, `"safety_identifier":"[REDACTED LENGTH=`)
 	require.Contains(t, text, `"model":"gpt-6-luna"`)
 	require.Contains(t, text, `"name":"department"`)
 }

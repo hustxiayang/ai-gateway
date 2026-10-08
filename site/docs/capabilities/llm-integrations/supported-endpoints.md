@@ -355,9 +355,9 @@ curl -H "Content-Type: application/json" \
 
 **Endpoint:** `POST /v1/decisions`
 
-**Status:** ✅ Supported for OpenAI backends
+**Status:** ✅ Supported for OpenAI backends (beta)
 
-**Description:** Evaluate shared text or image evidence against typed questions and return probabilities, fixed choices, or rubric scores. The request and response use the native OpenAI Decisions API format.
+**Description:** Evaluate shared text or image evidence against typed questions and return probabilities, fixed choices, or rubric scores. The request and response use the native OpenAI Decisions API format. OpenAI offers this API as a beta, so its request and response formats may change.
 
 **Features:**
 

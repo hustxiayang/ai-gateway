@@ -445,6 +445,7 @@ func (DecisionsEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, 
 func (DecisionsEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.DecisionRequest) (*openai.DecisionRequest, error) {
 	redacted := *req
 	redacted.Input = redactRawJSON(req.Input)
+	redacted.SafetyIdentifier = redaction.RedactString(req.SafetyIdentifier)
 	redacted.Questions = make([]openai.DecisionQuestion, len(req.Questions))
 	for i := range req.Questions {
 		q := req.Questions[i]
