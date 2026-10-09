@@ -166,6 +166,8 @@ type (
 	OpenAIImageGenerationTranslator = Translator[openai.ImageGenerationRequest, tracingapi.ImageGenerationSpan]
 	// OpenAIResponsesTranslator translates the OpenAI's /responses endpoint.
 	OpenAIResponsesTranslator = Translator[openai.ResponseRequest, tracingapi.ResponsesSpan]
+	// OpenAIDecisionsTranslator translates the OpenAI /v1/decisions endpoint.
+	OpenAIDecisionsTranslator = Translator[openai.DecisionRequest, tracingapi.DecisionsSpan]
 	// OpenAISpeechTranslator translates the OpenAI's /v1/audio/speech endpoint.
 	OpenAISpeechTranslator = Translator[openai.SpeechRequest, tracingapi.SpeechSpan]
 	// OpenAIAudioTranscriptionTranslator translates the OpenAI's /v1/audio/transcriptions endpoint.
