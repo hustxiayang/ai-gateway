@@ -28,6 +28,7 @@ import (
 	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
 )
 
@@ -345,6 +346,45 @@ func Test_newHTTPRoute(t *testing.T) {
 			require.Equal(t, expRules, httpRoute.Spec.Rules)
 		})
 	}
+}
+
+func Test_newHTTPRoute_OperationMatches(t *testing.T) {
+	prefixes, err := internalapi.ParseEndpointPrefixes("openai:/openai,anthropic:/claude")
+	require.NoError(t, err)
+	controller := NewAIGatewayRouteController(requireNewFakeClientWithIndexes(t), nil, logr.Discard(), nil, "/gateway", prefixes)
+	route := &aigv1b1.AIGatewayRoute{
+		Spec: aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{{
+			Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+				{
+					Operation: aigv1b1.AIGatewayRouteRuleMatchOperationChatCompletions,
+					Headers:   []gwapiv1.HTTPHeaderMatch{{Name: "x-ai-eg-model", Value: "qwen"}},
+				},
+				{Operation: aigv1b1.AIGatewayRouteRuleMatchOperationMessages},
+				{},
+			},
+		}}},
+	}
+	httpRoute := &gwapiv1.HTTPRoute{}
+	require.NoError(t, controller.newHTTPRoute(t.Context(), httpRoute, route))
+
+	matches := httpRoute.Spec.Rules[0].Matches
+	require.Len(t, matches, 3)
+	require.Equal(t, gwapiv1.PathMatchExact, *matches[0].Path.Type)
+	require.Equal(t, "/gateway/openai/v1/chat/completions", *matches[0].Path.Value)
+	require.Equal(t, route.Spec.Rules[0].Matches[0].Headers, matches[0].Headers)
+	require.Equal(t, gwapiv1.PathMatchExact, *matches[1].Path.Type)
+	require.Equal(t, "/gateway/claude/v1/messages", *matches[1].Path.Value)
+	require.Nil(t, matches[2].Path.Type)
+	require.Equal(t, "/gateway", *matches[2].Path.Value)
+}
+
+func Test_newHTTPRoute_UnsupportedOperation(t *testing.T) {
+	controller := NewAIGatewayRouteController(requireNewFakeClientWithIndexes(t), nil, logr.Discard(), nil, "/")
+	route := &aigv1b1.AIGatewayRoute{Spec: aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{{
+		Matches: []aigv1b1.AIGatewayRouteRuleMatch{{Operation: "unknown"}},
+	}}}}
+	err := controller.newHTTPRoute(t.Context(), &gwapiv1.HTTPRoute{}, route)
+	require.EqualError(t, err, `unsupported operation "unknown"`)
 }
 
 func TestAIGatewayRouteController_updateAIGatewayRouteStatus(t *testing.T) {

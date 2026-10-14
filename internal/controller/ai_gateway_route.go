@@ -64,6 +64,8 @@ type AIGatewayRouteController struct {
 	gatewayEventChan chan event.GenericEvent
 	// rootPrefix is the prefix for the root path of the AI Gateway.
 	rootPrefix string
+	// endpointPrefixes contains the per-API endpoint prefix configuration shared with ExtProc.
+	endpointPrefixes internalapi.EndpointPrefixes
 	// referenceGrantValidator validates cross-namespace references using ReferenceGrant.
 	referenceGrantValidator *referenceGrantValidator
 }
@@ -73,13 +75,19 @@ func NewAIGatewayRouteController(
 	client client.Client, kube kubernetes.Interface, logger logr.Logger,
 	gatewayEventChan chan event.GenericEvent,
 	rootPrefix string,
+	endpointPrefixes ...internalapi.EndpointPrefixes,
 ) *AIGatewayRouteController {
+	configuredEndpointPrefixes := internalapi.DefaultEndpointPrefixes()
+	if len(endpointPrefixes) > 0 {
+		configuredEndpointPrefixes = endpointPrefixes[0]
+	}
 	return &AIGatewayRouteController{
 		client:                  client,
 		kube:                    kube,
 		logger:                  logger,
 		gatewayEventChan:        gatewayEventChan,
 		rootPrefix:              rootPrefix,
+		endpointPrefixes:        configuredEndpointPrefixes,
 		referenceGrantValidator: newReferenceGrantValidator(client),
 	}
 }
@@ -332,9 +340,21 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 		}
 		var matches []gwapiv1.HTTPRouteMatch
 		for j := range rule.Matches {
+			match := &rule.Matches[j]
+			pathMatch := &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix}
+			if match.Operation != "" {
+				operationPath, ok := internalapi.EndpointPath(c.rootPrefix, c.endpointPrefixes, match.Operation)
+				if !ok {
+					return fmt.Errorf("unsupported operation %q", match.Operation)
+				}
+				pathMatch = &gwapiv1.HTTPPathMatch{
+					Type:  ptr.To(gwapiv1.PathMatchExact),
+					Value: ptr.To(operationPath),
+				}
+			}
 			matches = append(matches, gwapiv1.HTTPRouteMatch{
-				Headers: rule.Matches[j].Headers,
-				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
+				Headers: match.Headers,
+				Path:    pathMatch,
 			})
 		}
 		rules = append(rules, gwapiv1.HTTPRouteRule{

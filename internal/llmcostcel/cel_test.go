@@ -91,3 +91,46 @@ func TestEvaluateProgram(t *testing.T) {
 		}) // synctest.Test waits for all goroutines to complete.
 	})
 }
+
+func TestLongContextPricingExpression(t *testing.T) {
+	expr := "uint(input_tokens > uint(272000) ? " +
+		"(double(input_tokens - cached_input_tokens - cache_creation_input_tokens) * double(2) + " +
+		"double(cached_input_tokens) * double(0.2) + " +
+		"double(cache_creation_input_tokens) * double(2.5) + " +
+		"double(output_tokens) * double(3)) : " +
+		"(double(input_tokens - cached_input_tokens - cache_creation_input_tokens) * double(1) + " +
+		"double(cached_input_tokens) * double(0.1) + " +
+		"double(cache_creation_input_tokens) * double(1.25) + " +
+		"double(output_tokens) * double(2)))"
+
+	prog, err := NewProgram(expr)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		inputTokens uint32
+		want        uint64
+	}{
+		{name: "below threshold", inputTokens: 271_999, want: 187_199},
+		{name: "exactly at threshold", inputTokens: 272_000, want: 187_200},
+		{name: "above threshold", inputTokens: 272_001, want: 374_302},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, evalErr := EvaluateProgram(
+				prog,
+				"gpt-long-context",
+				"openai",
+				"gpt-long-context",
+				tt.inputTokens,
+				100_000,
+				20_000,
+				100,
+				0,
+				0,
+			)
+			require.NoError(t, evalErr)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}

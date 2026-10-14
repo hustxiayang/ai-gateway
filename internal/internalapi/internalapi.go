@@ -10,6 +10,7 @@ package internalapi
 import (
 	"fmt"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -274,6 +275,37 @@ type EndpointPrefixes struct {
 	TypeSafe string
 }
 
+type endpointDefinition struct {
+	prefix func(EndpointPrefixes) string
+	path   string
+}
+
+var endpointDefinitions = map[aigv1b1.AIGatewayRouteRuleMatchOperation]endpointDefinition{
+	aigv1b1.AIGatewayRouteRuleMatchOperationChatCompletions:      {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/chat/completions"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationCompletions:          {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/completions"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationEmbeddings:           {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/embeddings"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationResponses:            {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/responses"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationResponsesInputTokens: {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/responses/input_tokens"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationAudioSpeech:          {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/audio/speech"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationAudioTranscriptions:  {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/audio/transcriptions"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationAudioTranslations:    {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/audio/translations"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationImageGenerations:     {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/v1/images/generations"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationRerank:               {prefix: func(p EndpointPrefixes) string { return p.Cohere }, path: "/v2/rerank"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationSystemOne:            {prefix: func(p EndpointPrefixes) string { return p.TypeSafe }, path: "/v1/systemone"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationMessages:             {prefix: func(p EndpointPrefixes) string { return p.Anthropic }, path: "/v1/messages"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationTokenize:             {prefix: func(p EndpointPrefixes) string { return p.OpenAI }, path: "/tokenize"},
+	aigv1b1.AIGatewayRouteRuleMatchOperationMessagesCountTokens:  {prefix: func(p EndpointPrefixes) string { return p.Anthropic }, path: "/v1/messages/count_tokens"},
+}
+
+// EndpointPath returns the configured request path for an operation.
+func EndpointPath(rootPrefix string, prefixes EndpointPrefixes, operation aigv1b1.AIGatewayRouteRuleMatchOperation) (string, bool) {
+	endpoint, ok := endpointDefinitions[operation]
+	if !ok {
+		return "", false
+	}
+	return path.Join(rootPrefix, endpoint.prefix(prefixes), endpoint.path), true
+}
+
 // ParseEndpointPrefixes parses a comma-separated list of key:value pairs to populate EndpointPrefixes.
 //
 // Recognized keys (case-sensitive):
@@ -288,12 +320,7 @@ type EndpointPrefixes struct {
 //
 // Unknown keys cause an error; values must be non-empty.
 func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
-	out := EndpointPrefixes{
-		OpenAI:    "/",
-		Cohere:    "/cohere",
-		Anthropic: "/anthropic",
-		TypeSafe:  "/typesafe",
-	}
+	out := DefaultEndpointPrefixes()
 	if s == "" {
 		return out, nil
 	}
@@ -327,6 +354,16 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 		}
 	}
 	return out, nil
+}
+
+// DefaultEndpointPrefixes returns the endpoint prefix configuration used when no overrides are provided.
+func DefaultEndpointPrefixes() EndpointPrefixes {
+	return EndpointPrefixes{
+		OpenAI:    "/",
+		Cohere:    "/cohere",
+		Anthropic: "/anthropic",
+		TypeSafe:  "/typesafe",
+	}
 }
 
 // ModelNameHeaderKeyDefault is the default header key for the model name.

@@ -31,7 +31,10 @@ import (
 //
 // Exported for testing purposes.
 type InferencePoolController struct {
-	client                 client.Client
+	client client.Client
+	// reader bypasses the controller-runtime cache when computing parent status.
+	// Route events can be delivered before related cache entries become visible.
+	reader                 client.Reader
 	kube                   kubernetes.Interface
 	logger                 logr.Logger
 	inferencePoolEventChan chan event.GenericEvent
@@ -52,8 +55,17 @@ func NewInferencePoolController(
 	inferencePoolEventChan chan event.GenericEvent,
 	gatewayEventChan chan event.GenericEvent,
 ) *InferencePoolController {
+	return newInferencePoolController(client, client, kube, logger, inferencePoolEventChan, gatewayEventChan)
+}
+
+func newInferencePoolController(
+	client client.Client, reader client.Reader, kube kubernetes.Interface, logger logr.Logger,
+	inferencePoolEventChan chan event.GenericEvent,
+	gatewayEventChan chan event.GenericEvent,
+) *InferencePoolController {
 	return &InferencePoolController{
 		client:                 client,
+		reader:                 reader,
 		kube:                   kube,
 		logger:                 logger,
 		inferencePoolEventChan: inferencePoolEventChan,
@@ -80,10 +92,14 @@ func (c *InferencePoolController) Reconcile(ctx context.Context, req reconcile.R
 		if errors.Is(err, errEndpointPickerRefMissing) {
 			reason = string(gwaiev1.InferencePoolReasonEndpointPickerRefMissing)
 		}
-		c.updateInferencePoolStatus(ctx, &inferencePool, reason, err.Error())
+		if statusErr := c.updateInferencePoolStatus(ctx, &inferencePool, reason, err.Error()); statusErr != nil {
+			return ctrl.Result{}, errors.Join(err, statusErr)
+		}
 		return ctrl.Result{}, err
 	}
-	c.updateInferencePoolStatus(ctx, &inferencePool, "Accepted", "InferencePool reconciled successfully")
+	if err := c.updateInferencePoolStatus(ctx, &inferencePool, "Accepted", "InferencePool reconciled successfully"); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -95,7 +111,7 @@ func (c *InferencePoolController) syncInferencePool(ctx context.Context, inferen
 		return err
 	}
 
-	referencedGateways, err := c.getReferencedGateways(ctx, inferencePool)
+	referencedGateways, err := c.getReferencedGatewaysFrom(ctx, c.client, inferencePool)
 	if err != nil {
 		return err
 	}
@@ -123,24 +139,65 @@ func (c *InferencePoolController) routeReferencesInferencePool(route *aigv1b1.AI
 
 // getReferencedGateways returns all Gateways that reference the given InferencePool.
 func (c *InferencePoolController) getReferencedGateways(ctx context.Context, inferencePool *gwaiev1.InferencePool) (map[string]*gwapiv1.Gateway, error) {
-	// Find all Gateways across all namespaces.
+	return c.getReferencedGatewaysFrom(ctx, c.reader, inferencePool)
+}
+
+func (c *InferencePoolController) getReferencedGatewaysFrom(
+	ctx context.Context, reader client.Reader, inferencePool *gwaiev1.InferencePool,
+) (map[string]*gwapiv1.Gateway, error) {
 	var gateways gwapiv1.GatewayList
-	if err := c.client.List(ctx, &gateways); err != nil {
+	if err := reader.List(ctx, &gateways); err != nil {
 		return nil, fmt.Errorf("failed to list Gateways: %w", err)
+	}
+	gatewaysByKey := make(map[string]*gwapiv1.Gateway, len(gateways.Items))
+	for i := range gateways.Items {
+		gateway := &gateways.Items[i]
+		gatewaysByKey[fmt.Sprintf("%s/%s", gateway.Namespace, gateway.Name)] = gateway
 	}
 
 	referencedGateways := make(map[string]*gwapiv1.Gateway)
+	var aiGatewayRoutes aigv1b1.AIGatewayRouteList
+	if err := reader.List(ctx, &aiGatewayRoutes, client.InNamespace(inferencePool.Namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list AIGatewayRoutes: %w", err)
+	}
+	for i := range aiGatewayRoutes.Items {
+		route := &aiGatewayRoutes.Items[i]
+		if c.routeReferencesInferencePool(route, inferencePool.Name) {
+			addReferencedGateways(route.Spec.ParentRefs, route.Namespace, gatewaysByKey, referencedGateways)
+		}
+	}
 
-	// Check each Gateway to see if it references this InferencePool through routes.
-	for i := range gateways.Items {
-		gw := &gateways.Items[i]
-		if c.gatewayReferencesInferencePool(ctx, gw, inferencePool.Name, inferencePool.Namespace) {
-			gatewayKey := fmt.Sprintf("%s/%s", gw.Namespace, gw.Name)
-			referencedGateways[gatewayKey] = gw
+	var httpRoutes gwapiv1.HTTPRouteList
+	if err := reader.List(ctx, &httpRoutes, client.InNamespace(inferencePool.Namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list HTTPRoutes: %w", err)
+	}
+	for i := range httpRoutes.Items {
+		route := &httpRoutes.Items[i]
+		if c.httpRouteReferencesInferencePool(route, inferencePool.Name) {
+			addReferencedGateways(route.Spec.ParentRefs, route.Namespace, gatewaysByKey, referencedGateways)
 		}
 	}
 
 	return referencedGateways, nil
+}
+
+func addReferencedGateways(
+	parentRefs []gwapiv1.ParentReference,
+	routeNamespace string,
+	gatewaysByKey map[string]*gwapiv1.Gateway,
+	referencedGateways map[string]*gwapiv1.Gateway,
+) {
+	for i := range parentRefs {
+		parentRef := &parentRefs[i]
+		namespace := routeNamespace
+		if parentRef.Namespace != nil {
+			namespace = string(*parentRef.Namespace)
+		}
+		key := fmt.Sprintf("%s/%s", namespace, parentRef.Name)
+		if gateway, ok := gatewaysByKey[key]; ok {
+			referencedGateways[key] = gateway
+		}
+	}
 }
 
 // validateExtensionReference checks if the ExtensionReference service exists.
@@ -253,15 +310,14 @@ func (c *InferencePoolController) httpRouteReferencesInferencePool(route *gwapiv
 }
 
 // updateInferencePoolStatus updates the status of the InferencePool.
-func (c *InferencePoolController) updateInferencePoolStatus(ctx context.Context, inferencePool *gwaiev1.InferencePool, conditionType string, message string) {
+func (c *InferencePoolController) updateInferencePoolStatus(ctx context.Context, inferencePool *gwaiev1.InferencePool, conditionType string, message string) error {
 	// Check if this is an ExtensionReference validation error.
 	isExtensionRefError := conditionType == "NotAccepted" &&
 		(strings.Contains(message, "ExtensionReference service") && strings.Contains(message, "not found"))
 	// Get the referenced Gateways from syncInferencePool logic.
 	referencedGateways, err := c.getReferencedGateways(ctx, inferencePool)
 	if err != nil {
-		c.logger.Error(err, "failed to get referenced Gateways for status update")
-		return
+		return fmt.Errorf("failed to get referenced Gateways for status update: %w", err)
 	}
 
 	// Build Parents status.
@@ -305,8 +361,9 @@ func (c *InferencePoolController) updateInferencePoolStatus(ctx context.Context,
 
 	inferencePool.Status.Parents = parents
 	if err := c.client.Status().Update(ctx, inferencePool); err != nil {
-		c.logger.Error(err, "failed to update InferencePool status")
+		return fmt.Errorf("failed to update InferencePool status: %w", err)
 	}
+	return nil
 }
 
 // buildAcceptedCondition builds a condition for the InferencePool status.

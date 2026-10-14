@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 )
 
 func TestParseEndpointPrefixes_Success(t *testing.T) {
@@ -53,6 +55,31 @@ func TestParseEndpointPrefixes_EmptyPair(t *testing.T) {
 	_, err := ParseEndpointPrefixes("openai:/,,cohere:/cohere")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty endpointPrefixes pair at position 2")
+}
+
+func TestEndpointPath(t *testing.T) {
+	prefixes, err := ParseEndpointPrefixes("openai:/openai,anthropic:/claude,cohere:/co,typesafe:/typed")
+	require.NoError(t, err)
+
+	tests := []struct {
+		operation aigv1b1.AIGatewayRouteRuleMatchOperation
+		expected  string
+	}{
+		{aigv1b1.AIGatewayRouteRuleMatchOperationChatCompletions, "/gateway/openai/v1/chat/completions"},
+		{aigv1b1.AIGatewayRouteRuleMatchOperationMessages, "/gateway/claude/v1/messages"},
+		{aigv1b1.AIGatewayRouteRuleMatchOperationRerank, "/gateway/co/v2/rerank"},
+		{aigv1b1.AIGatewayRouteRuleMatchOperationSystemOne, "/gateway/typed/v1/systemone"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.operation), func(t *testing.T) {
+			actual, ok := EndpointPath("/gateway", prefixes, tt.operation)
+			require.True(t, ok)
+			require.Equal(t, tt.expected, actual)
+		})
+	}
+
+	_, ok := EndpointPath("/gateway", prefixes, "unknown")
+	require.False(t, ok)
 }
 
 func TestPerRouteRuleRefBackendName(t *testing.T) {

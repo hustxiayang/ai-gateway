@@ -749,6 +749,27 @@ spec:
                             x-kubernetes-list-map-keys:
                             - name
                             x-kubernetes-list-type: map
+                          operation:
+                            description: |-
+                              Operation specifies the AI API operation to match. When set, the generated HTTPRoute
+                              matches the exact configured endpoint path for this operation. When unset, the route
+                              continues to match the AI Gateway root prefix.
+                            enum:
+                            - chat/completions
+                            - completions
+                            - embeddings
+                            - responses
+                            - responses/input_tokens
+                            - audio/speech
+                            - audio/transcriptions
+                            - audio/translations
+                            - images/generations
+                            - rerank
+                            - systemone
+                            - messages
+                            - tokenize
+                            - messages/count_tokens
+                            type: string
                         type: object
                       maxItems: 128
                       type: array
@@ -1687,6 +1708,27 @@ spec:
                             x-kubernetes-list-map-keys:
                             - name
                             x-kubernetes-list-type: map
+                          operation:
+                            description: |-
+                              Operation specifies the AI API operation to match. When set, the generated HTTPRoute
+                              matches the exact configured endpoint path for this operation. When unset, the route
+                              continues to match the AI Gateway root prefix.
+                            enum:
+                            - chat/completions
+                            - completions
+                            - embeddings
+                            - responses
+                            - responses/input_tokens
+                            - audio/speech
+                            - audio/transcriptions
+                            - audio/translations
+                            - images/generations
+                            - rerank
+                            - systemone
+                            - messages
+                            - tokenize
+                            - messages/count_tokens
+                            type: string
                         type: object
                       maxItems: 128
                       type: array

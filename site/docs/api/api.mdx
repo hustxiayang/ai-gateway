@@ -561,6 +561,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [AIGatewayRouteRule](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterule)
 - [AIGatewayRouteRuleBackendRef](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulebackendref)
 - [AIGatewayRouteRuleMatch](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulematch)
+- [AIGatewayRouteRuleMatchOperation](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulematchoperation)
 - [AIGatewayRouteSpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayroutespec)
 - [AIGatewayRouteStatus](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayroutestatus)
 - [AIServiceBackendSpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aiservicebackendspec)
@@ -759,6 +760,11 @@ It can reference either an AIServiceBackend or an InferencePool resource.
 
 
 <ApiField
+  name="operation"
+  type="[AIGatewayRouteRuleMatchOperation](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulematchoperation)"
+  required="false"
+  description="Operation specifies the AI API operation to match. When set, the generated HTTPRoute<br />matches the exact configured endpoint path for this operation. When unset, the route<br />continues to match the AI Gateway root prefix."
+/><ApiField
   name="headers"
   type="[HTTPHeaderMatch](https://gateway-api.sigs.k8s.io/reference/spec/?h=httproutetimeouts#httpheadermatch) array"
   required="false"
@@ -766,6 +772,90 @@ It can reference either an AIServiceBackend or an InferencePool resource.
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulematchoperation">AIGatewayRouteRuleMatchOperation</a>
+
+**Underlying type:** string
+
+**Appears in:**
+- [AIGatewayRouteRuleMatch](#github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayrouterulematch)
+
+AIGatewayRouteRuleMatchOperation identifies an AI API operation that can be selected by a route match.
+
+
+
+##### Possible Values
+
+<ApiField
+  name="chat/completions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="completions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="embeddings"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="responses"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="responses/input_tokens"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/speech"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/transcriptions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/translations"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="images/generations"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="rerank"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="systemone"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="messages"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="tokenize"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="messages/count_tokens"
+  type="enum"
+  required="false"
+  description=""
+/>
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-aigatewayroutespec">AIGatewayRouteSpec</a>
 
 
@@ -3141,6 +3231,7 @@ MCPRouteList contains a list of MCPRoute.
 - [AIGatewayRouteRule](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterule)
 - [AIGatewayRouteRuleBackendRef](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulebackendref)
 - [AIGatewayRouteRuleMatch](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematch)
+- [AIGatewayRouteRuleMatchOperation](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematchoperation)
 - [AIGatewayRouteSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayroutespec)
 - [AIGatewayRouteStatus](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayroutestatus)
 - [AIServiceBackendSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-aiservicebackendspec)
@@ -3339,6 +3430,11 @@ It can reference either an AIServiceBackend or an InferencePool resource.
 
 
 <ApiField
+  name="operation"
+  type="[AIGatewayRouteRuleMatchOperation](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematchoperation)"
+  required="false"
+  description="Operation specifies the AI API operation to match. When set, the generated HTTPRoute<br />matches the exact configured endpoint path for this operation. When unset, the route<br />continues to match the AI Gateway root prefix."
+/><ApiField
   name="headers"
   type="[HTTPHeaderMatch](https://gateway-api.sigs.k8s.io/reference/spec/?h=httproutetimeouts#httpheadermatch) array"
   required="false"
@@ -3346,6 +3442,90 @@ It can reference either an AIServiceBackend or an InferencePool resource.
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematchoperation">AIGatewayRouteRuleMatchOperation</a>
+
+**Underlying type:** string
+
+**Appears in:**
+- [AIGatewayRouteRuleMatch](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematch)
+
+AIGatewayRouteRuleMatchOperation identifies an AI API operation that can be selected by a route match.
+
+
+
+##### Possible Values
+
+<ApiField
+  name="chat/completions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="completions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="embeddings"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="responses"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="responses/input_tokens"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/speech"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/transcriptions"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="audio/translations"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="images/generations"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="rerank"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="systemone"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="messages"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="tokenize"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="messages/count_tokens"
+  type="enum"
+  required="false"
+  description=""
+/>
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayroutespec">AIGatewayRouteSpec</a>
 
 

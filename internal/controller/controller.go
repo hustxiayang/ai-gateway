@@ -41,6 +41,7 @@ import (
 
 	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/ratelimit/runner"
 )
 
@@ -149,8 +150,12 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	aiGatewayRouteEventChan := make(chan event.GenericEvent, 100)
+	endpointPrefixes, err := internalapi.ParseEndpointPrefixes(options.EndpointPrefixes)
+	if err != nil {
+		return fmt.Errorf("failed to parse endpoint prefixes: %w", err)
+	}
 	routeC := NewAIGatewayRouteController(c, kubernetes.NewForConfigOrDie(config), logger.WithName("ai-gateway-route"),
-		gatewayEventChan, options.RootPrefix,
+		gatewayEventChan, options.RootPrefix, endpointPrefixes,
 	)
 	if err = TypedControllerBuilderForCRD(mgr, &aigv1b1.AIGatewayRoute{}).
 		Owns(&gwapiv1.HTTPRoute{}).
@@ -204,7 +209,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 		}
 	} else {
 		// CRD exists, create the controller.
-		inferencePoolC := NewInferencePoolController(c, kubernetes.NewForConfigOrDie(config), logger.
+		inferencePoolC := newInferencePoolController(c, mgr.GetAPIReader(), kubernetes.NewForConfigOrDie(config), logger.
 			WithName("inference-pool"), inferencePoolEventChan, gatewayEventChan)
 		if err = TypedControllerBuilderForCRD(mgr, &gwaiev1.InferencePool{}).
 			Watches(&gwapiv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(inferencePoolC.gatewayEventHandler)).

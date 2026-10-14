@@ -83,13 +83,15 @@ func StartTestEnvironment(t testing.TB,
 	extprocConfig string, extprocEnv []string, envoyConfig string, okToDumpLogOnFailure, extProcInProcess bool,
 	mcpWriteTimeout time.Duration, extprocArgs ...string,
 ) *TestEnvironment {
-	// Get random ports for all services.
-	const defaultPortCount = 5
-	ports := internaltesting.RequireRandomPorts(t, defaultPortCount+len(miscPortDefauls))
+	// Allocate each service's ports immediately before starting it. Random ports
+	// are released by RequireRandomPorts before they are rebound by the service,
+	// so allocating every port up front leaves the later services vulnerable to
+	// another process claiming their ports in the meantime.
+	ports := internaltesting.RequireRandomPorts(t, len(miscPortDefauls))
 	miscPorts := make(map[string]int)
 	index := 0
 	for key := range miscPortDefauls {
-		miscPorts[key] = ports[defaultPortCount+index]
+		miscPorts[key] = ports[index]
 		index++
 	}
 
@@ -105,27 +107,20 @@ func StartTestEnvironment(t testing.TB,
 	}
 
 	env := &TestEnvironment{
-		extprocConfig:     extprocConfig,
-		extprocEnv:        extprocEnv,
-		extProcPort:       ports[0],
-		extProcAdminPort:  ports[1],
-		extProcMCPPort:    ports[2],
-		envoyConfig:       envoyConfig,
-		envoyListenerPort: ports[3],
-		envoyAdminPort:    ports[4],
-		upstreamOut:       buffers[0],
-		extprocOut:        buffers[1],
-		envoyStdout:       buffers[2],
-		envoyStderr:       buffers[3],
-		mcpWriteTimeout:   mcpWriteTimeout,
-		miscPorts:         miscPorts,
-		miscPortDefaults:  miscPortDefauls,
+		extprocConfig:    extprocConfig,
+		extprocEnv:       extprocEnv,
+		envoyConfig:      envoyConfig,
+		upstreamOut:      buffers[0],
+		extprocOut:       buffers[1],
+		envoyStdout:      buffers[2],
+		envoyStderr:      buffers[3],
+		mcpWriteTimeout:  mcpWriteTimeout,
+		miscPorts:        miscPorts,
+		miscPortDefaults: miscPortDefauls,
 	}
 
-	t.Logf("Starting test environment with ports: extproc=%d, envoyListener=%d, envoyAdmin=%d misc=%v",
-		env.extProcPort, env.envoyListenerPort, env.envoyAdminPort, env.miscPorts)
-
 	// The startup order is required: upstream, extProc, then envoy.
+	t.Logf("Starting upstream with ports: misc=%v", env.miscPorts)
 	requireNewUpstream(t, env.upstreamOut, env.miscPorts)
 
 	// Replaces ports in extProcConfig.
@@ -139,6 +134,10 @@ func StartTestEnvironment(t testing.TB,
 	env.extprocConfig = processedExtProcConfig
 
 	// Start ExtProc.
+	ports = internaltesting.RequireRandomPorts(t, 3)
+	env.extProcPort, env.extProcAdminPort, env.extProcMCPPort = ports[0], ports[1], ports[2]
+	t.Logf("Starting ExtProc with ports: extproc=%d, admin=%d, mcp=%d",
+		env.extProcPort, env.extProcAdminPort, env.extProcMCPPort)
 	requireExtProc(t,
 		env.extprocOut,
 		env.extprocConfig,
@@ -152,6 +151,9 @@ func StartTestEnvironment(t testing.TB,
 	)
 
 	// Start Envoy mapping its testupstream port 8080 to the ephemeral one.
+	ports = internaltesting.RequireRandomPorts(t, 2)
+	env.envoyListenerPort, env.envoyAdminPort = ports[0], ports[1]
+	t.Logf("Starting Envoy with ports: listener=%d, admin=%d", env.envoyListenerPort, env.envoyAdminPort)
 	requireEnvoy(t,
 		env.envoyStdout,
 		env.envoyStderr,

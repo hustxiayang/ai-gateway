@@ -408,6 +408,14 @@ type AIGatewayRouteRuleBackendRef struct {
 }
 
 type AIGatewayRouteRuleMatch struct {
+	// Operation specifies the AI API operation to match. When set, the generated HTTPRoute
+	// matches the exact configured endpoint path for this operation. When unset, the route
+	// continues to match the AI Gateway root prefix.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=chat/completions;completions;embeddings;responses;responses/input_tokens;audio/speech;audio/transcriptions;audio/translations;images/generations;rerank;systemone;messages;tokenize;messages/count_tokens
+	Operation AIGatewayRouteRuleMatchOperation `json:"operation,omitempty"`
+
 	// Headers specifies HTTP request header matchers. See HeaderMatch in the Gateway API for the details:
 	// https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPHeaderMatch
 	//
@@ -417,6 +425,26 @@ type AIGatewayRouteRuleMatch struct {
 	// +kubebuilder:validation:MaxItems=16
 	Headers []gwapiv1.HTTPHeaderMatch `json:"headers,omitempty"`
 }
+
+// AIGatewayRouteRuleMatchOperation identifies an AI API operation that can be selected by a route match.
+type AIGatewayRouteRuleMatchOperation string
+
+const (
+	AIGatewayRouteRuleMatchOperationChatCompletions      AIGatewayRouteRuleMatchOperation = "chat/completions"
+	AIGatewayRouteRuleMatchOperationCompletions          AIGatewayRouteRuleMatchOperation = "completions"
+	AIGatewayRouteRuleMatchOperationEmbeddings           AIGatewayRouteRuleMatchOperation = "embeddings"
+	AIGatewayRouteRuleMatchOperationResponses            AIGatewayRouteRuleMatchOperation = "responses"
+	AIGatewayRouteRuleMatchOperationResponsesInputTokens AIGatewayRouteRuleMatchOperation = "responses/input_tokens"
+	AIGatewayRouteRuleMatchOperationAudioSpeech          AIGatewayRouteRuleMatchOperation = "audio/speech"
+	AIGatewayRouteRuleMatchOperationAudioTranscriptions  AIGatewayRouteRuleMatchOperation = "audio/transcriptions"
+	AIGatewayRouteRuleMatchOperationAudioTranslations    AIGatewayRouteRuleMatchOperation = "audio/translations"
+	AIGatewayRouteRuleMatchOperationImageGenerations     AIGatewayRouteRuleMatchOperation = "images/generations"
+	AIGatewayRouteRuleMatchOperationRerank               AIGatewayRouteRuleMatchOperation = "rerank"
+	AIGatewayRouteRuleMatchOperationSystemOne            AIGatewayRouteRuleMatchOperation = "systemone"
+	AIGatewayRouteRuleMatchOperationMessages             AIGatewayRouteRuleMatchOperation = "messages"
+	AIGatewayRouteRuleMatchOperationTokenize             AIGatewayRouteRuleMatchOperation = "tokenize"
+	AIGatewayRouteRuleMatchOperationMessagesCountTokens  AIGatewayRouteRuleMatchOperation = "messages/count_tokens"
+)
 
 // HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will be applied to the request
 type HTTPBodyMutation struct {
