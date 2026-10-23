@@ -367,6 +367,257 @@ func TestThinkingUnion_UnmarshalJSON_Errors(t *testing.T) {
 	}
 }
 
+func TestResponseToolUnion_Namespace_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		expect ResponseToolUnion
+	}{
+		{
+			name: "namespace with function tools",
+			data: `{"type":"namespace","name":"crm","description":"CRM tools","tools":[{"type":"function","name":"get_contact","description":"Fetch a contact","parameters":{"type":"object"}}]}`,
+			expect: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "crm",
+					Description: "CRM tools",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfFunction: &NamespaceToolToolFunctionParam{
+							Type:        "function",
+							Name:        "get_contact",
+							Description: "Fetch a contact",
+							Parameters:  map[string]any{"type": "object"},
+						}},
+					},
+				},
+			},
+		},
+		{
+			name: "namespace with custom tool",
+			data: `{"type":"namespace","name":"myns","description":"desc","tools":[{"type":"custom","name":"my_tool","description":"a custom tool"}]}`,
+			expect: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "myns",
+					Description: "desc",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfCustom: &CustomToolParam{
+							Type:        "custom",
+							Name:        "my_tool",
+							Description: "a custom tool",
+						}},
+					},
+				},
+			},
+		},
+		{
+			name: "namespace tool without type field defaults to function",
+			data: `{"type":"namespace","name":"ns","description":"d","tools":[{"name":"implicit_fn"}]}`,
+			expect: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "ns",
+					Description: "d",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfFunction: &NamespaceToolToolFunctionParam{Name: "implicit_fn"}},
+					},
+				},
+			},
+		},
+		{
+			name: "namespace with defer_loading function",
+			data: `{"type":"namespace","name":"ns","description":"d","tools":[{"type":"function","name":"deferred","defer_loading":true}]}`,
+			expect: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "ns",
+					Description: "d",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfFunction: &NamespaceToolToolFunctionParam{
+							Type:         "function",
+							Name:         "deferred",
+							DeferLoading: func() *bool { b := true; return &b }(),
+						}},
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got ResponseToolUnion
+			err := json.Unmarshal([]byte(tc.data), &got)
+			require.NoError(t, err)
+			require.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+func TestResponseToolUnion_Namespace_MarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  ResponseToolUnion
+		expect string
+	}{
+		{
+			name: "namespace with function tool",
+			input: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "crm",
+					Description: "CRM tools",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfFunction: &NamespaceToolToolFunctionParam{
+							Type:        "function",
+							Name:        "get_contact",
+							Description: "Fetch a contact",
+						}},
+					},
+				},
+			},
+			expect: `{"type":"namespace","name":"crm","description":"CRM tools","tools":[{"name":"get_contact","type":"function","description":"Fetch a contact"}]}`,
+		},
+		{
+			name: "namespace with custom tool",
+			input: ResponseToolUnion{
+				OfNamespace: &NamespaceToolParam{
+					Type:        "namespace",
+					Name:        "myns",
+					Description: "desc",
+					Tools: []NamespaceToolToolUnionParam{
+						{OfCustom: &CustomToolParam{
+							Type:        "custom",
+							Name:        "my_tool",
+							Description: "a custom tool",
+						}},
+					},
+				},
+			},
+			expect: `{"type":"namespace","name":"myns","description":"desc","tools":[{"type":"custom","name":"my_tool","description":"a custom tool"}]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.input)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.expect, string(got))
+		})
+	}
+}
+
+func TestResponseToolUnion_ToolSearch_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		expect ResponseToolUnion
+	}{
+		{
+			name: "tool_search server execution",
+			data: `{"type":"tool_search","execution":"server"}`,
+			expect: ResponseToolUnion{
+				OfToolSearch: &ToolSearchToolParam{
+					Type:      "tool_search",
+					Execution: "server",
+				},
+			},
+		},
+		{
+			name: "tool_search client execution with description and parameters",
+			data: `{"type":"tool_search","execution":"client","description":"search tools","parameters":{"type":"object"}}`,
+			expect: ResponseToolUnion{
+				OfToolSearch: &ToolSearchToolParam{
+					Type:        "tool_search",
+					Execution:   "client",
+					Description: "search tools",
+					Parameters:  map[string]any{"type": "object"},
+				},
+			},
+		},
+		{
+			name: "tool_search minimal",
+			data: `{"type":"tool_search"}`,
+			expect: ResponseToolUnion{
+				OfToolSearch: &ToolSearchToolParam{
+					Type: "tool_search",
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got ResponseToolUnion
+			err := json.Unmarshal([]byte(tc.data), &got)
+			require.NoError(t, err)
+			require.Equal(t, tc.expect, got)
+		})
+	}
+}
+
+func TestResponseToolUnion_ToolSearch_MarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  ResponseToolUnion
+		expect string
+	}{
+		{
+			name: "tool_search server",
+			input: ResponseToolUnion{
+				OfToolSearch: &ToolSearchToolParam{
+					Type:      "tool_search",
+					Execution: "server",
+				},
+			},
+			expect: `{"type":"tool_search","execution":"server","parameters":null}`,
+		},
+		{
+			name: "tool_search client with description",
+			input: ResponseToolUnion{
+				OfToolSearch: &ToolSearchToolParam{
+					Type:        "tool_search",
+					Execution:   "client",
+					Description: "search tools",
+				},
+			},
+			expect: `{"type":"tool_search","execution":"client","description":"search tools","parameters":null}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.input)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.expect, string(got))
+		})
+	}
+}
+
+func TestResponseRequest_UnmarshalJSON_UnknownToolType(t *testing.T) {
+	const body = `{"model":"gpt-5","input":"hi","tools":[` +
+		`{"type":"function","name":"get_weather","parameters":{},"strict":true},` +
+		`{"type":"some_future_tool","execution":"client"}` +
+		`]}`
+
+	var req ResponseRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	require.Len(t, req.Tools, 2)
+
+	require.NotNil(t, req.Tools[0].OfFunction)
+	require.Equal(t, "get_weather", req.Tools[0].OfFunction.Name)
+
+	require.Nil(t, req.Tools[1].OfFunction)
+	require.JSONEq(t, `{"type":"some_future_tool","execution":"client"}`, string(req.Tools[1].OfUnknown))
+}
+
+func TestResponseToolUnion_UnmarshalJSON_UnknownType(t *testing.T) {
+	const raw = `{"type":"unknown_tool","execution":"client"}`
+	var got ResponseToolUnion
+	require.NoError(t, json.Unmarshal([]byte(raw), &got))
+	require.Equal(t, json.RawMessage(raw), got.OfUnknown)
+
+	out, err := json.Marshal(got)
+	require.NoError(t, err)
+	require.JSONEq(t, raw, string(out))
+}
+
 func TestThinkingUnion_MarshalJSON(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -419,6 +670,42 @@ func TestThinkingUnion_MarshalJSON(t *testing.T) {
 			got, err := json.Marshal(&tc.input)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.expect, string(got))
+		})
+	}
+}
+
+func TestStreamReasoningContent_MarshalJSON(t *testing.T) {
+	// reasoning_content on streaming chunks must serialize as a plain string;
+	// Signature and RedactedContent are carried via delta.thinking_blocks instead.
+	got, err := json.Marshal(&StreamReasoningContent{
+		Text: "thinking...", Signature: "c2ln", RedactedContent: []byte("x"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, `"thinking..."`, string(got))
+}
+
+func TestStreamReasoningContent_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		expect StreamReasoningContent
+	}{
+		{
+			name:   "plain string (OpenAI-compatible backends)",
+			data:   `"thinking..."`,
+			expect: StreamReasoningContent{Text: "thinking..."},
+		},
+		{
+			name:   "legacy object form",
+			data:   `{"text":"thinking...","signature":"c2ln"}`,
+			expect: StreamReasoningContent{Text: "thinking...", Signature: "c2ln"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got StreamReasoningContent
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &got))
+			require.Equal(t, tc.expect, got)
 		})
 	}
 }

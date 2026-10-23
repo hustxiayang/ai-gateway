@@ -12,8 +12,10 @@ import (
 )
 
 // QuotaPolicy specifies token quota configuration for inference services.
-// Providing a list of backends in the AIGatewayRouteRule allows failover to a different service
-// if token quota for a service had been exceeded.
+// Generates rate limit configuration and tracks quota usage.
+// Reject requests with 429 once all related quota to that request has been exceeded.
+//
+// TODO: Waiting on next release of Envoyproxy that will support routing based on non-exceeded quotas.
 //
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -31,14 +33,23 @@ type QuotaPolicy struct {
 
 // QuotaPolicySpec specifies rules for computing token based costs of requests.
 type QuotaPolicySpec struct {
-	// TargetRefs are the names of the AIServiceBackend resources this QuotaPolicy is being attached to.
+	// TargetRefs are the AIServiceBackend resources this QuotaPolicy is being attached to.
+	//
+	// The namespace of each target defaults to the QuotaPolicy's namespace when omitted.
+	// Cross-namespace references are supported by setting namespace explicitly. When the
+	// target namespace differs from the QuotaPolicy's namespace, a ReferenceGrant in the
+	// AIServiceBackend's namespace must authorize QuotaPolicy from the policy namespace to
+	// reference AIServiceBackend. Same-namespace references do not require a ReferenceGrant.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(ref, ref.group == 'aigateway.envoyproxy.io' && ref.kind == 'AIServiceBackend')", message="targetRefs must reference AIServiceBackend resources"
-	TargetRefs []gwapiv1a2.LocalPolicyTargetReference `json:"targetRefs,omitempty"`
+	TargetRefs []gwapiv1a2.NamespacedPolicyTargetReference `json:"targetRefs,omitempty"`
 	// Quota for all models served by AIServiceBackend(s). This value can be overridden for specific models using the "PerModelQuotas"
 	// configuration.
+	//
+	// Currently, the rate limit configuration is properly set up, but the descriptor set is not being set in the Envoy Configuration
+	// TODO: Add changes in the extension server to support ServiceQuota enforcement.
 	//
 	// +optional
 	ServiceQuota ServiceQuotaDefinition `json:"serviceQuota,omitempty"`
@@ -55,11 +66,14 @@ type QuotaPolicySpec struct {
 }
 
 type ServiceQuotaDefinition struct {
+	// ServiceQuota is not currently enforced by the extension server. This
+	// includes FromMetadata on Quota; it is accepted for API consistency with
+	// per-model quotas but has no effect until service-quota enforcement lands.
 	// CostExpression specifies a CEL expression for computing the quota burndown of the LLM-related request.
 	// If no expression is specified the "total_tokens" value is used.
 	// For example:
 	//
-	//  * "input_tokens + cached_input_tokens * 0.1 + output_tokens * 6"
+	//  "input_tokens + cached_input_tokens + output_tokens"
 	//
 	// +optional
 	CostExpression *string `json:"costExpression,omitempty"`
@@ -90,13 +104,13 @@ type QuotaDefinition struct {
 	// If no expression is specified the "total_tokens" value is used.
 	// For example:
 	//
-	//  * "input_tokens + cached_input_tokens * 0.1 + output_tokens * 6"
+	//  "input_tokens + cached_input_tokens + output_tokens"
 	//
 	// +optional
 	CostExpression *string `json:"costExpression,omitempty"`
 	// The "Mode" determines how quota is charged to the "DefaultBucket" and matching "BucketRules".
 	// In the "shared" mode the quota is charged to all matching "BucketRules" AND the "DefaultBucket"
-	// and request is allowed only if the quota is available in all matching buckets.
+	// and request is allowed only if the quota is available in at least one matching buckets.
 	// Defaults to "Shared".
 	//
 	// +optional
@@ -133,7 +147,7 @@ type QuotaRule struct {
 	// specific clients using attributes from the traffic flow.
 	// All individual select conditions must hold True for this rule
 	// and its limit to be applied.
-	//
+	// Currently, only header types are honored.
 	//
 	// If no client selectors are specified, the rule applies to all traffic of
 	// the targeted AIServiceBackend.
@@ -150,6 +164,8 @@ type QuotaRule struct {
 	// ShadowMode indicates whether this quota rule runs in shadow mode.
 	// When enabled, all quota checks are performed (cache lookups,
 	// counter updates, telemetry generation), but the outcome is never enforced.
+	// If Quota.FromMetadata is set, it still selects the effective limit and
+	// duration; ShadowMode only controls enforcement of that result.
 	// The request always succeeds, even if the configured quota is exceeded.
 	//
 	// +optional
@@ -159,11 +175,46 @@ type QuotaRule struct {
 // QuotaValue defines the quota limits using sliding window.
 type QuotaValue struct {
 	// The limit alloted for a specified time window.
-	Limit uint `json:"limit"`
-	// Time window. Must be exactly one of: "1s" (1 second), "1m" (1 minute), "1h" (1 hour), or "1d" (1 day).
 	//
-	// +kubebuilder:validation:Enum="1s";"1m";"1h";"1d"
+	// This is the static baseline used by the rate limit service when
+	// FromMetadata is absent or cannot be resolved.
+	//
+	// +kubebuilder:validation:Required
+	Limit uint `json:"limit"`
+	// Time window. Must be exactly one of: "1s" (1 second), "1m" (1 minute), "1h" (1 hour), "1d" (1 day), "1w" (1 week), "1mo" (1 month), or "1y" (1 year).
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum="1s";"1m";"1h";"1d";"1w";"1mo";"1y"
 	Duration string `json:"duration"`
+	// FromMetadata optionally overrides Limit and Duration for a request using
+	// a struct written to Envoy dynamic metadata by an earlier HTTP filter.
+	//
+	// The value must contain requests_per_unit and unit, where unit is an
+	// Envoy rate limit unit such as SECOND, MINUTE, HOUR, or DAY.
+	//
+	// +optional
+	FromMetadata *QuotaLimitFromMetadata `json:"fromMetadata,omitempty"`
+}
+
+// QuotaLimitFromMetadata identifies the dynamic metadata value used to
+// override a QuotaValue for an individual request.
+type QuotaLimitFromMetadata struct {
+	// Namespace is the dynamic metadata namespace written by the producer
+	// filter, for example "envoy.filters.http.ext_authz".
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._:-]+$`
+	Namespace string `json:"namespace"`
+	// Key is the dynamic metadata field key within the namespace that
+	// contains the Envoy rate limit override struct (requests_per_unit and unit).
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._:-]+$`
+	Key string `json:"key"`
 }
 
 // QuotaPolicyList contains a list of QuotaPolicy

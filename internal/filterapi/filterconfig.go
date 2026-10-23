@@ -12,6 +12,7 @@
 package filterapi
 
 import (
+	"log/slog"
 	"os"
 	"time"
 
@@ -140,6 +141,9 @@ type VersionedAPISchema struct {
 
 // OpenAIPrefix returns the OpenAI API prefix for the VersionedAPISchema.
 func (v VersionedAPISchema) OpenAIPrefix() string {
+	if v.Name == APISchemaAWSOpenAI && v.Prefix == "" {
+		return "openai/v1"
+	}
 	return v.Prefix
 }
 
@@ -177,6 +181,10 @@ const (
 	// Used for Claude models hosted on AWS Bedrock. Supports both OpenAI and Anthropic input formats
 	// depending on the endpoint path, similar to APISchemaGCPAnthropic.
 	APISchemaAWSAnthropic APISchemaName = "AWSAnthropic"
+	// APISchemaAWSOpenAI represents the AWS OpenAI-compatible API schema.
+	APISchemaAWSOpenAI APISchemaName = "AWSOpenAI"
+	// APISchemaTypeSafe represents the native TypeSafe AI System One API schema (Jev).
+	APISchemaTypeSafe APISchemaName = "TypeSafe"
 )
 
 // RouteRuleName is the name of the route rule.
@@ -186,8 +194,11 @@ type RouteRuleName string
 // besides that this abstracts the concept of a backend at Envoy Gateway level to a simple name.
 type Backend struct {
 	// Name of the backend including the route name as well as the route rule index.
-	Name              string                        `json:"name"`
-	ModelNameOverride internalapi.ModelNameOverride `json:"modelNameOverride"`
+	Name string `json:"name"`
+	// AIServiceBackendName is the canonical namespace/name identity of the
+	// referenced AIServiceBackend. Name remains route-specific for routing.
+	AIServiceBackendName string                        `json:"aiServiceBackendName,omitempty"`
+	ModelNameOverride    internalapi.ModelNameOverride `json:"modelNameOverride"`
 	// Schema specifies the API schema of the output format of requests from.
 	Schema VersionedAPISchema `json:"schema"`
 	// Auth is the authn/z configuration for the backend. Optional.
@@ -196,6 +207,9 @@ type Backend struct {
 	HeaderMutation *HTTPHeaderMutation `json:"httpHeaderMutation,omitempty"`
 	// Body mutations to be applied to the request before sending to the backend. Optional.
 	BodyMutation *HTTPBodyMutation `json:"httpBodyMutation,omitempty"`
+	// HeaderValueFilters filter individual values out of multi-valued request headers before sending
+	// the request to the backend. Optional.
+	HeaderValueFilters []HTTPHeaderValueFilter `json:"headerValueFilters,omitempty"`
 }
 
 // BackendAuth corresponds partially to BackendSecurityPolicy in api/v1alpha1/api.go.
@@ -212,6 +226,33 @@ type BackendAuth struct {
 	AzureAuth *AzureAuth `json:"azure,omitempty"`
 	// GCPAuth specifies the location of GCP credential file.
 	GCPAuth *GCPAuth `json:"gcp,omitempty"`
+	// CredentialOverride, when non-nil, sources the credential per-request instead of the
+	// static credential above. nil disables per-request sourcing (the default).
+	CredentialOverride *CredentialOverride `json:"credentialOverride,omitempty"`
+}
+
+// CredentialOverride configures per-request credential sourcing for a backend.
+// Exactly one of HeaderName or DynamicMetadataNamespace is set (resolved by the controller).
+type CredentialOverride struct {
+	// HeaderName is the request header that carries the per-request credential.
+	// Set for fromRequestHeaders source; empty for fromDynamicMetadata source.
+	// For AWS this is a prefix, not a full header name: see
+	// internalapi.AWSCredentialOverrideHeaderNames for the three names derived from it.
+	HeaderName string `json:"headerName,omitempty"`
+	// DynamicMetadataNamespace is the Envoy metadata namespace to read from.
+	// Set for fromDynamicMetadata source; empty for fromRequestHeaders source.
+	DynamicMetadataNamespace string `json:"dynamicMetadataNamespace,omitempty"`
+	// DynamicMetadataKey is the key within DynamicMetadataNamespace.
+	// For AWS the value is a struct with accessKeyId/secretAccessKey/sessionToken, not a string.
+	DynamicMetadataKey string `json:"dynamicMetadataKey,omitempty"`
+	// FallbackToConfigured controls behaviour when the source value is absent.
+	// true falls back to the static credential; false returns 401 to the caller.
+	FallbackToConfigured bool `json:"fallbackToConfigured"`
+	// InputHeadersToRemove are stripped before the request reaches the backend. Only set for the
+	// HeaderName source; one entry for every auth type except AWS, which has three.
+	// The controller adds these to HeaderMutation.Remove, so Envoy drops them upstream while they
+	// stay visible in the local requestHeaders map for the handler to read.
+	InputHeadersToRemove []string `json:"inputHeadersToRemove,omitempty"`
 }
 
 // AWSAuth defines the credentials needed to access AWS.
@@ -222,10 +263,23 @@ type AWSAuth struct {
 	Region                string `json:"region"`
 }
 
+// LogValue implements slog.LogValuer for AWSAuth to redact sensitive information.
+func (a AWSAuth) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("credentialFileLiteral", "[REDACTED]"),
+		slog.String("region", a.Region),
+	)
+}
+
 // APIKeyAuth defines the file that will be mounted to the external proc.
 type APIKeyAuth struct {
 	// Key is the API key as a literal string.
 	Key string `json:"key"`
+}
+
+// LogValue implements slog.LogValuer for APIKeyAuth to redact sensitive information.
+func (a APIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
 }
 
 // AzureAPIKeyAuth defines the Azure OpenAI API key.
@@ -234,16 +288,31 @@ type AzureAPIKeyAuth struct {
 	Key string `json:"key"`
 }
 
+// LogValue implements slog.LogValuer for AzureAPIKeyAuth to redact sensitive information.
+func (a AzureAPIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
+}
+
 // AnthropicAPIKeyAuth defines the Anthropic API key.
 type AnthropicAPIKeyAuth struct {
 	// Key is the Anthropic API key as a literal string.
 	Key string `json:"key"`
 }
 
+// LogValue implements slog.LogValuer for AnthropicAPIKeyAuth to redact sensitive information.
+func (a AnthropicAPIKeyAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("key", "[REDACTED]"))
+}
+
 // AzureAuth defines the file containing azure access token that will be mounted to the external proc.
 type AzureAuth struct {
 	// AccessToken is the access token as a literal string.
 	AccessToken string `json:"accessToken"`
+}
+
+// LogValue implements slog.LogValuer for AzureAuth to redact sensitive information.
+func (a AzureAuth) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("accessToken", "[REDACTED]"))
 }
 
 // GCPAuth defines the GCP authentication configuration used to access Google Cloud AI services.
@@ -260,6 +329,25 @@ type GCPAuth struct {
 	// This is used in URL path templates when making requests to GCP Vertex AI endpoints.
 	// This should be the project where Vertex AI APIs are enabled.
 	ProjectName string `json:"projectName"`
+}
+
+// LogValue implements slog.LogValuer for GCPAuth to redact sensitive information.
+func (g GCPAuth) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("accessToken", "[REDACTED]"),
+		slog.String("region", g.Region),
+		slog.String("projectName", g.ProjectName),
+	)
+}
+
+// HTTPHeaderValueFilter filters individual values out of a multi-valued request header before
+// forwarding upstream. Mode is either "Denylist" (drop the listed Values) or "Allowlist" (keep only
+// the listed Values).
+type HTTPHeaderValueFilter struct {
+	// Name is the lower-cased name of the header whose values are filtered.
+	Name   string   `json:"name"`
+	Mode   string   `json:"mode"`
+	Values []string `json:"values,omitempty"`
 }
 
 // HTTPHeaderMutation defines the mutation of HTTP headers that will be applied to the request
@@ -280,6 +368,14 @@ type HTTPHeader struct {
 	Name string `json:"name"`
 	// Value is the value of HTTP Header to be matched.
 	Value string `json:"value"`
+}
+
+// LogValue implements slog.LogValuer for HTTPHeader to redact sensitive information.
+func (h HTTPHeader) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("name", h.Name),
+		slog.String("value", "[REDACTED]"),
+	)
 }
 
 // HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will be applied to the request

@@ -46,6 +46,12 @@ Migration paths for alpha versions will be the best effort and will be documente
 **For stable versions**, we will never break the APIs unless there is a critical security issue.
 We will provide a migration path in the release notes in case we need to break the APIs.
 
+As of the v1.0.0 release, `v1beta1` is the committed **stable** control-plane API and is
+covered by the stable-version guarantee above. The `v1alpha1` API remains served but
+deprecated, and will be removed in a future release per the deprecation policy. Note that
+`QuotaPolicy` is `v1alpha1`-only and is therefore **not** part of the stable surface; in
+particular, its `serviceQuota` field is accepted but not yet enforced end-to-end.
+
 ### Upgrading the Envoy AI Gateway controller
 
 We guarantee that simply upgrading the controller will not break the existing configuration assuming there's no _un-migrated_ resources including breaking change left in the k8s API server. In other words, after the proper use of the API and migration path described above, the user should be able to upgrade the controller without any issue. However, this does mean that we do NOT guarantee that the existing configuration will work across more than two version of the controller. For example if you are using the version N of the controller, and you want to upgrade to the version N+2, you should first upgrade to the version N+1 while following the migration path if applicable, and then upgrade to the version N+2.
@@ -70,7 +76,16 @@ Each non-patch release should start with Release Candidate (RC) phase as follows
    The main branch should only accept the bug fixes, the security fixes, and documentation changes.
    The release candidate should always be cut from the main branch.
 
-2. Prepare the docs site with the new version, following the process described in the [site/README.md](site/README.md)
+2. Prepare the docs site with the new version:
+
+   ```
+   cd site
+   npm run docusaurus docs:version 0.50
+   ```
+
+   This will create the new folder for the release, `versioned_docs/release-0.50`. You'll have to update the `_vars.json` and `compatibility.md` and
+   make sure all the versions are correct.
+   You also need to udpate the version list in `docusaurus.config.ts` and point the `latestVersion` to the versino being released.
 
 3. Cut the request candidate tag from the main branch. The tag should be v0.50.0-rc1. Assuming the remote `origin` is the main envoyproxy/ai-gateway repository,
    the command to cut the tag is:

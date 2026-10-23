@@ -31,6 +31,26 @@ If release name contains chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+Name of the Secret that holds the MCP session encryption seed.
+*/}}
+{{- define "ai-gateway-helm.controller.mcpSessionEncryptionSecretName" -}}
+{{- if .Values.controller.mcp.sessionEncryption.existingSecret }}
+{{- .Values.controller.mcp.sessionEncryption.existingSecret }}
+{{- else }}
+{{- printf "%s-mcp-session-encryption" (include "ai-gateway-helm.controller.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Name of the Secret that holds the MCP session encryption fallback seed.
+The fullname is truncated first so the suffix is always kept; otherwise a long fullname would truncate this
+to the same name as the primary seed Secret.
+*/}}
+{{- define "ai-gateway-helm.controller.mcpFallbackSessionEncryptionSecretName" -}}
+{{- printf "%s-mcp-session-encryption-fallback" (include "ai-gateway-helm.controller.fullname" . | trunc 31 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "ai-gateway-helm.chart" -}}
@@ -76,7 +96,7 @@ Create the name of the cluster role to use
 {{- if $existing }}
 {{- (include "ai-gateway-helm.controller.serviceAccountName" .) }}
 {{- else }}
-{{- printf "%s:%s" (include "ai-gateway-helm.controller.serviceAccountName" .) .Release.Namespace }}
+{{- printf "%s:%s" (include "ai-gateway-helm.controller.serviceAccountName" .) (default "default" .Release.Namespace) }}
 {{- end }}
 {{- end }}
 
@@ -85,7 +105,7 @@ Create the name of the cluster role to use
 {{- if $existing }}
 {{- "envoy-ai-gateway-inference-pool-reader" }}
 {{- else }}
-{{- printf "%s:%s" "envoy-ai-gateway-inference-pool-reader" .Release.Namespace}}
+{{- printf "%s:%s" "envoy-ai-gateway-inference-pool-reader" (default "default" .Release.Namespace)}}
 {{- end}}
 {{- end -}}
 
@@ -94,7 +114,7 @@ Create the name of the cluster role to use
 {{- if $existing }}
 {{- "envoy-ai-gateway-inference-pool-reader-binding" }}
 {{- else }}
-{{- printf "%s:%s" "envoy-ai-gateway-inference-pool-reader-binding" .Release.Namespace}}
+{{- printf "%s:%s" "envoy-ai-gateway-inference-pool-reader-binding" (default "default" .Release.Namespace)}}
 {{- end}}
 {{- end -}}
 

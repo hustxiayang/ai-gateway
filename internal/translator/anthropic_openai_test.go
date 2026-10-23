@@ -385,7 +385,7 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 
 	// Spot-check specific event data.
 	require.JSONEq(t, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello!"}}`, events[2].data)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
@@ -427,6 +427,13 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			name:        "JSON error from OpenAI backend",
 			headers:     map[string]string{contentTypeHeaderName: "application/json"},
 			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+		},
+		{
+			name:        "JSON error with numeric code from OpenAI-compatible backend",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","param":null,"code":400}}`,
 			wantErrType: "invalid_request_error",
 			wantErrMsg:  "Bad request",
 		},

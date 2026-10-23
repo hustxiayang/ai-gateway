@@ -42,7 +42,7 @@ spec:
         - headers:
             - type: Exact
               name: x-ai-eg-model
-              value: us.meta.llama3-2-1b-instruct-v1:0
+              value: us.amazon.nova-micro-v1:0
       backendRefs:
         - name: provider-fallback-always-failing-upstream # This is the primary backend and trying to speak TLS, which always fails.
           priority: 0
@@ -90,7 +90,7 @@ spec:
         hostname: bedrock-runtime.us-east-1.amazonaws.com
         port: 443
 ---
-apiVersion: gateway.networking.k8s.io/v1alpha3
+apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy
 metadata:
   name: provider-fallback-aws-tls
@@ -141,7 +141,7 @@ spec:
         hostname: provider-fallback-always-failing-upstream.default.svc.cluster.local
         port: 443
 ---
-apiVersion: gateway.networking.k8s.io/v1alpha3
+apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy
 metadata:
   name: provider-fallback-always-failing-upstream-tls

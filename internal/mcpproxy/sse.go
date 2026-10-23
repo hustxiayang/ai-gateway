@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
@@ -62,6 +64,13 @@ func tryDecodeJSONRPCMessage(body []byte) (jsonrpc.Message, bool) {
 	return msg, true
 }
 
+// isJSONContentType reports whether value has application/json as its media
+// type, regardless of optional parameters such as charset.
+func isJSONContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && strings.EqualFold(mediaType, "application/json")
+}
+
 // next reads the next SSE event from the stream.
 func (s *sseEventParser) next() (*sseEvent, error) {
 	for {
@@ -106,6 +115,11 @@ func (s *sseEventParser) parseEvent(chunk []byte) (*sseEvent, error) {
 			ret.id = string(bytes.TrimSpace(line[len(sseIDPrefix):]))
 		case bytes.HasPrefix(line, sseDataPrefix):
 			data := bytes.TrimSpace(line[len(sseDataPrefix):])
+			if len(data) == 0 {
+				// Empty data line (e.g. a keep-alive/heartbeat event). There is
+				// nothing to decode, so skip it rather than failing the event.
+				continue
+			}
 			msg, err := jsonrpc.DecodeMessage(data)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode jsonrpc message from sse data: %w", err)

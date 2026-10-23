@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +35,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -41,7 +44,62 @@ import (
 const (
 	extProcUDSClusterName = "ai-gateway-extproc-uds"
 	aiGatewayExtProcName  = "envoy.filters.http.ext_proc/aigateway"
+	// aiGatewayHeaderMutationName is matched by the filter strip in maybeModifyCluster.
+	aiGatewayHeaderMutationName = "envoy.filters.http.header_mutation"
+	noBackendRefIndex           = -1
+
+	// Metadata Envoy Gateway stamps on the resources it builds, naming the objects each came from.
+	envoyGatewayMetadataNamespace    = "envoy-gateway"
+	envoyGatewayMetadataResourcesKey = "resources"
 )
+
+type aiGatewayClusterName struct {
+	namespace       string
+	routeName       string
+	ruleIndex       int
+	backendRefIndex int
+}
+
+// parseAIGatewayClusterName parses the cluster names generated for AIGatewayRoute rules.
+// Envoy Gateway uses a route-level cluster name unless it creates a cluster for each backend.
+func parseAIGatewayClusterName(name string) (aiGatewayClusterName, error) {
+	parts := strings.Split(name, "/")
+	if (len(parts) != 5 && len(parts) != 7) || parts[0] != "httproute" || parts[3] != "rule" {
+		return aiGatewayClusterName{}, fmt.Errorf("invalid AIGatewayRoute cluster name %q", name)
+	}
+
+	ruleIndex, err := strconv.Atoi(parts[4])
+	if err != nil || ruleIndex < 0 {
+		return aiGatewayClusterName{}, fmt.Errorf("invalid HTTPRoute rule index %q", parts[4])
+	}
+
+	clusterName := aiGatewayClusterName{
+		namespace:       parts[1],
+		routeName:       parts[2],
+		ruleIndex:       ruleIndex,
+		backendRefIndex: noBackendRefIndex,
+	}
+	if len(parts) == 5 {
+		return clusterName, nil
+	}
+	if parts[5] != "backend" {
+		return aiGatewayClusterName{}, fmt.Errorf("invalid AIGatewayRoute backend cluster name %q", name)
+	}
+
+	backendRefIndex, err := strconv.Atoi(parts[6])
+	if err != nil || backendRefIndex < 0 {
+		return aiGatewayClusterName{}, fmt.Errorf("invalid HTTPRoute backend index %q", parts[6])
+	}
+	clusterName.backendRefIndex = backendRefIndex
+	return clusterName, nil
+}
+
+// hasAIGatewayClusterName reports whether a cluster name has the shape maybeModifyCluster accepts.
+// Plain HTTPRoutes share it, so this is a short-circuit, not a filter.
+func hasAIGatewayClusterName(cluster *clusterv3.Cluster) bool {
+	_, err := parseAIGatewayClusterName(cluster.GetName())
+	return err == nil
+}
 
 // PostTranslateModify allows an extension to modify the clusters and secrets in the xDS config
 // after the initial translation is complete. This method is responsible for:
@@ -55,9 +113,18 @@ const (
 func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostTranslateModifyRequest) (*egextension.PostTranslateModifyResponse, error) {
 	var extProcUDSExist bool
 
+	// Resolved once per snapshot: the namespaces are the Gateway's and apply to every AI cluster.
+	var metadataForwardingNamespaces []string
+	if slices.ContainsFunc(req.Clusters, hasAIGatewayClusterName) {
+		var nsErr error
+		if metadataForwardingNamespaces, nsErr = s.metadataForwardingNamespacesForSnapshot(ctx, req.Routes); nsErr != nil {
+			return nil, fmt.Errorf("failed to resolve the metadata forwarding namespaces: %w", nsErr)
+		}
+	}
+
 	// Process existing clusters - may add metadata or modify configurations.
 	for _, cluster := range req.Clusters {
-		if err := s.maybeModifyCluster(ctx, cluster); err != nil {
+		if err := s.maybeModifyCluster(ctx, cluster, metadataForwardingNamespaces); err != nil {
 			return nil, fmt.Errorf("failed to modify cluster %s: %w", cluster.Name, err)
 		}
 		extProcUDSExist = extProcUDSExist || cluster.Name == extProcUDSClusterName
@@ -74,6 +141,11 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 	// Modify listeners and routes to support InferencePool backends.
 	if err = s.maybeModifyListenerAndRoutes(req.Listeners, req.Routes); err != nil {
 		return nil, fmt.Errorf("failed to modify listeners and routes for InferencePool support: %w", err)
+	}
+
+	// Apply the per-rule stream idle timeout to the generated routes.
+	if err = s.applyStreamIdleTimeouts(ctx, req.Routes); err != nil {
+		return nil, fmt.Errorf("failed to apply stream idle timeouts: %w", err)
 	}
 
 	// Ensure the AI Gateway external processor UDS cluster exists.
@@ -152,6 +224,89 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 	return response, nil
 }
 
+// applyStreamIdleTimeouts walks the generated route configurations and sets the per-try idle
+// timeout on every AIGatewayRoute route whose rule configures StreamIdleTimeout.
+// Lookups are cached to avoid hitting the API server more than once per route.
+func (s *Server) applyStreamIdleTimeouts(ctx context.Context, routeConfigs []*routev3.RouteConfiguration) error {
+	cache := make(map[client.ObjectKey]*aigv1b1.AIGatewayRoute)
+	for _, rc := range routeConfigs {
+		for _, vh := range rc.VirtualHosts {
+			for _, route := range vh.Routes {
+				if err := s.maybeSetStreamIdleTimeout(ctx, route, cache); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// maybeSetStreamIdleTimeout sets route.retry_policy.per_try_idle_timeout from the rule's
+// StreamIdleTimeout. Envoy resets the upstream stream when no bytes arrive within that
+// duration, so a retry policy covering `reset` falls over to the next backend before any
+// response reaches the downstream client.
+func (s *Server) maybeSetStreamIdleTimeout(ctx context.Context, route *routev3.Route, cache map[client.ObjectKey]*aigv1b1.AIGatewayRoute) error {
+	action := route.GetRoute()
+	if action == nil {
+		// Not a forwarding route (e.g. DirectResponse, Redirect).
+		return nil
+	}
+
+	// Route name format: "httproute/<namespace>/<name>/rule/<index>/match/<...>".
+	parts := strings.Split(route.Name, "/")
+	if len(parts) < 5 || parts[0] != "httproute" || parts[3] != "rule" || parts[1] == "" || parts[2] == "" {
+		return nil
+	}
+	ruleIndex, err := strconv.Atoi(parts[4])
+	if err != nil {
+		return nil
+	}
+
+	aigwRoute, err := s.retrieveAndCacheAIGatewayRoute(ctx, cache, client.ObjectKey{Namespace: parts[1], Name: parts[2]})
+	if err != nil {
+		return err
+	}
+	if aigwRoute == nil {
+		// Not an AIGatewayRoute-owned route, or it was deleted during translation.
+		return nil
+	}
+
+	// The list of rules in the AIGatewayRoute may have changed since this route was generated,
+	// so we check the rule index is still valid before applying the timeout.
+	if ruleIndex >= len(aigwRoute.Spec.Rules) {
+		return nil
+	}
+
+	timeout := aigwRoute.Spec.Rules[ruleIndex].GetStreamIdleTimeout()
+	if timeout <= 0 {
+		return nil
+	}
+
+	if action.RetryPolicy == nil {
+		action.RetryPolicy = &routev3.RetryPolicy{}
+	}
+	action.RetryPolicy.PerTryIdleTimeout = durationpb.New(timeout)
+	return nil
+}
+
+// retrieveAndCacheAIGatewayRoute returns the AIGatewayRoute for the key and saves the result.
+// If the route is not found it will be  cached as nil, so one translation pass hits the API server at most once per route.
+func (s *Server) retrieveAndCacheAIGatewayRoute(ctx context.Context, cache map[client.ObjectKey]*aigv1b1.AIGatewayRoute, key client.ObjectKey) (*aigv1b1.AIGatewayRoute, error) {
+	if cached, ok := cache[key]; ok {
+		return cached, nil
+	}
+	var aigwRoute aigv1b1.AIGatewayRoute
+	if err := s.k8sClient.Get(ctx, key, &aigwRoute); err != nil {
+		if apierrors.IsNotFound(err) {
+			cache[key] = nil
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get AIGatewayRoute %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	cache[key] = &aigwRoute
+	return &aigwRoute, nil
+}
+
 // maybeModifyCluster modifies clusters generated from AIGatewayRoute resources to add
 // necessary configurations for AI Gateway functionality. This function performs several key tasks:
 //
@@ -168,24 +323,15 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 //
 // The resulting configuration is similar to the envoy.yaml files in tests/data-plane/.
 // Only clusters with names matching the AIGatewayRoute pattern are modified.
-func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster) error {
-	// Parse cluster name to extract AIGatewayRoute information.
-	// Expected format: "httproute/<namespace>/<name>/rule/<index_of_rule>".
-	parts := strings.Split(cluster.Name, "/")
-	if len(parts) != 5 || parts[0] != "httproute" {
-		// This is not an AIGatewayRoute-generated cluster, skip modification.
-		s.log.Info("non-ai-gateway cluster name", "cluster_name", cluster.Name)
-		return nil
-	}
-	httpRouteNamespace := parts[1]
-	httpRouteName := parts[2]
-	httpRouteRuleIndexStr := parts[4]
-	httpRouteRuleIndex, err := strconv.Atoi(httpRouteRuleIndexStr)
+func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster, metadataForwardingNamespaces []string) error {
+	clusterName, err := parseAIGatewayClusterName(cluster.Name)
 	if err != nil {
-		s.log.Error(err, "failed to parse HTTPRoute rule index",
-			"cluster_name", cluster.Name, "rule_index", httpRouteRuleIndexStr)
+		s.log.Info("non-ai-gateway cluster name", "cluster_name", cluster.Name, "error", err)
 		return nil
 	}
+	httpRouteNamespace := clusterName.namespace
+	httpRouteName := clusterName.routeName
+	httpRouteRuleIndex := clusterName.ruleIndex
 
 	// Check if this rule has InferencePool backends.
 	pool := getInferencePoolByMetadata(cluster.Metadata)
@@ -206,23 +352,48 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 	// Get the backend from the HTTPRoute object.
 	if httpRouteRuleIndex >= len(aigwRoute.Spec.Rules) {
 		s.log.Info("HTTPRoute rule index out of range",
-			"cluster_name", cluster.Name, "rule_index", httpRouteRuleIndexStr)
+			"cluster_name", cluster.Name, "rule_index", httpRouteRuleIndex)
 		return nil
 	}
 	httpRouteRule := &aigwRoute.Spec.Rules[httpRouteRuleIndex]
+	if clusterName.backendRefIndex != noBackendRefIndex && clusterName.backendRefIndex >= len(httpRouteRule.BackendRefs) {
+		s.log.Info("HTTPRoute backend index out of range",
+			"cluster_name", cluster.Name, "backend_index", clusterName.backendRefIndex)
+		return nil
+	}
 
 	// Only process LoadAssignment for non-InferencePool backends.
 	if pool == nil {
-		if cluster.LoadAssignment == nil {
-			// When LoadAssignment is nil (e.g. EDS-managed endpoints in standalone mode),
-			// set backend name on cluster-level metadata so the upstream ext_proc filter
-			// can resolve the backend via XDSClusterMetadataBackendNamePath fallback.
+		switch {
+		case cluster.LoadAssignment == nil:
+			// LoadAssignment is nil when the cluster's endpoints are EDS-managed: delivered out of band
+			// (e.g. standalone mode), not inlined at translate time. There is no LbEndpoint here, so we
+			// only set the backend name on cluster-level metadata; the upstream ext_proc filter resolves
+			// the backend via XDSClusterMetadataBackendNamePath.
+			//
+			// TODO(aws-signing): no LbEndpoint to stamp here, so an AWS backend on an EDS cluster falls
+			// back to the region-based default signing host and a VPCE host is lost. See ai-gateway#902 / #950.
 			s.log.Info("LoadAssignment is nil, setting cluster-level metadata", "cluster_name", cluster.Name)
 			if len(httpRouteRule.BackendRefs) > 0 {
-				backendRef := httpRouteRule.BackendRefs[0]
-				setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, 0)
+				backendRefIndex := 0
+				if clusterName.backendRefIndex != noBackendRefIndex {
+					backendRefIndex = clusterName.backendRefIndex
+				}
+				backendRef := httpRouteRule.BackendRefs[backendRefIndex]
+				setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, backendRefIndex)
 			}
-		} else {
+		case clusterName.backendRefIndex != noBackendRefIndex:
+			backendRef := httpRouteRule.BackendRefs[clusterName.backendRefIndex]
+			for _, endpoints := range cluster.LoadAssignment.Endpoints {
+				if backendRef.Priority != nil {
+					endpoints.Priority = *backendRef.Priority
+				}
+				for _, endpoint := range endpoints.LbEndpoints {
+					setEndpointMetadataBackendName(endpoint, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, clusterName.backendRefIndex)
+					stampUpstreamHostMetadata(endpoint)
+				}
+			}
+		default:
 			// Populate the metadata for each endpoint in the LoadAssignment.
 			var lbEndpointIndex int
 			for i, backendRef := range httpRouteRule.BackendRefs {
@@ -231,6 +402,26 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 				if backendRef.Weight != nil && *backendRef.Weight == 0 {
 					continue
 				}
+				// httpRouteRule.BackendRefs comes from a fresh
+				// s.k8sClient.Get(&aigwRoute); cluster.LoadAssignment is
+				// whatever Envoy Gateway translated for this cluster. The two
+				// can be a revision apart, so the rule can carry more
+				// non-zero-weight BackendRefs than the cluster has endpoint
+				// groups (e.g. an AIGatewayRoute gained a BackendRef whose
+				// AIServiceBackend does not resolve yet, so the generated
+				// HTTPRoute - and the cluster - stay a revision behind).
+				// lbEndpointIndex only increases, so once it is out of range
+				// every remaining backendRef is too; stop rather than index out
+				// of bounds. The rule and backendRef indices are already
+				// guarded the same way earlier in this function. The unmatched
+				// backend(s) get their endpoint metadata stamped on a later
+				// reconcile once the counts agree.
+				if lbEndpointIndex >= len(cluster.LoadAssignment.Endpoints) {
+					s.log.Info("cluster LoadAssignment has fewer endpoint groups than non-zero-weight backendRefs",
+						"cluster_name", cluster.Name, "backend_index", i,
+						"load_assignment_endpoints", len(cluster.LoadAssignment.Endpoints))
+					break
+				}
 				endpoints := cluster.LoadAssignment.Endpoints[lbEndpointIndex]
 				lbEndpointIndex++
 				name := backendRef.Name
@@ -238,33 +429,29 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 				if backendRef.Priority != nil {
 					endpoints.Priority = *backendRef.Priority
 				}
-				// We populate the same metadata for all endpoints in the LoadAssignment.
-				// This is because currently, an extproc cannot retrieve the endpoint set level metadata.
 				for _, endpoint := range endpoints.LbEndpoints {
-					if endpoint.Metadata == nil {
-						endpoint.Metadata = &corev3.Metadata{}
-					}
-					if endpoint.Metadata.FilterMetadata == nil {
-						endpoint.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
-					}
-					m, ok := endpoint.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
-					if !ok {
-						m = &structpb.Struct{}
-						endpoint.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace] = m
-					}
-					if m.Fields == nil {
-						m.Fields = make(map[string]*structpb.Value)
-					}
-					m.Fields[internalapi.InternalMetadataBackendNameKey] = structpb.NewStringValue(
-						internalapi.PerRouteRuleRefBackendName(namespace, name, aigwRoute.Name, httpRouteRuleIndex, i),
-					)
+					setEndpointMetadataBackendName(endpoint, namespace, name, aigwRoute.Name, httpRouteRuleIndex, i)
+					stampUpstreamHostMetadata(endpoint)
 				}
 			}
 		}
 	} else {
 		// we can only specify one backend in a rule for InferencePool.
-		backendRef := httpRouteRule.BackendRefs[0]
-		setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, 0)
+		backendRefIndex := 0
+		if clusterName.backendRefIndex != noBackendRefIndex {
+			backendRefIndex = clusterName.backendRefIndex
+		}
+		backendRef := httpRouteRule.BackendRefs[backendRefIndex]
+		setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, backendRefIndex)
+	}
+
+	// Route upstream egress through a forward proxy when the owning Gateway's GatewayConfig
+	// configures one. InferencePool clusters use in-cluster ORIGINAL_DST endpoints, so they are
+	// excluded.
+	if pool == nil {
+		if err = s.maybeWrapClusterInForwardProxy(ctx, cluster, &aigwRoute); err != nil {
+			return fmt.Errorf("failed to configure forward proxy for cluster %s: %w", cluster.Name, err)
+		}
 	}
 
 	if cluster.TypedExtensionProtocolOptions == nil {
@@ -285,12 +472,11 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 		}}
 	}
 
-	for _, filter := range po.HttpFilters {
-		if filter.Name == aiGatewayExtProcName {
-			// Nothing to do, the filter is already there.
-			return nil
-		}
-	}
+	// Envoy Gateway rebuilds HttpProtocolOptions from the IR every translation, so a cluster is
+	// not expected to arrive carrying our filters. Drop them if one does, so the rebuild wins.
+	po.HttpFilters = slices.DeleteFunc(po.HttpFilters, func(f *httpconnectionmanagerv3.HttpFilter) bool {
+		return f.GetName() == aiGatewayExtProcName || f.GetName() == aiGatewayHeaderMutationName
+	})
 
 	extProcConfig := &extprocv3.ExternalProcessor{}
 	extProcConfig.MetadataOptions = &extprocv3.MetadataOptions{
@@ -298,10 +484,16 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 			Untyped: []string{aigv1b1.AIGatewayFilterMetadataNamespace},
 		},
 	}
+	if len(metadataForwardingNamespaces) > 0 {
+		extProcConfig.MetadataOptions.ForwardingNamespaces = &extprocv3.MetadataOptions_MetadataNamespaces{
+			Untyped: metadataForwardingNamespaces,
+		}
+	}
 	extProcConfig.AllowModeOverride = true
 	extProcConfig.RequestAttributes = []string{
 		internalapi.XDSUpstreamHostMetadataBackendNamePath,
 		internalapi.XDSClusterMetadataBackendNamePath,
+		internalapi.XDSUpstreamHostMetadataUpstreamHostPath,
 		internalapi.XDSRouteMetadataRouteNamePath,
 	}
 	extProcConfig.ProcessingMode = &extprocv3.ProcessingMode{
@@ -354,7 +546,7 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 		return fmt.Errorf("failed to marshal HeaderMutation to Any: %w", err)
 	}
 	headerMutFilter := &httpconnectionmanagerv3.HttpFilter{
-		Name:       "envoy.filters.http.header_mutation",
+		Name:       aiGatewayHeaderMutationName,
 		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{TypedConfig: hmAny},
 	}
 
@@ -386,6 +578,95 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 	}
 	cluster.TypedExtensionProtocolOptions[httpProtocolOptions] = poAny
 	return nil
+}
+
+// metadataForwardingNamespacesForSnapshot returns the untyped dynamic metadata namespaces Envoy
+// forwards to the external processor on this snapshot's AI traffic. The declaration is the
+// Gateway's, not the routes', so it comes from the Gateways owning the snapshot; under
+// mergeGateways theirs combine.
+func (s *Server) metadataForwardingNamespacesForSnapshot(ctx context.Context, routes []*routev3.RouteConfiguration) ([]string, error) {
+	gateways := gatewaysInSnapshot(routes)
+	if len(gateways) == 0 {
+		routeConfigs := make([]string, 0, len(routes))
+		for _, r := range routes {
+			routeConfigs = append(routeConfigs, r.GetName())
+		}
+		s.log.Error(nil, "cannot tell which Gateway this xDS snapshot belongs to; forwarding no dynamic metadata, so credentialOverride.fromDynamicMetadata falls back to the configured credential",
+			"route_configs", routeConfigs)
+		return nil, nil
+	}
+	var namespaces []string
+	for _, key := range gateways {
+		gatewayConfig, err := s.gatewayConfigForGateway(ctx, key.Name, key.Namespace)
+		if err != nil {
+			return nil, err
+		}
+		if gatewayConfig == nil || gatewayConfig.Spec.ExtProc == nil {
+			continue
+		}
+		namespaces = append(namespaces, gatewayConfig.Spec.ExtProc.MetadataForwardingNamespaces...)
+	}
+	slices.Sort(namespaces)
+	return slices.Compact(namespaces), nil
+}
+
+// gatewaysInSnapshot returns the Gateways owning a snapshot, without duplicates. Envoy Gateway
+// records the owning Gateway on virtual hosts only; Listener and RouteConfiguration carry none.
+func gatewaysInSnapshot(routes []*routev3.RouteConfiguration) []client.ObjectKey {
+	var gateways []client.ObjectKey
+	for _, r := range routes {
+		for _, vh := range r.GetVirtualHosts() {
+			eg, ok := vh.GetMetadata().GetFilterMetadata()[envoyGatewayMetadataNamespace]
+			if !ok {
+				continue
+			}
+			resources, ok := eg.GetFields()[envoyGatewayMetadataResourcesKey]
+			if !ok {
+				continue
+			}
+			for _, resource := range resources.GetListValue().GetValues() {
+				fields := resource.GetStructValue().GetFields()
+				if fields["kind"].GetStringValue() != "Gateway" {
+					continue
+				}
+				key := client.ObjectKey{
+					Namespace: fields["namespace"].GetStringValue(),
+					Name:      fields["name"].GetStringValue(),
+				}
+				if key.Namespace == "" || key.Name == "" || slices.Contains(gateways, key) {
+					continue
+				}
+				gateways = append(gateways, key)
+			}
+		}
+	}
+	return gateways
+}
+
+// gatewayConfigForGateway returns the GatewayConfig named by the Gateway's
+// "aigateway.envoyproxy.io/gateway-config" annotation. It returns nil when the Gateway, the
+// annotation, or the GatewayConfig is absent.
+func (s *Server) gatewayConfigForGateway(ctx context.Context, gatewayName, gatewayNamespace string) (*aigv1b1.GatewayConfig, error) {
+	var gateway gwapiv1.Gateway
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: gatewayName, Namespace: gatewayNamespace}, &gateway); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get Gateway %s/%s: %w", gatewayNamespace, gatewayName, err)
+	}
+	configName, ok := gateway.Annotations[gatewayConfigAnnotationKey]
+	if !ok || configName == "" {
+		return nil, nil
+	}
+	// The GatewayConfig must be in the same namespace as the Gateway.
+	var gatewayConfig aigv1b1.GatewayConfig
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: configName, Namespace: gatewayNamespace}, &gatewayConfig); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get GatewayConfig %s/%s: %w", gatewayNamespace, configName, err)
+	}
+	return &gatewayConfig, nil
 }
 
 // maybeModifyListenerAndRoutes modifies listeners and routes to support InferencePool backends.
@@ -430,8 +711,12 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	}
 
 	// listenerToInferencePools builds a matrix of listeners and the inference pools they use.
+	// routeNameToVHRouteNameToInferencePool is keyed per route match, so a pool reached by
+	// several matches appears several times. A pool needs exactly one ext proc filter per
+	// listener, so deduplicate here.
 	listenerToInferencePools := make(map[string][]*gwaiev1.InferencePool)
 	for listener, routeCfgNames := range listenerNameToRouteNames {
+		seen := make(map[string]struct{})
 		for _, name := range routeCfgNames {
 			if routeNameToRoute[name] == nil {
 				continue
@@ -440,6 +725,11 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 				continue
 			}
 			for _, pool := range routeNameToVHRouteNameToInferencePool[name] {
+				key := pool.Namespace + "/" + pool.Name
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
 				if listenerToInferencePools[listener] == nil {
 					listenerToInferencePools[listener] = make([]*gwaiev1.InferencePool, 0)
 				}
@@ -507,7 +797,14 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			continue
 		}
 		var poolFilters []*httpconnectionmanagerv3.HttpFilter
+		// poolFilters is spliced into httpConManager.HttpFilters only after this loop, so the
+		// search below cannot see what the loop already added. Track those names separately.
+		added := make(map[string]struct{})
 		for _, pool := range inferencePools {
+			filterName := httpFilterNameForInferencePool(pool)
+			if _, ok := added[filterName]; ok {
+				continue
+			}
 			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
 			if searchErr != nil {
 				s.log.Error(searchErr, "failed to find an inference pool ext proc filter")
@@ -521,6 +818,7 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 					s.log.Error(err, "failed to build inference pool ext proc filter", "pool", pool.Name)
 					continue
 				}
+				added[filterName] = struct{}{}
 				poolFilters = append(poolFilters, eppExtProc)
 			}
 		}
@@ -630,8 +928,10 @@ func (s *Server) insertRouterLevelAIGatewayExtProc(listener *listenerv3.Listener
 	// Go over all of the chains, and add the endpoint picker external processor filters.
 	for _, currChain := range filterChains {
 		httpConManager, hcmIndex, err := findHCM(currChain)
-		if err != nil {
-			return fmt.Errorf("failed to find HCM in filter chain: %w", err)
+		if hcmIndex == -1 {
+			// Chains without an HCM (e.g. TCP/UDP routes) cannot host the ext_proc filter.
+			s.log.Error(err, "skipping filter chain without an HTTP connection manager", "listener", listener.Name)
+			continue
 		}
 		// Check if the extproc filter is already present.
 		if !shouldAIGatewayExtProcBeInserted(httpConManager.HttpFilters) {
@@ -675,6 +975,10 @@ func (s *Server) insertRouterLevelAIGatewayExtProc(listener *listenerv3.Listener
 		// Insert the AI Gateway extproc filter as the first extproc filter.
 		if err = insertAIGatewayExtProcFilter(httpConManager, extProcFilter); err != nil {
 			return fmt.Errorf("failed to insert AI Gateway extproc filter: %w", err)
+		}
+		// Match the :scheme pseudo-header to the upstream transport protocol.
+		httpConManager.SchemeHeaderTransformation = &corev3.SchemeHeaderTransformation{
+			MatchUpstream: true,
 		}
 		hcAny, err := toAny(httpConManager)
 		if err != nil {
@@ -798,6 +1102,42 @@ func routeNameFromEnvoyGatewayMetadata(route *routev3.Route) string {
 	return ""
 }
 
+// endpointUpstreamHost returns the DNS hostname of the given endpoint, or "" if it has none.
+//
+// Envoy Gateway translates a Backend `fqdn` endpoint so that the FQDN lands in
+// Endpoint.Address.SocketAddress.Address, while Endpoint.Hostname is populated only from the Backend's
+// optional top-level `hostname` field (EG NewDestEndpoint takes the FQDN as `host` and bep.Hostname as
+// `hostname`). So for a normal Bedrock/VPCE backend Endpoint.Hostname is empty and the resolvable name is
+// the socket address. We therefore resolve in order: Endpoint.Hostname if set, otherwise the socket
+// address when it is a DNS name. An IP-literal socket address is rejected — signing over an IP matches no
+// AWS endpoint — so such an endpoint yields no stamp and the signer falls back to the region default.
+func endpointUpstreamHost(lbEndpoint *endpointv3.LbEndpoint) string {
+	endpoint := lbEndpoint.GetEndpoint()
+	if endpoint == nil {
+		return ""
+	}
+	if hostname := endpoint.GetHostname(); hostname != "" {
+		return hostname
+	}
+	// An IP-literal socket address is rejected
+	if addr := endpoint.GetAddress().GetSocketAddress().GetAddress(); addr != "" && net.ParseIP(addr) == nil {
+		return addr
+	}
+	return ""
+}
+
+// stampUpstreamHostMetadata stamps the resolved upstream host on the endpoint's metadata at
+// config-translation time, so the data plane (e.g. the AWS backend auth handler, for SigV4 signing)
+// uses the real upstream endpoint instead of re-deriving it at request time. It stamps every endpoint
+// with a resolvable hostname regardless of provider: unused by non-AWS backends, but harmless — unlike
+// gating on an AWS-Bedrock hostname pattern, it doesn't silently drop custom/VPCE hosts that don't match
+// a known AWS naming convention (e.g. bedrock.corp.internal, bedrock-runtime-fips.<region>.amazonaws.com).
+func stampUpstreamHostMetadata(endpoint *endpointv3.LbEndpoint) {
+	if host := endpointUpstreamHost(endpoint); host != "" {
+		setEndpointMetadataUpstreamHost(endpoint, host)
+	}
+}
+
 func ensureRouteInternalMetadata(route *routev3.Route) *structpb.Struct {
 	if route.Metadata == nil {
 		route.Metadata = &corev3.Metadata{}
@@ -839,6 +1179,38 @@ func setClusterMetadataBackendName(cluster *clusterv3.Cluster, namespace, name, 
 	)
 }
 
+// ensureEndpointAIGatewayMetadata returns the AI Gateway filter-metadata struct for the endpoint,
+// creating the metadata containers as needed.
+func ensureEndpointAIGatewayMetadata(endpoint *endpointv3.LbEndpoint) *structpb.Struct {
+	if endpoint.Metadata == nil {
+		endpoint.Metadata = &corev3.Metadata{}
+	}
+	if endpoint.Metadata.FilterMetadata == nil {
+		endpoint.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
+	}
+	m, ok := endpoint.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	if !ok {
+		m = &structpb.Struct{}
+		endpoint.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace] = m
+	}
+	if m.Fields == nil {
+		m.Fields = make(map[string]*structpb.Value)
+	}
+	return m
+}
+
+func setEndpointMetadataBackendName(endpoint *endpointv3.LbEndpoint, namespace, name, routeName string, routeRuleIndex, refIndex int) {
+	ensureEndpointAIGatewayMetadata(endpoint).Fields[internalapi.InternalMetadataBackendNameKey] = structpb.NewStringValue(
+		internalapi.PerRouteRuleRefBackendName(namespace, name, routeName, routeRuleIndex, refIndex),
+	)
+}
+
+// setEndpointMetadataUpstreamHost stores the resolved upstream host on endpoint-level metadata so the
+// upstream ext_proc filter can forward it to backend auth handlers that need it (e.g. AWS SigV4 signing).
+func setEndpointMetadataUpstreamHost(endpoint *endpointv3.LbEndpoint, host string) {
+	ensureEndpointAIGatewayMetadata(endpoint).Fields[internalapi.InternalMetadataUpstreamHostKey] = structpb.NewStringValue(host)
+}
+
 func shouldAIGatewayExtProcBeInserted(filters []*httpconnectionmanagerv3.HttpFilter) bool {
 	for _, f := range filters {
 		if f.Name == aiGatewayExtProcName {
@@ -850,9 +1222,20 @@ func shouldAIGatewayExtProcBeInserted(filters []*httpconnectionmanagerv3.HttpFil
 
 // insertAIGatewayExtProcFilter inserts the AI Gateway extproc filter into the HTTP connection manager.
 //
-// The order is simple: make sure that the AI Gateway extproc filter is the very first extproc filter in the standard
-// Envoy Gateway order. See:
+// The order is mostly simple: make sure that the AI Gateway extproc filter is the first extproc filter in the
+// standard Envoy Gateway order. See:
 // https://github.com/envoyproxy/gateway/blob/f1e6dab770fabc70d175237380eedfc1f9b1a9e5/internal/xds/translator/httpfilters.go#L93
+//
+// There is one exception: the HTTP buffer filter (envoy.filters.http.buffer). In Envoy Gateway's canonical
+// filter order the buffer filter is placed *before* the ext_proc filters, so a user who raises the request
+// buffer limit via the buffer filter (e.g. through an EnvoyPatchPolicy) expects that limit to apply to the AI
+// Gateway extproc as well. The AI Gateway extproc runs with RequestBodyMode: BUFFERED, so inserting it ahead of
+// the buffer filter would make it buffer the request body against the (smaller) default per-connection buffer
+// limit and reject large request bodies with a 413 before the buffer filter's larger limit can take effect. To
+// avoid this, when a buffer filter sits at or after the chosen insertion point we insert the AI Gateway extproc
+// immediately after the last buffer filter instead. The AI Gateway extproc is then the first ext_proc filter to
+// run after the buffer filter (not necessarily the first ext_proc filter overall), so a user-supplied ext_proc
+// placed ahead of the buffer filter, e.g. api-key auth, still runs before it.
 func insertAIGatewayExtProcFilter(mgr *httpconnectionmanagerv3.HttpConnectionManager, filter *httpconnectionmanagerv3.HttpFilter) error {
 	insertIndex := -1
 outer:
@@ -867,6 +1250,21 @@ outer:
 	if insertIndex == -1 {
 		return errors.New("failed to find insertion point for AI Gateway extproc filter")
 	}
+
+	// Find the last buffer filter so we can insert the AI Gateway extproc after it (see the buffer-filter
+	// exception in the function doc above).
+	lastBufferIndex := -1
+	for i, existingFilter := range mgr.HttpFilters {
+		if strings.HasPrefix(existingFilter.Name, egv1a1.EnvoyFilterBuffer.String()) {
+			lastBufferIndex = i
+		}
+	}
+	// When the buffer filter sits at or after the ext_proc insertion point, insert the AI Gateway extproc
+	// immediately after it instead. Behavior is unchanged when no buffer filter exists (lastBufferIndex == -1).
+	if lastBufferIndex >= insertIndex {
+		insertIndex = lastBufferIndex + 1
+	}
+
 	mgr.HttpFilters = append(mgr.HttpFilters, filter)
 	copy(mgr.HttpFilters[insertIndex+1:], mgr.HttpFilters[insertIndex:])
 	mgr.HttpFilters[insertIndex] = filter

@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,8 +22,11 @@ import (
 	openAIconstant "github.com/openai/openai-go/shared/constant"
 	"k8s.io/utils/ptr"
 
+	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -31,6 +36,8 @@ import (
 const (
 	anthropicVersionKey   = "anthropic_version"
 	tempNotSupportedError = "temperature %.2f is not supported by Anthropic (must be between 0.0 and 1.0)"
+
+	anthropicBetaHeaderName = "anthropic-beta"
 )
 
 // anthropicInputSchemaKeysToSkip defines the keys from an OpenAI function parameter map
@@ -39,6 +46,42 @@ var anthropicInputSchemaKeysToSkip = map[string]struct{}{
 	"required":   {},
 	"type":       {},
 	"properties": {},
+}
+
+// openAIToolParamsToAnthropicInputSchema converts OpenAI function parameters to an Anthropic ToolInputSchemaParam.
+func openAIToolParamsToAnthropicInputSchema(parameters any) (anthropic.ToolInputSchemaParam, error) {
+	var schema anthropic.ToolInputSchemaParam
+	if parameters == nil {
+		return schema, nil
+	}
+	paramsMap, ok := parameters.(map[string]any)
+	if !ok {
+		return schema, fmt.Errorf("failed to cast tool parameters to map[string]any")
+	}
+	if typeVal, ok := paramsMap["type"].(string); ok {
+		schema.Type = constant.Object(typeVal)
+	}
+	if propsVal, ok := paramsMap["properties"].(map[string]any); ok {
+		schema.Properties = propsVal
+	}
+	if requiredVal, ok := paramsMap["required"].([]any); ok {
+		requiredSlice := make([]string, len(requiredVal))
+		for i, v := range requiredVal {
+			if s, ok := v.(string); ok {
+				requiredSlice[i] = s
+			}
+		}
+		schema.Required = requiredSlice
+	}
+	extraFields := make(map[string]any)
+	for key, value := range paramsMap {
+		if _, found := anthropicInputSchemaKeysToSkip[key]; found {
+			continue
+		}
+		extraFields[key] = value
+	}
+	schema.ExtraFields = extraFields
+	return schema, nil
 }
 
 func anthropicToOpenAIFinishReason(stopReason anthropic.StopReason) (openai.ChatCompletionChoicesFinishReason, error) {
@@ -131,73 +174,52 @@ func translateOpenAItoAnthropicTools(openAITools []openai.Tool, openAIToolChoice
 	if len(openAITools) > 0 {
 		anthropicTools := make([]anthropic.ToolUnionParam, 0, len(openAITools))
 		for _, openAITool := range openAITools {
-			if openAITool.Type != openai.ToolTypeFunction || openAITool.Function == nil {
-				// Anthropic only supports 'function' tools, so we skip others.
+			if openAITool.Type == openai.ToolTypeAnthropicWebSearch {
+				anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
+					OfWebSearchTool20260209: &anthropic.WebSearchTool20260209Param{
+						Name: constant.WebSearch(openAITool.Name),
+						Type: constant.WebSearch20260209(openAITool.Type),
+					},
+				})
 				continue
+			}
+
+			if openAITool.Type != openai.ToolTypeFunction {
+				err = fmt.Errorf("%w: unsupported tool type: %s", internalapi.ErrInvalidRequestBody, openAITool.Type)
+				return
+			}
+			if openAITool.Function == nil {
+				err = fmt.Errorf("%w: tool of type 'function' is missing function definition", internalapi.ErrInvalidRequestBody)
+				return
 			}
 			toolParam := anthropic.ToolParam{
 				Name:        openAITool.Function.Name,
 				Description: anthropic.String(openAITool.Function.Description),
 			}
 
+			if openAITool.Function.Strict {
+				toolParam.Strict = anthropic.Bool(true)
+			}
+
+			if openAITool.Function.EagerInputStreaming != nil {
+				toolParam.EagerInputStreaming = anthropic.Bool(*openAITool.Function.EagerInputStreaming)
+			}
+
 			if isCacheEnabled(openAITool.Function.AnthropicContentFields) {
 				toolParam.CacheControl = anthropic.NewCacheControlEphemeralParam()
 			}
 
-			// The parameters for the function are expected to be a JSON Schema object.
-			// We can pass them through as-is.
 			if openAITool.Function.Parameters != nil {
-				paramsMap, ok := openAITool.Function.Parameters.(map[string]any)
-				if !ok {
-					err = fmt.Errorf("failed to cast tool parameters to map[string]interface{}")
+				toolParam.InputSchema, err = openAIToolParamsToAnthropicInputSchema(openAITool.Function.Parameters)
+				if err != nil {
 					return
 				}
-
-				inputSchema := anthropic.ToolInputSchemaParam{}
-
-				var typeVal string
-				if typeVal, ok = paramsMap["type"].(string); ok {
-					inputSchema.Type = constant.Object(typeVal)
-				}
-
-				var propsVal map[string]any
-				if propsVal, ok = paramsMap["properties"].(map[string]any); ok {
-					inputSchema.Properties = propsVal
-				}
-
-				var requiredVal []any
-				if requiredVal, ok = paramsMap["required"].([]any); ok {
-					requiredSlice := make([]string, len(requiredVal))
-					for i, v := range requiredVal {
-						if s, ok := v.(string); ok {
-							requiredSlice[i] = s
-						}
-					}
-					inputSchema.Required = requiredSlice
-				}
-
-				// ExtraFieldsMap to construct
-				ExtraFieldsMap := make(map[string]any)
-
-				// Iterate over the original map from openai
-				for key, value := range paramsMap {
-					// Check if the current key should be skipped
-					if _, found := anthropicInputSchemaKeysToSkip[key]; found {
-						continue
-					}
-
-					// If not skipped, add the key-value pair to extra field map
-					ExtraFieldsMap[key] = value
-				}
-				inputSchema.ExtraFields = ExtraFieldsMap
-
-				toolParam.InputSchema = inputSchema
 			}
 
 			anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{OfTool: &toolParam})
-			if len(anthropicTools) > 0 {
-				tools = anthropicTools
-			}
+		}
+		if len(anthropicTools) > 0 {
+			tools = anthropicTools
 		}
 
 		// 2. Handle the tool_choice parameter.
@@ -425,6 +447,10 @@ func openAIMessageToAnthropicMessageRoleAssistant(openAiMessage *openai.ChatComp
 	// Handle tool_calls (if any).
 	for i := range openAiMessage.ToolCalls {
 		toolCall := &openAiMessage.ToolCalls[i]
+		if toolCall.ID == nil {
+			err = fmt.Errorf("%w: tool_call at index %d is missing required field 'id'", internalapi.ErrInvalidRequestBody, i)
+			return
+		}
 		var input map[string]any
 		if err = json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
 			err = fmt.Errorf("failed to unmarshal tool call arguments: %w", err)
@@ -545,7 +571,12 @@ func openAIToAnthropicMessages(openAIMsgs []openai.ChatCompletionMessageParamUni
 					IsError:   anthropic.Bool(isError),
 				}
 
-				if cacheControl != nil {
+				// Prefer message-level cache_control so string tool results can
+				// carry a breakpoint; fall back to content-part markers.
+				switch {
+				case isCacheEnabled(toolMsg.AnthropicContentFields):
+					toolResultBlock.CacheControl = toolMsg.CacheControl
+				case cacheControl != nil:
 					toolResultBlock.CacheControl = *cacheControl
 				}
 
@@ -607,10 +638,15 @@ func modelContainsAny(model internalapi.RequestModel, identifiers []string) bool
 	return false
 }
 
-// outputConfigModels lists model identifiers that support structured outputs (OutputConfig).
-// Structured outputs are available on Claude Opus 4.6, Claude Sonnet 4.6, Claude Sonnet 4.5, Claude Opus 4.5, and Claude Haiku 4.5.
+// Structured output (OutputConfig) support differs by backend. The supported
+// model list on AWS Bedrock (InvokeModel) is a strict subset of the list on
+// GCP Vertex AI, so the lists are maintained separately and selected by schema.
 // See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
-var outputConfigModels = []string{
+
+// awsOutputConfigModels lists model identifiers that support structured outputs
+// on AWS Bedrock via the InvokeModel API: Claude Opus 4.6, Claude Sonnet 4.6,
+// Claude Sonnet 4.5, Claude Opus 4.5, and Claude Haiku 4.5.
+var awsOutputConfigModels = []string{
 	"opus-4-5",   // Claude Opus 4.5
 	"sonnet-4-5", // Claude Sonnet 4.5
 	"haiku-4-5",  // Claude Haiku 4.5
@@ -618,18 +654,59 @@ var outputConfigModels = []string{
 	"sonnet-4-6", // Claude Sonnet 4.6
 }
 
-func outputConfigAvailable(model internalapi.RequestModel) bool {
-	return modelContainsAny(model, outputConfigModels)
+// gcpOutputConfigModels lists model identifiers that support structured outputs
+// on GCP Vertex AI: Claude Fable 5, Claude Mythos 5, Claude Opus 5.5,
+// Claude Opus 5, Claude Opus 4.8, Claude Mythos Preview, Claude Opus 4.7,
+// Claude Opus 4.6, Claude Sonnet 5.5, Claude Sonnet 5, Claude Sonnet 4.6,
+// Claude Sonnet 4.5, Claude Opus 4.5, Claude Haiku 5.5, and Claude Haiku 4.5.
+var gcpOutputConfigModels = []string{
+	"opus-4-5",       // Claude Opus 4.5
+	"sonnet-4-5",     // Claude Sonnet 4.5
+	"haiku-4-5",      // Claude Haiku 4.5
+	"opus-4-6",       // Claude Opus 4.6
+	"sonnet-4-6",     // Claude Sonnet 4.6
+	"opus-4-7",       // Claude Opus 4.7
+	"opus-4-8",       // Claude Opus 4.8
+	"opus-5",         // Claude Opus 5
+	"opus-5-5",       // Claude Opus 5.5
+	"sonnet-5",       // Claude Sonnet 5
+	"sonnet-5-5",     // Claude Sonnet 5.5
+	"haiku-5-5",      // Claude Haiku 5.5
+	"fable-5",        // Claude Fable 5
+	"mythos-5",       // Claude Mythos 5
+	"mythos-preview", // Claude Mythos Preview
+}
+
+func outputConfigAvailable(apiSchema filterapi.APISchemaName, model internalapi.RequestModel) bool {
+	switch apiSchema {
+	case filterapi.APISchemaGCPAnthropic:
+		return modelContainsAny(model, gcpOutputConfigModels)
+	case filterapi.APISchemaAWSAnthropic:
+		return modelContainsAny(model, awsOutputConfigModels)
+	default:
+		return false
+	}
 }
 
 // effortModels lists model identifiers that support the output_config.effort parameter.
-// The effort parameter is supported by Claude Mythos Preview, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 4.6, and Claude Opus 4.5.
+// The effort parameter is supported by Claude Fable 5, Claude Mythos 5,
+// Claude Opus 5.5, Claude Opus 5, Claude Opus 4.8, Claude Mythos Preview,
+// Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 5.5, Claude Sonnet 5,
+// Claude Sonnet 4.6, Claude Haiku 5.5, and Claude Opus 4.5.
 // See: https://platform.claude.com/docs/en/build-with-claude/effort
 var effortModels = []string{
 	"opus-4-5",       // Claude Opus 4.5
 	"opus-4-6",       // Claude Opus 4.6
 	"opus-4-7",       // Claude Opus 4.7
+	"opus-4-8",       // Claude Opus 4.8
+	"opus-5",         // Claude Opus 5
+	"opus-5-5",       // Claude Opus 5.5
 	"sonnet-4-6",     // Claude Sonnet 4.6
+	"sonnet-5",       // Claude Sonnet 5
+	"sonnet-5-5",     // Claude Sonnet 5.5
+	"haiku-5-5",      // Claude Haiku 5.5
+	"fable-5",        // Claude Fable 5
+	"mythos-5",       // Claude Mythos 5
 	"mythos-preview", // Claude Mythos Preview
 }
 
@@ -658,8 +735,9 @@ func mapReasoningEffortToOutputConfigEffort(reasonEffort openai.ReasoningEffort)
 
 // buildAnthropicParams is a helper function that translates an OpenAI request
 // into the parameter struct required by the Anthropic SDK.
-// The apiSchema parameter indicates the backend API schema (e.g., "AWSAnthropic", "GCPAnthropic").
-func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest, apiSchema string, modelNameOverride internalapi.ModelNameOverride) (params *anthropic.MessageNewParams, err error) {
+// The apiSchema parameter indicates the backend API schema (e.g., APISchemaAWSAnthropic,
+// APISchemaGCPAnthropic) and is used to gate backend-specific feature support.
+func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest, apiSchema filterapi.APISchemaName, modelNameOverride internalapi.ModelNameOverride) (params *anthropic.MessageNewParams, err error) {
 	// 1. Handle simple parameters.
 	// max_tokens is required by the Anthropic API but optional in the OpenAI API.
 	// If not set, pass 0 and let the Anthropic API reject the request.
@@ -692,25 +770,31 @@ func buildAnthropicParams(openAIReq *openai.ChatCompletionRequest, apiSchema str
 
 	// 5. Handle structured outputs (ResponseFormat -> OutputConfig).
 	// See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
-	// Currently, GCP Vertex AI does not support structured output.
+	// Structured output is generally available on both AWS Bedrock and GCP Vertex AI.
 	// Use modelNameOverride for feature checks when available, as it is more
 	// reliable than the user-provided model name which may be arbitrarily set.
 	featureCheckModel := openAIReq.Model
 	if modelNameOverride != "" {
 		featureCheckModel = modelNameOverride
 	}
-	isGCPBackend := strings.HasPrefix(apiSchema, "GCP")
-	if !isGCPBackend && openAIReq.ResponseFormat != nil && openAIReq.ResponseFormat.OfJSONSchema != nil && outputConfigAvailable(featureCheckModel) {
-		// Convert OpenAI JSON schema to Anthropic OutputConfig format
+	if openAIReq.ResponseFormat != nil && openAIReq.ResponseFormat.OfJSONSchema != nil && outputConfigAvailable(apiSchema, featureCheckModel) {
+		// Validate that the OpenAI JSON schema is an object while retaining its
+		// original bytes. Anthropic's SDK sorts map keys when marshaling, which
+		// would otherwise change the property order seen by Claude.
+		rawSchema := openAIReq.ResponseFormat.OfJSONSchema.JSONSchema.Schema
 		var schemaMap map[string]any
-		if err = json.Unmarshal(openAIReq.ResponseFormat.OfJSONSchema.JSONSchema.Schema, &schemaMap); err != nil {
+		if err = json.Unmarshal(rawSchema, &schemaMap); err != nil {
 			return nil, fmt.Errorf("failed to parse JSON schema: %w", err)
 		}
+		format := anthropic.JSONOutputFormatParam{
+			Type:   constant.JSONSchema("json_schema"),
+			Schema: schemaMap,
+		}
+		// Override only the serialized schema with the validated raw JSON. Keeping
+		// Schema populated above preserves the typed representation for callers.
+		format.SetExtraFields(map[string]any{"schema": rawSchema})
 		params.OutputConfig = anthropic.OutputConfigParam{
-			Format: anthropic.JSONOutputFormatParam{
-				Type:   constant.JSONSchema("json_schema"),
-				Schema: schemaMap,
-			},
+			Format: format,
 		}
 	}
 
@@ -772,8 +856,9 @@ func anthropicToolUseToOpenAICalls(block *anthropic.ContentBlockUnion) ([]openai
 // following are streaming part
 
 var (
-	sseEventPrefix = []byte("event: ")
-	emptyStrPtr    = ptr.To("")
+	sseEventPrefixSpace = []byte("event: ")
+	sseEventPrefix      = []byte("event:")
+	emptyStrPtr         = ptr.To("")
 )
 
 // streamingToolCall holds the state for a single tool call that is being streamed.
@@ -797,6 +882,18 @@ type anthropicStreamParser struct {
 	created         openai.JSONUNIXTime
 }
 
+// overloadedErrorType is the error type of Anthropic's in-stream overload event. The gateway sends the same
+// type to clients, which match on it, so it must not change.
+const overloadedErrorType = "overloaded_error"
+
+// anthropicStreamError is the error of an Anthropic SSE error event.
+type anthropicStreamError anthropicschema.ErrorResponseMessage
+
+// Error implements error.
+func (e *anthropicStreamError) Error() string {
+	return fmt.Sprintf("anthropic stream error: %s - %s", e.Type, e.Message)
+}
+
 // newAnthropicStreamParser creates a new parser for a streaming request.
 func newAnthropicStreamParser(requestModel string) *anthropicStreamParser {
 	toolIdx := int64(-1)
@@ -810,6 +907,13 @@ func newAnthropicStreamParser(requestModel string) *anthropicStreamParser {
 func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error {
 	chunk, err := p.parseAndHandleEvent(eventBlock)
 	if err != nil {
+		var streamErr *anthropicStreamError
+		if errors.As(err, &streamErr) && streamErr.Type == overloadedErrorType {
+			if serializeErr := serializeOpenAIOverloadedStreamError(streamErr.Message, buf); serializeErr != nil {
+				return serializeErr
+			}
+			return &StreamOverloadedError{Err: streamErr}
+		}
 		return err
 	}
 	if chunk != nil {
@@ -818,6 +922,84 @@ func (p *anthropicStreamParser) writeChunk(eventBlock []byte, buf *[]byte) error
 			return err
 		}
 	}
+	return nil
+}
+
+// serializeOpenAIOverloadedStreamError writes an OpenAI-style SSE error event for a mid-stream overload.
+func serializeOpenAIOverloadedStreamError(message string, buf *[]byte) error {
+	errorBytes, err := json.Marshal(struct {
+		Error openai.ErrorType `json:"error"`
+	}{
+		Error: openai.ErrorType{Type: overloadedErrorType, Message: message},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal overloaded stream error: %w", err)
+	}
+
+	*buf = append(*buf, sseDataPrefixSpace...)
+	*buf = append(*buf, errorBytes...)
+	*buf = append(*buf, '\n', '\n')
+	return nil
+}
+
+type messageDeltaUsageFields struct {
+	Usage *struct {
+		InputTokens              *int64 `json:"input_tokens"`
+		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
+}
+
+func (p *anthropicStreamParser) updateInputUsageFromMessageDelta(data []byte) error {
+	// message_delta provides cumulative (not incremental) token counts.
+	// This function handles input_tokens, cache_read_input_tokens, and cache_creation_input_tokens
+	// from message_delta. We use Set (not Add) because these are cumulative totals.
+	// This prevents double-counting when both message_start and message_delta report the same
+	// cache tokens, and also handles cases where:
+	// - Cache tokens are reported only in message_delta (not in message_start)
+	// - message_delta provides corrected/updated cache token values that override message_start
+	var event messageDeltaUsageFields
+	if err := json.Unmarshal(data, &event); err != nil {
+		return fmt.Errorf("unmarshal message_delta usage fields: %w", err)
+	}
+	if event.Usage == nil {
+		return nil
+	}
+
+	u := event.Usage
+	inputPresent := u.InputTokens != nil && *u.InputTokens >= 0
+	cacheReadPresent := u.CacheReadInputTokens != nil && *u.CacheReadInputTokens >= 0
+	cacheCreationPresent := u.CacheCreationInputTokens != nil && *u.CacheCreationInputTokens >= 0
+	if !inputPresent && !cacheReadPresent && !cacheCreationPresent {
+		return nil
+	}
+
+	baseInputTokens := uint32(0)
+	if inputPresent {
+		baseInputTokens = uint32(*u.InputTokens) //nolint:gosec
+	} else if inputTokens, ok := p.tokenUsage.InputTokens(); ok {
+		baseInputTokens = inputTokens
+		if cachedTokens, ok := p.tokenUsage.CachedInputTokens(); ok && baseInputTokens >= cachedTokens {
+			baseInputTokens -= cachedTokens
+		}
+		if cacheCreationTokens, ok := p.tokenUsage.CacheCreationInputTokens(); ok && baseInputTokens >= cacheCreationTokens {
+			baseInputTokens -= cacheCreationTokens
+		}
+	}
+
+	cachedTokens, _ := p.tokenUsage.CachedInputTokens()
+	if cacheReadPresent {
+		cachedTokens = uint32(*u.CacheReadInputTokens) //nolint:gosec
+		p.tokenUsage.SetCachedInputTokens(cachedTokens)
+	}
+
+	cacheCreationTokens, _ := p.tokenUsage.CacheCreationInputTokens()
+	if cacheCreationPresent {
+		cacheCreationTokens = uint32(*u.CacheCreationInputTokens) //nolint:gosec
+		p.tokenUsage.SetCacheCreationInputTokens(cacheCreationTokens)
+	}
+
+	p.tokenUsage.SetInputTokens(baseInputTokens + cachedTokens + cacheCreationTokens)
 	return nil
 }
 
@@ -864,6 +1046,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 		totalTokens, _ := p.tokenUsage.TotalTokens()
 		cachedTokens, _ := p.tokenUsage.CachedInputTokens()
 		cacheCreationTokens, _ := p.tokenUsage.CacheCreationInputTokens()
+		reasoningTokens, _ := p.tokenUsage.ReasoningTokens()
 		finalChunk := openai.ChatCompletionResponseChunk{
 			ID:      p.activeMessageID,
 			Created: p.created,
@@ -874,8 +1057,11 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 				CompletionTokens: int(outputTokens),
 				TotalTokens:      int(totalTokens),
 				PromptTokensDetails: &openai.PromptTokensDetails{
-					CachedTokens:        int(cachedTokens),
-					CacheCreationTokens: int(cacheCreationTokens),
+					CachedTokens:     int(cachedTokens),
+					CacheWriteTokens: int(cacheCreationTokens),
+				},
+				CompletionTokensDetails: &openai.CompletionTokensDetails{
+					ReasoningTokens: int(reasoningTokens),
 				},
 			},
 			Model: p.requestModel,
@@ -911,7 +1097,7 @@ func (p *anthropicStreamParser) Process(body io.Reader, endOfStream bool, span t
 			}
 		}
 		// Add the final [DONE] message to indicate the end of the stream.
-		newBody = append(newBody, sseDataPrefix...)
+		newBody = append(newBody, sseDataPrefixSpace...)
 		newBody = append(newBody, sseDoneMessage...)
 		newBody = append(newBody, '\n', '\n')
 	}
@@ -925,9 +1111,9 @@ func (p *anthropicStreamParser) parseAndHandleEvent(eventBlock []byte) (*openai.
 
 	lines := bytes.SplitSeq(eventBlock, []byte("\n"))
 	for line := range lines {
-		if after, ok := bytes.CutPrefix(line, sseEventPrefix); ok {
+		if after, ok := cutSSEFieldPrefix(line, sseEventPrefix); ok {
 			eventType = bytes.TrimSpace(after)
-		} else if after, ok := bytes.CutPrefix(line, sseDataPrefix); ok {
+		} else if after, ok := cutSSEDataPrefix(line); ok {
 			// This handles JSON data that might be split across multiple 'data:' lines
 			// by concatenating them (Anthropic's format).
 			data := bytes.TrimSpace(after)
@@ -958,8 +1144,8 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 			&u.CacheReadInputTokens,
 			&u.CacheCreationInputTokens,
 		)
-		// For message_start, we store the initial usage but don't add to the accumulated
-		// The message_delta event will contain the final totals
+		// Set all input token counts (input, cache read, cache creation) from message_start.
+		// message_delta may also contain these fields but only output_tokens is used from it.
 		if input, ok := usage.InputTokens(); ok {
 			p.tokenUsage.SetInputTokens(input)
 		}
@@ -1023,11 +1209,11 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 					},
 				},
 			}
-			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+			return p.constructOpenAIChatCompletionChunk(&delta, ""), nil
 		}
 		if event.ContentBlock.Type == string(constant.ValueOf[constant.Thinking]()) {
 			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: emptyStrPtr}
-			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+			return p.constructOpenAIChatCompletionChunk(&delta, ""), nil
 		}
 
 		if event.ContentBlock.Type == string(constant.ValueOf[constant.RedactedThinking]()) {
@@ -1042,27 +1228,30 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if err := json.Unmarshal(data, &event); err != nil {
 			return nil, fmt.Errorf("unmarshal message_delta: %w", err)
 		}
+		// Update input and cache token usage from message_delta.
+		// This handles cases where cache tokens are only in message_delta,
+		// or where message_delta provides corrected totals that override message_start.
+		if err := p.updateInputUsageFromMessageDelta(data); err != nil {
+			return nil, err
+		}
 		u := event.Usage
-		usage := metrics.ExtractTokenUsageFromExplicitCaching(
-			u.InputTokens,
-			u.OutputTokens,
-			&u.CacheReadInputTokens,
-			&u.CacheCreationInputTokens,
-		)
-		// For message_delta, accumulate the incremental output tokens
-		if output, ok := usage.OutputTokens(); ok {
-			p.tokenUsage.AddOutputTokens(output)
+		// message_delta provides cumulative (not incremental) output token counts.
+		// Use Set (not Add) because the value is cumulative.
+		// message_start typically reports output_tokens=0, and message_delta
+		// provides the final output token count.
+		//
+		// Guard with the SDK's JSON presence fields (Valid()): MessageDeltaUsage
+		// uses non-pointer int64 fields that default to 0 when absent, so a bare
+		// value check cannot distinguish "not provided" from "actually zero". A
+		// stream may emit multiple message_delta events (usage is cumulative), so a
+		// later message_delta that omits usage must NOT clobber output/reasoning
+		// tokens set by an earlier one — see
+		// https://docs.anthropic.com/en/api/messages-streaming
+		if u.JSON.OutputTokens.Valid() {
+			p.tokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
 		}
-		// Update input tokens to include any cache tokens from delta
-		if cached, ok := usage.CachedInputTokens(); ok {
-			p.tokenUsage.AddInputTokens(cached)
-			// Accumulate any additional cache tokens from delta
-			p.tokenUsage.AddCachedInputTokens(cached)
-		}
-		if cacheCreation, ok := usage.CacheCreationInputTokens(); ok {
-			p.tokenUsage.AddInputTokens(cacheCreation)
-			// Accumulate cache creation tokens
-			p.tokenUsage.AddCacheCreationInputTokens(cacheCreation)
+		if u.JSON.OutputTokensDetails.Valid() && u.OutputTokensDetails.JSON.ThinkingTokens.Valid() {
+			p.tokenUsage.SetReasoningTokens(uint32(u.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 		}
 		if event.Delta.StopReason != "" {
 			p.stopReason = event.Delta.StopReason
@@ -1076,9 +1265,16 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		}
 		switch event.Delta.Type {
 		case string(constant.ValueOf[constant.TextDelta]()), string(constant.ValueOf[constant.ThinkingDelta]()):
-			// Treat thinking_delta just like a text_delta.
-			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: &event.Delta.Text}
-			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+			// Treat thinking_delta just like a text_delta, but read the field
+			// that belongs to the variant: RawContentBlockDeltaUnion.Text is
+			// only populated for text_delta, and .Thinking only for
+			// thinking_delta.
+			text := event.Delta.Text
+			if event.Delta.Type == string(constant.ValueOf[constant.ThinkingDelta]()) {
+				text = event.Delta.Thinking
+			}
+			delta := openai.ChatCompletionResponseChunkChoiceDelta{Content: &text}
+			return p.constructOpenAIChatCompletionChunk(&delta, ""), nil
 		case string(constant.ValueOf[constant.InputJSONDelta]()):
 			tool, ok := p.activeToolCalls[p.toolIndex]
 			if !ok {
@@ -1095,7 +1291,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 				},
 			}
 			tool.inputJSON += event.Delta.PartialJSON
-			return p.constructOpenAIChatCompletionChunk(delta, ""), nil
+			return p.constructOpenAIChatCompletionChunk(&delta, ""), nil
 		}
 
 	case string(constant.ValueOf[constant.ContentBlockStop]()):
@@ -1121,24 +1317,29 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		if err != nil {
 			return nil, err
 		}
-		return p.constructOpenAIChatCompletionChunk(openai.ChatCompletionResponseChunkChoiceDelta{}, finishReason), nil
+		return p.constructOpenAIChatCompletionChunk(&openai.ChatCompletionResponseChunkChoiceDelta{}, finishReason), nil
 
 	case string(constant.ValueOf[constant.Error]()):
-		var errEvent anthropic.ErrorResponse
+		var errEvent anthropicschema.ErrorResponse
 		if err := json.Unmarshal(data, &errEvent); err != nil {
 			return nil, fmt.Errorf("unparsable error event: %s", string(data))
 		}
-		return nil, fmt.Errorf("anthropic stream error: %s - %s", errEvent.Error.Type, errEvent.Error.Message)
+		return nil, (*anthropicStreamError)(&errEvent.Error)
 
 	case "ping":
-		// Per documentation, ping events can be ignored.
-		return nil, nil
+		// Anthropic sends ping events periodically to keep the stream alive.
+		// Emit an empty chunk (empty delta, no finish reason) so that idle
+		// downstream connections stay alive during long gaps between content
+		// events. An empty delta does not carry content or the assistant role,
+		// so it does not consume the role-bearing "first chunk" slot; the role
+		// is still emitted on the first real content/tool-call chunk.
+		return p.constructOpenAIChatCompletionChunk(&openai.ChatCompletionResponseChunkChoiceDelta{}, ""), nil
 	}
 	return nil, nil
 }
 
 // constructOpenAIChatCompletionChunk builds the stream chunk.
-func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta openai.ChatCompletionResponseChunkChoiceDelta, finishReason openai.ChatCompletionChoicesFinishReason) *openai.ChatCompletionResponseChunk {
+func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta *openai.ChatCompletionResponseChunkChoiceDelta, finishReason openai.ChatCompletionChoicesFinishReason) *openai.ChatCompletionResponseChunk {
 	// Add the 'assistant' role to the very first chunk of the response.
 	if !p.sentFirstChunk {
 		// Only add the role if the delta actually contains content or a tool call.
@@ -1154,7 +1355,7 @@ func (p *anthropicStreamParser) constructOpenAIChatCompletionChunk(delta openai.
 		Object:  "chat.completion.chunk",
 		Choices: []openai.ChatCompletionResponseChunkChoice{
 			{
-				Delta:        &delta,
+				Delta:        delta,
 				FinishReason: finishReason,
 			},
 		},
@@ -1178,18 +1379,23 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 		&usage.CacheReadInputTokens,
 		&usage.CacheCreationInputTokens,
 	)
+	tokenUsage.SetReasoningTokens(uint32(usage.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 	inputTokens, _ := tokenUsage.InputTokens()
 	outputTokens, _ := tokenUsage.OutputTokens()
 	totalTokens, _ := tokenUsage.TotalTokens()
 	cachedTokens, _ := tokenUsage.CachedInputTokens()
 	cacheCreationTokens, _ := tokenUsage.CacheCreationInputTokens()
+	reasoningTokens, _ := tokenUsage.ReasoningTokens()
 	openAIResp.Usage = openai.Usage{
 		CompletionTokens: int(outputTokens),
 		PromptTokens:     int(inputTokens),
 		TotalTokens:      int(totalTokens),
 		PromptTokensDetails: &openai.PromptTokensDetails{
-			CachedTokens:        int(cachedTokens),
-			CacheCreationTokens: int(cacheCreationTokens),
+			CachedTokens:     int(cachedTokens),
+			CacheWriteTokens: int(cacheCreationTokens),
+		},
+		CompletionTokensDetails: &openai.CompletionTokensDetails{
+			ReasoningTokens: int(reasoningTokens),
 		},
 	}
 
@@ -1253,4 +1459,83 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 	}
 	openAIResp.Choices = append(openAIResp.Choices, choice)
 	return openAIResp, tokenUsage, nil
+}
+
+// awsAnthropicCountTokensPath builds the AWS Bedrock CountTokens request path
+// (POST /model/{modelId}/count-tokens) for an Anthropic (Claude) model.
+//
+// This is Anthropic-specific, not generic Bedrock: CountTokens does not accept
+// cross-region inference (CRIS) model IDs (e.g. "us.anthropic.claude-sonnet-4-6"
+// returns "The provided model doesn't support counting tokens"). A CRIS ID prepends
+// a geography prefix (e.g. "us.", "eu.", "apac.", "us-gov.") to the base model ID;
+// anchor on the "anthropic." provider segment and drop anything before it, so every
+// geography prefix is handled regardless of length. A bare base ID
+// ("anthropic.claude-...") has the segment at index 0 and is left as-is. The base
+// model ID is then URL-escaped so ARNs and special characters are safe in the path.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html
+func awsAnthropicCountTokensPath(model string) string {
+	if i := strings.Index(model, "anthropic."); i > 0 {
+		model = model[i:]
+	}
+	return fmt.Sprintf(awsBedrockCountTokensPathFormat, url.PathEscape(model))
+}
+
+// openAIToAnthropicCountTokensParams builds the Anthropic MessageCountTokensParams
+// from an OpenAI-compatible tokenize chat request. Shared by GCP and AWS Anthropic tokenize translators.
+//
+// Only the fields that affect the counted input tokens are mapped: Messages, Model,
+// System, and Tools. Per the Anthropic count_tokens endpoint, the counted input covers
+// system prompts, tools, images, PDFs, and current-turn thinking blocks (all of which
+// arrive via Messages/System/Tools here). The remaining MessageCountTokensParams fields
+// are intentionally omitted because they do not change the returned count:
+//   - CacheControl: a no-op for token counting; caching only happens during message creation.
+//   - Thinking: the thinking config adds no input tokens; only thinking blocks already
+//     present in Messages count.
+//   - OutputConfig: structured outputs constrain decoding (output), not the input prompt.
+//   - ToolChoice: a generation-time control, not counted content.
+func openAIToAnthropicCountTokensParams(chatReq *tokenize.ChatRequest, model internalapi.RequestModel) (*anthropic.MessageCountTokensParams, error) {
+	messages, systemBlocks, err := openAIToAnthropicMessages(chatReq.Messages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert messages: %w", err)
+	}
+
+	params := &anthropic.MessageCountTokensParams{
+		Messages: messages,
+		Model:    model,
+	}
+
+	if len(systemBlocks) > 0 {
+		if len(systemBlocks) == 1 {
+			params.System = anthropic.MessageCountTokensParamsSystemUnion{
+				OfString: anthropic.String(systemBlocks[0].Text),
+			}
+		} else {
+			textBlocks := make([]anthropic.TextBlockParam, len(systemBlocks))
+			for i, block := range systemBlocks {
+				textBlocks[i] = anthropic.TextBlockParam{Text: block.Text}
+			}
+			params.System = anthropic.MessageCountTokensParamsSystemUnion{
+				OfTextBlockArray: textBlocks,
+			}
+		}
+	}
+
+	if len(chatReq.Tools) > 0 {
+		params.Tools = make([]anthropic.MessageCountTokensToolUnionParam, 0, len(chatReq.Tools))
+		for _, tool := range chatReq.Tools {
+			if tool.Function == nil {
+				continue
+			}
+			inputSchema, err := openAIToolParamsToAnthropicInputSchema(tool.Function.Parameters)
+			if err != nil {
+				return nil, err
+			}
+			params.Tools = append(params.Tools, anthropic.MessageCountTokensToolParamOfTool(
+				inputSchema,
+				tool.Function.Name,
+			))
+		}
+	}
+
+	return params, nil
 }

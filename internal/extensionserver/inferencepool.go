@@ -121,7 +121,7 @@ func getInferencePoolByMetadata(meta *corev3.Metadata) *gwaiev1.InferencePool {
 			},
 		},
 		Spec: gwaiev1.InferencePoolSpec{
-			EndpointPickerRef: gwaiev1.EndpointPickerRef{
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{
 				Name: gwaiev1.ObjectName(serviceName),
 				Port: ptr.To(gwaiev1.Port{Number: gwaiev1.PortNumber(port)}),
 			},
@@ -130,24 +130,26 @@ func getInferencePoolByMetadata(meta *corev3.Metadata) *gwaiev1.InferencePool {
 }
 
 // buildMetadataForInferencePool adds InferencePool metadata to the cluster for reference by other components.
-// encoded as a string in the format: "namespace/name/serviceName/port".
+// encoded as a string in the format: "namespace/name/serviceName/port/bodyMode/allowModeOverride".
 func buildEPPMetadataForCluster(cluster *clusterv3.Cluster, inferencePool *gwaiev1.InferencePool) {
 	// Initialize cluster metadata structure if not present.
+	if cluster.Metadata == nil {
+		cluster.Metadata = &corev3.Metadata{}
+	}
 	buildEPPMetadata(cluster.Metadata, inferencePool)
 }
 
 // buildMetadataForInferencePool adds InferencePool metadata to the route for reference by other components.
 func buildEPPMetadataForRoute(route *routev3.Route, inferencePool *gwaiev1.InferencePool) {
 	// Initialize route metadata structure if not present.
+	if route.Metadata == nil {
+		route.Metadata = &corev3.Metadata{}
+	}
 	buildEPPMetadata(route.Metadata, inferencePool)
 }
 
 // buildEPPMetadata adds InferencePool metadata to the given metadata structure.
 func buildEPPMetadata(metadata *corev3.Metadata, inferencePool *gwaiev1.InferencePool) {
-	// Initialize cluster metadata structure if not present.
-	if metadata == nil {
-		metadata = &corev3.Metadata{}
-	}
 	if metadata.FilterMetadata == nil {
 		metadata.FilterMetadata = make(map[string]*structpb.Struct)
 	}
@@ -267,6 +269,39 @@ func buildExtProcClusterForInferencePoolEndpointPicker(pool *gwaiev1.InferencePo
 	}
 
 	return c, nil
+}
+
+// httpProtocolOptionsForInferencePoolBackend builds TypedExtensionProtocolOptions for the
+// InferencePool's backend cluster (the ORIGINAL_DST cluster used to reach the pool's selected
+// model-server Pods), honoring the InferencePool's spec.appProtocol.
+//
+// The InferencePool is not a Kubernetes Service, so Envoy Gateway has no appProtocol hint to
+// translate into upstream HTTP protocol options for this cluster the way it would for a normal
+// Service backend (see envoyproxy/gateway's resolveBackendProtocol, which maps the same
+// "kubernetes.io/h2c" string to explicit HTTP/2). We derive it ourselves here: h2c gets explicit
+// cleartext HTTP/2, everything else (including the default "http" and an unset value) gets
+// explicit HTTP/1.1.
+func httpProtocolOptionsForInferencePoolBackend(pool *gwaiev1.InferencePool) (map[string]*anypb.Any, error) {
+	explicitHTTPConfig := &upstreamsv3.HttpProtocolOptions_ExplicitHttpConfig{
+		ProtocolConfig: &upstreamsv3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{},
+	}
+	if pool.Spec.AppProtocol == gwaiev1.AppProtocolH2C {
+		explicitHTTPConfig.ProtocolConfig = &upstreamsv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+			Http2ProtocolOptions: &corev3.Http2ProtocolOptions{},
+		}
+	}
+
+	poAny, err := toAny(&upstreamsv3.HttpProtocolOptions{
+		UpstreamProtocolOptions: &upstreamsv3.HttpProtocolOptions_ExplicitHttpConfig_{
+			ExplicitHttpConfig: explicitHTTPConfig,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to build HTTP protocol options for InferencePool %s/%s: %w",
+			pool.Namespace, pool.Name, err)
+	}
+	const httpProtocolOptionsKey = "envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+	return map[string]*anypb.Any{httpProtocolOptionsKey: poAny}, nil
 }
 
 // buildInferencePoolHTTPFilter returns a HTTP filter for InferencePool.

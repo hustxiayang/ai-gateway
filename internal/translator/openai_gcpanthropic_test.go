@@ -28,6 +28,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
@@ -233,7 +234,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 				OfStringArray: []string{"stop1", "stop2"},
 			},
 		}
-		messageParam, err := buildAnthropicParams(openaiRequest, "GCPAnthropic", "")
+		messageParam, err := buildAnthropicParams(openaiRequest, filterapi.APISchemaGCPAnthropic, "")
 		require.NoError(t, err)
 		require.Equal(t, int64(100), messageParam.MaxTokens)
 		require.Equal(t, "0.1", messageParam.TopP.String())
@@ -252,7 +253,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_RequestBody(t *testing.T
 				OfString: openaigo.Opt[string]("stop1"),
 			},
 		}
-		messageParam, err := buildAnthropicParams(openaiRequest, "GCPAnthropic", "")
+		messageParam, err := buildAnthropicParams(openaiRequest, filterapi.APISchemaGCPAnthropic, "")
 		require.NoError(t, err)
 		require.Equal(t, int64(100), messageParam.MaxTokens)
 		require.Equal(t, "0.1", messageParam.TopP.String())
@@ -441,8 +442,10 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					TotalTokens:      38,
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens:        5,
+						CacheWriteTokens:    3,
 						CacheCreationTokens: 3,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -476,8 +479,10 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokens: 42, CompletionTokens: 15, TotalTokens: 57,
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens:        10,
+						CacheWriteTokens:    7,
 						CacheCreationTokens: 7,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -524,6 +529,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens: 2,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -557,6 +563,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens: 3,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -602,6 +609,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 					PromptTokensDetails: &openai.PromptTokensDetails{
 						CachedTokens: 1,
 					},
+					CompletionTokensDetails: &openai.CompletionTokensDetails{},
 				},
 				Choices: []openai.ChatCompletionResponseChoice{
 					{
@@ -648,10 +656,10 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 			expectedTokenUsage := tokenUsageFrom(
 				int32(tt.expectedOpenAIResponse.Usage.PromptTokens),                            // nolint:gosec
 				int32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CachedTokens),        // nolint:gosec
-				int32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CacheCreationTokens), // nolint:gosec
+				int32(tt.expectedOpenAIResponse.Usage.PromptTokensDetails.CacheWriteTokens),    // nolint:gosec
 				int32(tt.expectedOpenAIResponse.Usage.CompletionTokens),                        // nolint:gosec
 				int32(tt.expectedOpenAIResponse.Usage.TotalTokens),                             // nolint:gosec
-				-1,
+				int32(tt.expectedOpenAIResponse.Usage.CompletionTokensDetails.ReasoningTokens), // nolint:gosec
 			)
 			require.Equal(t, expectedTokenUsage, usedToken)
 
@@ -1603,6 +1611,49 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_Cache(t *testing.T) {
 		// Check that the tool definition in the 'tools' array is cached.
 		require.Equal(t, string(constant.ValueOf[constant.Ephemeral]()), result.Get("tools.0.cache_control.type").String(), "tool definition should be cached")
 		require.Equal(t, "get_weather", result.Get("tools.0.name").String())
+	})
+	t.Run("tool definition eager_input_streaming", func(t *testing.T) {
+		// The OpenAI path builds the Anthropic request from typed structs, so a field absent
+		// from FunctionDefinition cannot reach the backend at all. Assert on the serialized
+		// body rather than the struct, including the explicit false, which Anthropic reads as
+		// "keep buffering" rather than "unset".
+		for _, tc := range []struct {
+			name     string
+			eager    *bool
+			expected string
+		}{
+			{name: "true is forwarded", eager: ptr.To(true), expected: "true"},
+			{name: "false is forwarded, not dropped", eager: ptr.To(false), expected: "false"},
+			{name: "omitted stays absent", eager: nil, expected: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				openAIReq := &openai.ChatCompletionRequest{
+					Model: "gcp.claude-3.5-haiku",
+					Tools: []openai.Tool{
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:                "get_weather",
+								EagerInputStreaming: tc.eager,
+							},
+						},
+					},
+					Messages: []openai.ChatCompletionMessageParamUnion{
+						{OfUser: &openai.ChatCompletionUserMessageParam{
+							Role:    openai.ChatMessageRoleUser,
+							Content: openai.StringOrUserRoleContentUnion{Value: "What's the weather in New York?"},
+						}},
+					},
+					MaxTokens: ptr.To(int64(100)),
+				}
+
+				translator := NewChatCompletionOpenAIToGCPAnthropicTranslator("", "")
+				_, body, err := translator.RequestBody(nil, openAIReq, false)
+				require.NoError(t, err)
+
+				require.Equal(t, tc.expected, gjson.ParseBytes(body).Get("tools.0.eager_input_streaming").Raw)
+			})
+		}
 	})
 	t.Run("aggregated tool messages with mixed caching", func(t *testing.T) {
 		// This test ensures that caching is applied on a per-tool-message basis,

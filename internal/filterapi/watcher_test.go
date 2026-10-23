@@ -16,7 +16,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
@@ -51,92 +50,52 @@ func newTestLoggerWithBuffer() (*slog.Logger, internaltesting.OutBuffer) {
 	return logger, buf
 }
 
-func TestStartConfigWatcher(t *testing.T) {
-	// Virtualize time so sleeps take no time!
-	synctest.Test(t, testStartConfigWatcher)
-}
+func TestStartConfigBundleWatcher(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tmpdir := t.TempDir()
+		bundleDir := filepath.Join(tmpdir, "bundle")
+		require.NoError(t, os.MkdirAll(filepath.Join(bundleDir, "parts"), 0o700))
+		rcv := &mockReceiver{}
+		const tickInterval = time.Millisecond
 
-func testStartConfigWatcher(t *testing.T) {
-	t.Helper()
+		writeBundle := func(cfg string) {
+			raw := []byte(cfg)
+			requireAtomicWriteFile(t, tickInterval, filepath.Join(bundleDir, "parts/000"), raw, 0o600)
+			idx := &ConfigBundleIndex{
+				Checksum: ConfigBundleChecksum(raw),
+				Parts: []ConfigBundlePart{
+					{Name: "part-000", Path: "parts/000"},
+				},
+			}
+			idxRaw, err := MarshalConfigBundleIndex(idx)
+			require.NoError(t, err)
+			requireAtomicWriteFile(t, tickInterval, filepath.Join(bundleDir, ConfigBundleIndexFileName), idxRaw, 0o600)
+		}
 
-	tmpdir := t.TempDir()
-	path := tmpdir + "/config.yaml"
-	rcv := &mockReceiver{}
+		writeBundle("version: dev\nbackends:\n- name: first\n")
+		logger, buf := newTestLoggerWithBuffer()
+		err := StartConfigBundleWatcher(t.Context(), bundleDir, rcv, logger, tickInterval)
+		require.NoError(t, err)
 
-	// Create the initial config file.
-	const tickInterval = time.Millisecond
-	cfg := `
-version: dev
-schema:
-  name: OpenAI
-backends:
-- name: kserve
-  weight: 1
-  schema:
-    name: OpenAI
-- name: awsbedrock
-  weight: 10
-  schema:
-    name: AWSBedrock
-- name: openai
-  schema:
-    name: OpenAI
-`
-	requireAtomicWriteFile(t, tickInterval, path, []byte(cfg), 0o600)
+		require.Eventually(t, func() bool {
+			cfg := rcv.getConfig()
+			return cfg != nil && len(cfg.Backends) == 1 && cfg.Backends[0].Name == "first"
+		}, time.Second, tickInterval)
 
-	logger, buf := newTestLoggerWithBuffer()
-	err := StartConfigWatcher(t.Context(), path, rcv, logger, tickInterval)
-	require.NoError(t, err)
+		writeBundle("version: dev\nbackends:\n- name: second\n")
+		require.Eventually(t, func() bool {
+			cfg := rcv.getConfig()
+			return cfg != nil && len(cfg.Backends) == 1 && cfg.Backends[0].Name == "second"
+		}, time.Second, tickInterval)
+		secondCfg := rcv.getConfig()
 
-	// Initial loading should have happened.
-	require.Eventually(t, func() bool {
-		return !cmp.Equal(rcv.getConfig(), nil)
-	}, 1*time.Second, tickInterval)
-	firstCfg := rcv.getConfig()
-	require.NotNil(t, firstCfg)
-	require.Len(t, firstCfg.Backends, 3, buf.String())
-	require.Equal(t, "kserve", firstCfg.Backends[0].Name)
-	require.Equal(t, "awsbedrock", firstCfg.Backends[1].Name)
-	require.Equal(t, "openai", firstCfg.Backends[2].Name)
-
-	// Update the config file.
-	cfg = `
-version: dev
-schema:
-  name: OpenAI
-backends:
-- name: openai
-  schema:
-    name: OpenAI
-`
-
-	requireAtomicWriteFile(t, tickInterval, path, []byte(cfg), 0o600)
-
-	// Verify the config has been updated.
-	require.Eventually(t, func() bool {
-		return !cmp.Equal(rcv.getConfig(), firstCfg)
-	}, 1*time.Second, tickInterval)
-	secondCfg := rcv.getConfig()
-	require.NotNil(t, secondCfg)
-	require.Len(t, secondCfg.Backends, 1, buf.String())
-	require.Equal(t, "openai", secondCfg.Backends[0].Name)
-
-	// Update the config file with the different version, which shouldn't be loaded.
-	cfg = `
-version: some-new-version
-foo: bar
-`
-	requireAtomicWriteFile(t, tickInterval, path, []byte(cfg), 0o600)
-
-	// Verify the config has NOT been updated due to the error.
-	time.Sleep(2 * tickInterval)
-	thirdCfg := rcv.getConfig()
-	require.Equal(t, secondCfg, thirdCfg, "config should not have changed on invalid update")
-
-	// Verify the buffer contains the error message.
-	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), "failed to update config")
-	}, 1*time.Second, tickInterval, buf.String())
+		writeBundle("version: some-new-version\nbackends:\n- name: rejected\n")
+		time.Sleep(2 * tickInterval)
+		require.Equal(t, secondCfg, rcv.getConfig(), "config should not change after a version mismatch")
+		require.Eventually(t, func() bool {
+			return strings.Contains(buf.String(), "failed to update bundled config")
+		}, time.Second, tickInterval, buf.String())
+	})
 }
 
 // requireAtomicWriteFile creates a temporary file, writes the data to it, and then renames it to the final filename.

@@ -18,6 +18,7 @@ import (
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
 
 func TestAnthropicToAWSBedrockTranslator_RequestBody(t *testing.T) {
@@ -700,13 +701,7 @@ func TestAnthropicToAWSBedrockTranslator_RequestBody_Tools(t *testing.T) {
 					Type:        "custom",
 					Name:        "get_weather",
 					Description: "Get the weather",
-					InputSchema: anthropicschema.ToolInputSchema{
-						Type: "object",
-						Properties: map[string]any{
-							"location": map[string]any{"type": "string"},
-						},
-						Required: []string{"location"},
-					},
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}`),
 				},
 			},
 		},
@@ -955,6 +950,39 @@ func TestAnthropicToAWSBedrockTranslator_RequestBody_UserArrayContent(t *testing
 	assert.Equal(t, []string{"END", "STOP"}, bedrockReq.InferenceConfig.StopSequences)
 }
 
+func TestAnthropicToAWSBedrockTranslator_RequestBody_UserArrayContentError(t *testing.T) {
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Image: &anthropicschema.ImageBlockParam{
+							Type: "image",
+							Source: anthropicschema.ImageSource{
+								Base64: &anthropicschema.Base64ImageSource{
+									Type:      "base64",
+									MediaType: "application/pdf",
+									Data:      "not-used",
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, _, err = translator.RequestBody(rawBody, req, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported image format application/pdf")
+}
+
 func TestAnthropicToAWSBedrockTranslator_RequestBody_ToolResultMessages(t *testing.T) {
 	translator := NewAnthropicToAWSBedrockTranslator("")
 	req := &anthropicschema.MessagesRequest{
@@ -965,7 +993,7 @@ func TestAnthropicToAWSBedrockTranslator_RequestBody_ToolResultMessages(t *testi
 				Type:        "custom",
 				Name:        "get_weather",
 				Description: "Get weather",
-				InputSchema: anthropicschema.ToolInputSchema{Type: "object"},
+				InputSchema: json.RawMessage(`{"type":"object"}`),
 			}},
 		},
 		ToolChoice: &anthropicschema.ToolChoice{
@@ -1032,33 +1060,263 @@ func TestAnthropicToAWSBedrockTranslator_RequestBody_ToolResultMessages(t *testi
 	err = json.Unmarshal(body, &bedrockReq)
 	require.NoError(t, err)
 
-	// Should be: user, assistant, user (tool result 1), user (tool result 2).
-	// Tool result messages with role "user" go through convertUserMessage individually.
-	require.Len(t, bedrockReq.Messages, 4)
+	// Should be: user, assistant, user (coalesced tool results).
+	// Consecutive tool_result messages are coalesced into a single Bedrock message.
+	require.Len(t, bedrockReq.Messages, 3)
 
-	// First tool result message.
-	toolResultMsg1 := bedrockReq.Messages[2]
-	assert.Equal(t, awsbedrock.ConversationRoleUser, toolResultMsg1.Role)
-	require.Len(t, toolResultMsg1.Content, 1)
-	require.NotNil(t, toolResultMsg1.Content[0].ToolResult)
-	assert.Equal(t, "tu_abc", *toolResultMsg1.Content[0].ToolResult.ToolUseID)
-	require.Len(t, toolResultMsg1.Content[0].ToolResult.Content, 1)
-	assert.Equal(t, "72°F and sunny", *toolResultMsg1.Content[0].ToolResult.Content[0].Text)
+	// Coalesced tool result message contains both tool results.
+	toolResultMsg := bedrockReq.Messages[2]
+	assert.Equal(t, awsbedrock.ConversationRoleUser, toolResultMsg.Role)
+	require.Len(t, toolResultMsg.Content, 2)
 
-	// Second tool result message (error).
-	toolResultMsg2 := bedrockReq.Messages[3]
-	assert.Equal(t, awsbedrock.ConversationRoleUser, toolResultMsg2.Role)
-	require.Len(t, toolResultMsg2.Content, 1)
-	require.NotNil(t, toolResultMsg2.Content[0].ToolResult)
-	assert.Equal(t, "tu_def", *toolResultMsg2.Content[0].ToolResult.ToolUseID)
-	assert.Equal(t, "error", *toolResultMsg2.Content[0].ToolResult.Status)
-	require.Len(t, toolResultMsg2.Content[0].ToolResult.Content, 1)
-	assert.Equal(t, "Error: city not found", *toolResultMsg2.Content[0].ToolResult.Content[0].Text)
+	// First tool result.
+	require.NotNil(t, toolResultMsg.Content[0].ToolResult)
+	assert.Equal(t, "tu_abc", *toolResultMsg.Content[0].ToolResult.ToolUseID)
+	require.Len(t, toolResultMsg.Content[0].ToolResult.Content, 1)
+	assert.Equal(t, "72°F and sunny", *toolResultMsg.Content[0].ToolResult.Content[0].Text)
+
+	// Second tool result (error) coalesced into the same message.
+	require.NotNil(t, toolResultMsg.Content[1].ToolResult)
+	assert.Equal(t, "tu_def", *toolResultMsg.Content[1].ToolResult.ToolUseID)
+	assert.Equal(t, "error", *toolResultMsg.Content[1].ToolResult.Status)
+	require.Len(t, toolResultMsg.Content[1].ToolResult.Content, 1)
+	assert.Equal(t, "Error: city not found", *toolResultMsg.Content[1].ToolResult.Content[0].Text)
 
 	// Verify tool choice "any".
 	require.NotNil(t, bedrockReq.ToolConfig)
 	require.NotNil(t, bedrockReq.ToolConfig.ToolChoice)
 	assert.NotNil(t, bedrockReq.ToolConfig.ToolChoice.Any)
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_ToolResultMessagesWithSystemMessages(t *testing.T) {
+	// Regression test: when system messages are present in the messages array,
+	// promoteAnthropicSystemMessagesToParam filters them out, creating a shorter
+	// `messages` slice. The coalescing loop must use the filtered `messages` slice
+	// (not body.Messages) to avoid index misalignment and potential out-of-bounds access.
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Tools: []anthropicschema.ToolUnion{
+			{Tool: &anthropicschema.Tool{
+				Type:        "custom",
+				Name:        "get_weather",
+				Description: "Get weather",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}},
+		},
+		Messages: []anthropicschema.MessageParam{
+			// System message at the start — will be promoted out of the messages slice.
+			{
+				Role:    "system",
+				Content: anthropicschema.MessageContent{Text: "You are a helpful assistant."},
+			},
+			// Another system message — also promoted.
+			{
+				Role:    "system",
+				Content: anthropicschema.MessageContent{Text: "Always be concise."},
+			},
+			{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "What's the weather?"},
+			},
+			{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolUse: &anthropicschema.ToolUseBlockParam{
+							Type:  "tool_use",
+							ID:    "tu_abc",
+							Name:  "get_weather",
+							Input: map[string]any{"city": "NYC"},
+						}},
+					},
+				},
+			},
+			// First tool result message.
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_abc",
+							Content:   &anthropicschema.ToolResultContent{Text: "72°F and sunny"},
+						}},
+					},
+				},
+			},
+			// Second consecutive tool result message (should be coalesced with the first).
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_def",
+							IsError:   true,
+							Content: &anthropicschema.ToolResultContent{
+								Array: []anthropicschema.ToolResultContentItem{
+									{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "Error: city not found"}},
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	var bedrockReq awsbedrock.ConverseInput
+	err = json.Unmarshal(body, &bedrockReq)
+	require.NoError(t, err)
+
+	// After promoting 2 system messages, messages has 4 entries:
+	//   user, assistant, user(tool_result), user(tool_result)
+	// The two consecutive tool_result messages should be coalesced into one,
+	// yielding 3 Bedrock messages: user, assistant, user(coalesced tool results).
+	require.Len(t, bedrockReq.Messages, 3)
+
+	// First message: user text.
+	assert.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Messages[0].Role)
+	require.Len(t, bedrockReq.Messages[0].Content, 1)
+	assert.NotNil(t, bedrockReq.Messages[0].Content[0].Text)
+
+	// Second message: assistant tool_use.
+	assert.Equal(t, awsbedrock.ConversationRoleAssistant, bedrockReq.Messages[1].Role)
+
+	// Third message: coalesced tool results (both tool_use_ids in one message).
+	toolResultMsg := bedrockReq.Messages[2]
+	assert.Equal(t, awsbedrock.ConversationRoleUser, toolResultMsg.Role)
+	require.Len(t, toolResultMsg.Content, 2)
+	require.NotNil(t, toolResultMsg.Content[0].ToolResult)
+	assert.Equal(t, "tu_abc", *toolResultMsg.Content[0].ToolResult.ToolUseID)
+	assert.Equal(t, "72°F and sunny", *toolResultMsg.Content[0].ToolResult.Content[0].Text)
+	require.NotNil(t, toolResultMsg.Content[1].ToolResult)
+	assert.Equal(t, "tu_def", *toolResultMsg.Content[1].ToolResult.ToolUseID)
+	assert.Equal(t, "error", *toolResultMsg.Content[1].ToolResult.Status)
+	assert.Equal(t, "Error: city not found", *toolResultMsg.Content[1].ToolResult.Content[0].Text)
+
+	// Verify system prompts were promoted, each as its own block.
+	require.NotNil(t, bedrockReq.System)
+	require.Len(t, bedrockReq.System, 2)
+	assert.Equal(t, "You are a helpful assistant.", *bedrockReq.System[0].Text)
+	assert.Equal(t, "Always be concise.", *bedrockReq.System[1].Text)
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_SingleToolResultNotCoalesced(t *testing.T) {
+	// Verify that a single tool_result message (without a consecutive one) is NOT coalesced
+	// but still goes through the tool result path (not convertUserMessage).
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Tools: []anthropicschema.ToolUnion{
+			{Tool: &anthropicschema.Tool{
+				Type:        "custom",
+				Name:        "get_weather",
+				Description: "Get weather",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+			}},
+		},
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "What's the weather?"},
+			},
+			{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolUse: &anthropicschema.ToolUseBlockParam{
+							Type:  "tool_use",
+							ID:    "tu_abc",
+							Name:  "get_weather",
+							Input: map[string]any{"city": "NYC"},
+						}},
+					},
+				},
+			},
+			// Single tool result — no consecutive tool result to coalesce with.
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_abc",
+							Content:   &anthropicschema.ToolResultContent{Text: "72°F and sunny"},
+						}},
+					},
+				},
+			},
+			// Follow-up user text message — should NOT be coalesced with tool result.
+			{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "Thanks!"},
+			},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	var bedrockReq awsbedrock.ConverseInput
+	err = json.Unmarshal(body, &bedrockReq)
+	require.NoError(t, err)
+
+	// 4 messages: user, assistant, user(tool_result), user(text)
+	require.Len(t, bedrockReq.Messages, 4)
+
+	// Third message: tool result (not coalesced).
+	toolResultMsg := bedrockReq.Messages[2]
+	assert.Equal(t, awsbedrock.ConversationRoleUser, toolResultMsg.Role)
+	require.Len(t, toolResultMsg.Content, 1)
+	require.NotNil(t, toolResultMsg.Content[0].ToolResult)
+	assert.Equal(t, "tu_abc", *toolResultMsg.Content[0].ToolResult.ToolUseID)
+
+	// Fourth message: plain text (not coalesced with tool result).
+	textMsg := bedrockReq.Messages[3]
+	assert.Equal(t, awsbedrock.ConversationRoleUser, textMsg.Role)
+	require.Len(t, textMsg.Content, 1)
+	assert.NotNil(t, textMsg.Content[0].Text)
+	assert.Equal(t, "Thanks!", *textMsg.Content[0].Text)
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_UnexpectedRole(t *testing.T) {
+	// Verify that an unexpected role returns an error.
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "Hello"},
+			},
+			{
+				Role:    "system", // Will be promoted to system param.
+				Content: anthropicschema.MessageContent{Text: "You are helpful."},
+			},
+			{
+				Role:    "invalid_role",
+				Content: anthropicschema.MessageContent{Text: "This should fail"},
+			},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, _, err = translator.RequestBody(rawBody, req, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected role: invalid_role")
 }
 
 func TestAnthropicToAWSBedrockTranslator_ResponseBody_NonStreamingToolUseAndReasoning(t *testing.T) {
@@ -1233,4 +1491,586 @@ func TestAnthropicToAWSBedrockTranslator_ResponseBody_StreamingToolUse(t *testin
 	assert.Contains(t, bodyStr, "event: content_block_delta")
 	assert.Contains(t, bodyStr, `"input_json_delta"`)
 	assert.Contains(t, bodyStr, `"tool_use"`)
+}
+
+func TestPromoteAnthropicSystemMessagesToParam(t *testing.T) {
+	t.Run("no system messages returns all messages", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			Messages: []anthropicschema.MessageParam{
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.Nil(t, system)
+		require.Nil(t, body.System)
+	})
+
+	t.Run("single text system message is promoted", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "You are helpful."}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.Equal(t, "user", string(result[0].Role))
+		require.NotNil(t, system)
+		require.Equal(t, []anthropicschema.TextBlockParam{{Type: "text", Text: "You are helpful."}}, system.Texts)
+		require.Nil(t, body.System, "the shared request body must not be mutated")
+	})
+
+	t.Run("system message with content blocks is promoted", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			Messages: []anthropicschema.MessageParam{
+				{
+					Role: "system",
+					Content: anthropicschema.MessageContent{
+						Array: []anthropicschema.ContentBlockParam{
+							{Text: &anthropicschema.TextBlockParam{Text: "You are Claude."}},
+						},
+					},
+				},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.NotNil(t, system)
+		require.Equal(t, []anthropicschema.TextBlockParam{{Text: "You are Claude."}}, system.Texts)
+	})
+
+	t.Run("multiple system messages each become a block", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "Be concise."}},
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "Be accurate."}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.NotNil(t, system)
+		require.Equal(t, []anthropicschema.TextBlockParam{
+			{Type: "text", Text: "Be concise."},
+			{Type: "text", Text: "Be accurate."},
+		}, system.Texts)
+	})
+
+	t.Run("system message is added to existing string system param", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			System: &anthropicschema.SystemPrompt{Text: "You are Claude."},
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "Be concise."}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.NotNil(t, system)
+		// Both survive, top-level first.
+		require.Equal(t, []anthropicschema.TextBlockParam{
+			{Type: "text", Text: "You are Claude."},
+			{Type: "text", Text: "Be concise."},
+		}, system.Texts)
+		require.Empty(t, system.Text, "the string form must be folded into the blocks, convertSystemPrompt returns early on it")
+		require.Equal(t, "You are Claude.", body.System.Text, "the shared request body must not be mutated")
+	})
+
+	t.Run("system message is added to existing system block array", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			System: &anthropicschema.SystemPrompt{Texts: []anthropicschema.TextBlockParam{
+				{Type: "text", Text: "TOP LEVEL SYSTEM"},
+			}},
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "MID CONVERSATION SYSTEM"}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		result, system := promoteAnthropicSystemMessagesToParam(body)
+		require.Len(t, result, 1)
+		require.NotNil(t, system)
+		require.Equal(t, []anthropicschema.TextBlockParam{
+			{Type: "text", Text: "TOP LEVEL SYSTEM"},
+			{Type: "text", Text: "MID CONVERSATION SYSTEM"},
+		}, system.Texts)
+		require.Equal(t, []anthropicschema.TextBlockParam{{Type: "text", Text: "TOP LEVEL SYSTEM"}}, body.System.Texts,
+			"the shared request body must not be mutated")
+	})
+
+	t.Run("cache_control survives promotion", func(t *testing.T) {
+		ephemeral := &anthropicschema.CacheControl{
+			Ephemeral: &anthropicschema.CacheControlEphemeral{Type: "ephemeral"},
+		}
+		body := &anthropicschema.MessagesRequest{
+			Messages: []anthropicschema.MessageParam{
+				{
+					Role: "system",
+					Content: anthropicschema.MessageContent{
+						Array: []anthropicschema.ContentBlockParam{
+							{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "cached sys prompt", CacheControl: ephemeral}},
+						},
+					},
+				},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		_, system := promoteAnthropicSystemMessagesToParam(body)
+		require.NotNil(t, system)
+		require.Len(t, system.Texts, 1)
+		require.Equal(t, ephemeral, system.Texts[0].CacheControl,
+			"a joined string cannot carry per-block cache control")
+	})
+
+	t.Run("repeated promotion yields the same system prompt", func(t *testing.T) {
+		body := &anthropicschema.MessagesRequest{
+			System: &anthropicschema.SystemPrompt{Texts: []anthropicschema.TextBlockParam{
+				{Type: "text", Text: "TOP LEVEL SYSTEM"},
+			}},
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "MID CONVERSATION SYSTEM"}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		_, first := promoteAnthropicSystemMessagesToParam(body)
+		_, second := promoteAnthropicSystemMessagesToParam(body)
+		require.Equal(t, first, second,
+			"promotion must not accumulate across attempts")
+	})
+
+	t.Run("integration with full request", func(t *testing.T) {
+		translator := NewAnthropicToAWSBedrockTranslator("")
+		req := &anthropicschema.MessagesRequest{
+			Model:     "anthropic.claude-3-sonnet-20240229-v1:0",
+			MaxTokens: 1024,
+			Messages: []anthropicschema.MessageParam{
+				{Role: "system", Content: anthropicschema.MessageContent{Text: "You are helpful."}},
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+			},
+		}
+		rawBody, err := json.Marshal(req)
+		require.NoError(t, err)
+
+		_, body, err := translator.RequestBody(rawBody, req, false)
+		require.NoError(t, err)
+
+		var bedrockReq awsbedrock.ConverseInput
+		err = json.Unmarshal(body, &bedrockReq)
+		require.NoError(t, err)
+
+		require.Len(t, bedrockReq.Messages, 1)
+		assert.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Messages[0].Role)
+		require.NotNil(t, bedrockReq.System)
+		require.Len(t, bedrockReq.System, 1)
+		assert.Equal(t, "You are helpful.", *bedrockReq.System[0].Text)
+	})
+}
+
+// A retry or backend fallback translates the very same parsed struct again: processor_impl.go
+// passes routerProcessor.originalRequestBody to RequestBody on every upstream attempt.
+func TestAnthropicToAWSBedrockTranslator_RequestBody_SystemPromotionSurvivesRetry(t *testing.T) {
+	body := &anthropicschema.MessagesRequest{
+		Model:     "anthropic.claude-3-sonnet-20240229-v1:0",
+		MaxTokens: 1024,
+		System: &anthropicschema.SystemPrompt{Texts: []anthropicschema.TextBlockParam{
+			{Type: "text", Text: "TOP LEVEL SYSTEM"},
+		}},
+		Messages: []anthropicschema.MessageParam{
+			{Role: "system", Content: anthropicschema.MessageContent{Text: "MID CONVERSATION SYSTEM"}},
+			{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+		},
+	}
+	rawBody, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	systemTexts := func(t *testing.T) []string {
+		// A fresh translator per attempt, matching SetBackend creating one per upstream filter.
+		_, newBody, err := NewAnthropicToAWSBedrockTranslator("").RequestBody(rawBody, body, true)
+		require.NoError(t, err)
+		var bedrockReq awsbedrock.ConverseInput
+		require.NoError(t, json.Unmarshal(newBody, &bedrockReq))
+		texts := make([]string, 0, len(bedrockReq.System))
+		for _, block := range bedrockReq.System {
+			texts = append(texts, *block.Text)
+		}
+		return texts
+	}
+
+	want := []string{"TOP LEVEL SYSTEM", "MID CONVERSATION SYSTEM"}
+	require.Equal(t, want, systemTexts(t))
+	require.Equal(t, want, systemTexts(t), "a retry must not append the promoted blocks a second time")
+	require.Equal(t, want, systemTexts(t))
+}
+
+func TestIsOnlyToolResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+		msg      anthropicschema.MessageParam
+	}{
+		{
+			name:     "single tool_result block",
+			expected: true,
+			msg: anthropicschema.MessageParam{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_1",
+							Content:   &anthropicschema.ToolResultContent{Text: "result"},
+						}},
+					},
+				},
+			},
+		},
+		{
+			name:     "multiple tool_result blocks",
+			expected: true,
+			msg: anthropicschema.MessageParam{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_1",
+							Content:   &anthropicschema.ToolResultContent{Text: "result 1"},
+						}},
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_2",
+							Content:   &anthropicschema.ToolResultContent{Text: "result 2"},
+						}},
+					},
+				},
+			},
+		},
+		{
+			name:     "mixed text and tool_result blocks",
+			expected: false,
+			msg: anthropicschema.MessageParam{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "Here is the result:"}},
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_1",
+							Content:   &anthropicschema.ToolResultContent{Text: "72°F and sunny"},
+						}},
+					},
+				},
+			},
+		},
+		{
+			name:     "plain text user message",
+			expected: false,
+			msg: anthropicschema.MessageParam{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "Hello"},
+			},
+		},
+		{
+			name:     "assistant message is never tool-result-only",
+			expected: false,
+			msg: anthropicschema.MessageParam{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_1",
+							Content:   &anthropicschema.ToolResultContent{Text: "result"},
+						}},
+					},
+				},
+			},
+		},
+		{
+			name:     "empty content array",
+			expected: false,
+			msg: anthropicschema.MessageParam{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{},
+			},
+		},
+		{
+			name:     "text array without tool_result",
+			expected: false,
+			msg: anthropicschema.MessageParam{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "Hello"}},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isOnlyToolResult(&tt.msg))
+		})
+	}
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_MixedUserContentWithToolResult(t *testing.T) {
+	// Regression test: a user message containing both text and tool_result blocks
+	// must preserve all content blocks, not silently drop the text.
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role:    anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{Text: "What's the weather?"},
+			},
+			{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolUse: &anthropicschema.ToolUseBlockParam{
+							Type:  "tool_use",
+							ID:    "tu_abc",
+							Name:  "get_weather",
+							Input: map[string]any{"city": "NYC"},
+						}},
+					},
+				},
+			},
+			// Mixed content: text + tool_result in the same user message.
+			// This should go through convertUserMessage (not convertToolResultMessage),
+			// preserving the text block.
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "Here is the result:"}},
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:      "tool_result",
+							ToolUseID: "tu_abc",
+							Content:   &anthropicschema.ToolResultContent{Text: "72°F and sunny"},
+						}},
+					},
+				},
+			},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	var bedrockReq awsbedrock.ConverseInput
+	err = json.Unmarshal(body, &bedrockReq)
+	require.NoError(t, err)
+
+	// 3 messages: user(text), assistant(tool_use), user(text+tool_result)
+	require.Len(t, bedrockReq.Messages, 3)
+
+	// The third message should have both a text block and a tool_result block.
+	mixedMsg := bedrockReq.Messages[2]
+	assert.Equal(t, awsbedrock.ConversationRoleUser, mixedMsg.Role)
+	require.Len(t, mixedMsg.Content, 2, "mixed user message should preserve both text and tool_result blocks")
+
+	// First block: text.
+	require.NotNil(t, mixedMsg.Content[0].Text)
+	assert.Equal(t, "Here is the result:", *mixedMsg.Content[0].Text)
+
+	// Second block: tool result.
+	require.NotNil(t, mixedMsg.Content[1].ToolResult)
+	assert.Equal(t, "tu_abc", *mixedMsg.Content[1].ToolResult.ToolUseID)
+	require.Len(t, mixedMsg.Content[1].ToolResult.Content, 1)
+	assert.Equal(t, "72°F and sunny", *mixedMsg.Content[1].ToolResult.Content[0].Text)
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_CacheControl(t *testing.T) {
+	ephemeral := func() *anthropicschema.CacheControl {
+		return &anthropicschema.CacheControl{Ephemeral: &anthropicschema.CacheControlEphemeral{Type: "ephemeral"}}
+	}
+
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		System: &anthropicschema.SystemPrompt{
+			Texts: []anthropicschema.TextBlockParam{
+				{Type: "text", Text: "You are a helpful assistant", CacheControl: ephemeral()},
+			},
+		},
+		Tools: []anthropicschema.ToolUnion{
+			{
+				Tool: &anthropicschema.Tool{
+					Type:         "custom",
+					Name:         "get_weather",
+					Description:  "Get the weather",
+					InputSchema:  json.RawMessage(`{"type":"object"}`),
+					CacheControl: ephemeral(),
+				},
+			},
+		},
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "cache this", CacheControl: ephemeral()}},
+					},
+				},
+			},
+			{
+				Role: anthropicschema.MessageRoleAssistant,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "and this", CacheControl: ephemeral()}},
+					},
+				},
+			},
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{ToolResult: &anthropicschema.ToolResultBlockParam{
+							Type:         "tool_result",
+							ToolUseID:    "tu_abc",
+							Content:      &anthropicschema.ToolResultContent{Text: "72°F and sunny"},
+							CacheControl: ephemeral(),
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	var bedrockReq awsbedrock.ConverseInput
+	require.NoError(t, json.Unmarshal(body, &bedrockReq))
+
+	// System: text block followed by its own cache point block.
+	require.Len(t, bedrockReq.System, 2)
+	require.NotNil(t, bedrockReq.System[0].Text)
+	require.Nil(t, bedrockReq.System[1].Text)
+	require.NotNil(t, bedrockReq.System[1].CachePoint)
+	assert.Equal(t, "default", bedrockReq.System[1].CachePoint.Type)
+
+	// Tools: tool spec followed by its own cache point element. Bedrock's Tool is a union, so the
+	// cache point element must not carry a toolSpec key at all.
+	require.Len(t, bedrockReq.ToolConfig.Tools, 2)
+	require.NotNil(t, bedrockReq.ToolConfig.Tools[0].ToolSpec)
+	require.Nil(t, bedrockReq.ToolConfig.Tools[0].CachePoint)
+	require.Nil(t, bedrockReq.ToolConfig.Tools[1].ToolSpec)
+	require.NotNil(t, bedrockReq.ToolConfig.Tools[1].CachePoint)
+	rawTool, err := json.Marshal(bedrockReq.ToolConfig.Tools[1])
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawTool), "toolSpec")
+
+	// User text, assistant text and tool result each get their own trailing cache point block.
+	require.Len(t, bedrockReq.Messages, 3)
+	for i, msg := range bedrockReq.Messages {
+		require.Len(t, msg.Content, 2, "messages[%d] should have a content block and a cache point block", i)
+		require.NotNil(t, msg.Content[1].CachePoint, "messages[%d] is missing its cache point block", i)
+		assert.Equal(t, "default", msg.Content[1].CachePoint.Type)
+	}
+	require.NotNil(t, bedrockReq.Messages[0].Content[0].Text)
+	require.NotNil(t, bedrockReq.Messages[1].Content[0].Text)
+	require.NotNil(t, bedrockReq.Messages[2].Content[0].ToolResult)
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_NoCacheControl(t *testing.T) {
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		System: &anthropicschema.SystemPrompt{
+			Texts: []anthropicschema.TextBlockParam{{Type: "text", Text: "You are a helpful assistant"}},
+		},
+		Tools: []anthropicschema.ToolUnion{
+			{Tool: &anthropicschema.Tool{Type: "custom", Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		},
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role: anthropicschema.MessageRoleUser,
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{Type: "text", Text: "hello"}},
+					},
+				},
+			},
+		},
+	}
+
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "cachePoint")
+}
+
+func TestAnthropicToAWSBedrockTranslator_RequestBody_CacheControlOnPromotedSystemMessage(t *testing.T) {
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "test-model",
+		MaxTokens: 100,
+		Messages: []anthropicschema.MessageParam{
+			{
+				Role: "system",
+				Content: anthropicschema.MessageContent{
+					Array: []anthropicschema.ContentBlockParam{
+						{Text: &anthropicschema.TextBlockParam{
+							Type:         "text",
+							Text:         "You are a helpful assistant",
+							CacheControl: &anthropicschema.CacheControl{Ephemeral: &anthropicschema.CacheControlEphemeral{Type: "ephemeral"}},
+						}},
+					},
+				},
+			},
+			{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+		},
+	}
+
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, body, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	var bedrockReq awsbedrock.ConverseInput
+	require.NoError(t, json.Unmarshal(body, &bedrockReq))
+
+	require.Len(t, bedrockReq.System, 2)
+	require.NotNil(t, bedrockReq.System[0].Text)
+	assert.Equal(t, "You are a helpful assistant", *bedrockReq.System[0].Text)
+	require.NotNil(t, bedrockReq.System[1].CachePoint)
+	assert.Equal(t, "default", bedrockReq.System[1].CachePoint.Type)
+}
+
+func TestAnthropicToAWSBedrockTranslator_ResponseBody_NullContentBlock(t *testing.T) {
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "anthropic.claude-3-sonnet-20240229-v1:0",
+		MaxTokens: 1024,
+		Messages: []anthropicschema.MessageParam{
+			{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+		},
+	}
+	rawBody, _ := json.Marshal(req)
+	_, _, err := translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	// A null element in the Converse content list must be skipped, not dereferenced.
+	respBody := []byte(`{"output":{"message":{"role":"assistant","content":[null,{"text":"Hello!"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`)
+	var body []byte
+	var tokenUsage metrics.TokenUsage
+	require.NotPanics(t, func() {
+		_, body, tokenUsage, _, err = translator.ResponseBody(nil, bytes.NewReader(respBody), false, nil)
+	})
+	require.NoError(t, err)
+	require.Contains(t, string(body), "Hello!")
+	require.Equal(t, tokenUsageFrom(10, -1, -1, 20, 30, -1), tokenUsage)
 }

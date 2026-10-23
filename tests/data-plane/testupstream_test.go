@@ -62,6 +62,8 @@ func TestWithTestUpstream(t *testing.T) {
 			testUpstreamOpenAIBackend,
 			testUpstreamModelNameOverride,
 			testUpstreamAAWSBackend,
+			testUpstreamDynMdCredBackend,
+			testUpstreamAWSDynMdCredBackend,
 			testUpstreamAzureBackend,
 			testUpstreamGCPVertexAIBackend,
 			testUpstreamGCPAnthropicAIBackend,
@@ -135,6 +137,12 @@ func TestWithTestUpstream(t *testing.T) {
 		// The value is a base64 encoded string of comma separated key-value pairs.
 		// E.g. "key1:value1,key2:value2".
 		expRequestHeaders map[string]string
+		// requestHeaders are extra headers set on the client request to the gateway, e.g. to simulate a
+		// downstream client spoofing an internal header.
+		requestHeaders map[string]string
+		// nonExpectedRequestHeaders are header names that must NOT be present on the request the test
+		// upstream receives (the test upstream returns 400 if any are present).
+		nonExpectedRequestHeaders []string
 		// expRequestBody is the expected body to be sent to the test upstream.
 		// This can be used to test the request body translation.
 		expRequestBody string
@@ -234,6 +242,108 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"response","role":"assistant"}}],"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","created":123,"model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
 		},
 		{
+			// A downstream client spoofs the internal AWS signing-host header. It must be stripped before
+			// egress so it never reaches the upstream and cannot influence SigV4 signing.
+			name:                      "aws-bedrock - spoofed signing-host header is stripped before upstream",
+			backend:                   "aws-bedrock",
+			path:                      "/v1/chat/completions",
+			method:                    http.MethodPost,
+			requestBody:               `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:                   "/model/something/converse",
+			responseBody:              `{"output":{"message":{"content":[{"text":"response"},{"text":"from"},{"text":"assistant"}],"role":"assistant"}},"stopReason":null,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`,
+			expRequestBody:            `{"inferenceConfig":{},"messages":[],"system":[{"text":"You are a chatbot."}]}`,
+			expStatus:                 http.StatusOK,
+			responseHeaders:           "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
+			expResponseBody:           `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"response","role":"assistant"}}],"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","created":123,"model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
+			requestHeaders:            map[string]string{"x-ai-eg-upstream-host": "attacker.example.com"},
+			nonExpectedRequestHeaders: []string{"x-ai-eg-upstream-host"},
+		},
+		{
+			// A trusted filter injects a per-request credential. The upstream must see a signature
+			// carrying that session token and none of the credential headers. Only Envoy can prove
+			// the second half: dropping them from the extproc's local map leaves them on the wire.
+			name:            "aws-bedrock - per-request credential signs and is stripped before upstream",
+			backend:         "aws-bedrock",
+			path:            "/v1/chat/completions",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:         "/model/something/converse",
+			responseBody:    `{"output":{"message":{"content":[{"text":"response"},{"text":"from"},{"text":"assistant"}],"role":"assistant"}},"stopReason":null,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`,
+			expRequestBody:  `{"inferenceConfig":{},"messages":[],"system":[{"text":"You are a chatbot."}]}`,
+			expStatus:       http.StatusOK,
+			responseHeaders: "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
+			expResponseBody: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"response","role":"assistant"}}],"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","created":123,"model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
+			requestHeaders: map[string]string{
+				"x-aigw-aws-access-key-id":     "ASIAPERREQUEST",
+				"x-aigw-aws-secret-access-key": "per-request-secret",
+				"x-aigw-aws-session-token":     fakeAWSPerRequestSessionToken,
+			},
+			// The static fallback has no session token, so this can only be the per-request one.
+			expRequestHeaders:         map[string]string{"X-Amz-Security-Token": fakeAWSPerRequestSessionToken},
+			nonExpectedRequestHeaders: awsCredentialOverrideHeaders,
+		},
+		{
+			// A downstream filter turns x-test-dynmd-api-key into dynamic metadata, which must
+			// reach the upstream. Only a real Envoy proves the forwarding_namespaces link.
+			name:                      "openai - per-request credential from dynamic metadata",
+			backend:                   "dynmd-cred",
+			path:                      "/v1/chat/completions",
+			method:                    http.MethodPost,
+			requestBody:               `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:                   "/v1/chat/completions",
+			responseBody:              `{"choices":[{"message":{"content":"This is a test."}}]}`,
+			expStatus:                 http.StatusOK,
+			expResponseBody:           `{"choices":[{"message":{"content":"This is a test."}}]}`,
+			requestHeaders:            map[string]string{"x-test-dynmd-api-key": "metadata-sourced-key"},
+			expRequestHeaders:         map[string]string{"Authorization": "Bearer metadata-sourced-key"},
+			nonExpectedRequestHeaders: []string{"x-test-dynmd-api-key"},
+		},
+		{
+			// Without the header the namespace is empty, so the static credential is used.
+			name:              "openai - absent dynamic metadata falls back to the configured credential",
+			backend:           "dynmd-cred",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:           "/v1/chat/completions",
+			responseBody:      `{"choices":[{"message":{"content":"This is a test."}}]}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"choices":[{"message":{"content":"This is a test."}}]}`,
+			expRequestHeaders: map[string]string{"Authorization": "Bearer dummy-configured-key"},
+		},
+		{
+			// The credential arrives as one struct value. The static fallback has no session
+			// token, so X-Amz-Security-Token can only come from the forwarded metadata.
+			name:              "aws-bedrock - struct credential from dynamic metadata signs the request",
+			backend:           "aws-dynmd-cred",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:           "/model/something/converse",
+			responseBody:      `{"output":{"message":{"content":[{"text":"response"},{"text":"from"},{"text":"assistant"}],"role":"assistant"}},"stopReason":null,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`,
+			expRequestBody:    `{"inferenceConfig":{},"messages":[],"system":[{"text":"You are a chatbot."}]}`,
+			expStatus:         http.StatusOK,
+			responseHeaders:   "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"response","role":"assistant"}}],"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","created":123,"model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
+			expRequestHeaders: map[string]string{"X-Amz-Security-Token": fakeAWSMetadataSessionToken},
+		},
+		{
+			// Falls back to the configured credential file, which has no session token, so no
+			// X-Amz-Security-Token reaches the upstream.
+			name:                      "aws-bedrock - no per-request credential falls back to the configured one",
+			backend:                   "aws-bedrock",
+			path:                      "/v1/chat/completions",
+			method:                    http.MethodPost,
+			requestBody:               `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}]}`,
+			expPath:                   "/model/something/converse",
+			responseBody:              `{"output":{"message":{"content":[{"text":"response"},{"text":"from"},{"text":"assistant"}],"role":"assistant"}},"stopReason":null,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`,
+			expRequestBody:            `{"inferenceConfig":{},"messages":[],"system":[{"text":"You are a chatbot."}]}`,
+			expStatus:                 http.StatusOK,
+			responseHeaders:           "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
+			expResponseBody:           `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"response","role":"assistant"}}],"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","created":123,"model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
+			nonExpectedRequestHeaders: []string{"X-Amz-Security-Token"},
+		},
+		{
 			name:            "openai - /v1/chat/completions",
 			backend:         "openai",
 			path:            "/v1/chat/completions",
@@ -290,7 +400,7 @@ func TestWithTestUpstream(t *testing.T) {
 			requestBody:     toolCallResultsRequestBody,
 			expRequestBody:  `{"max_tokens":1024,"messages":[{"content":[{"text":"List the files in the /tmp directory","type":"text"}],"role":"user"},{"content":[{"id":"call_abc123","input":{"path":"/tmp"},"name":"list_files","type":"tool_use"}],"role":"assistant"},{"content":[{"tool_use_id":"call_abc123","is_error":false,"content":[{"text":"[\"foo.txt\", \"bar.log\", \"data.csv\"]","type":"text"}],"type":"tool_result"}],"role":"user"}],"anthropic_version":"vertex-2023-10-16"}`,
 			responseBody:    `{"id":"msg_123","type":"message","role":"assistant","stop_reason": "end_turn", "content":[{"type":"text","text":"Hello from Anthropic!"}],"usage":{"input_tokens":10,"output_tokens":25,"cache_read_input_tokens":10}}`,
-			expResponseBody: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123, "id":"msg_123","model":"gpt-4-0613","object":"chat.completion","usage":{"completion_tokens":25,"prompt_tokens":20,"total_tokens":45,"prompt_tokens_details":{"cached_tokens":10}}}`,
+			expResponseBody: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123, "id":"msg_123","model":"gpt-4-0613","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{},"prompt_tokens":20,"total_tokens":45,"prompt_tokens_details":{"cached_tokens":10}}}`,
 			expStatus:       http.StatusOK,
 		},
 		{
@@ -310,7 +420,7 @@ func TestWithTestUpstream(t *testing.T) {
 			path:              "/v1/chat/completions",
 			method:            http.MethodPost,
 			requestBody:       `{"model":"gemini-1.5-pro","messages":[{"role":"system","content":"You are a helpful assistant."}]}`,
-			expRequestBody:    `{"contents":null,"tools":null,"generation_config":{},"system_instruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
+			expRequestBody:    `{"contents":null,"tools":null,"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
 			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:generateContent",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
@@ -324,7 +434,7 @@ func TestWithTestUpstream(t *testing.T) {
 			path:              "/v1/chat/completions",
 			method:            http.MethodPost,
 			requestBody:       `{"model":"gemini-1.5-pro","messages":[{"role":"system","content":"You are a helpful assistant."}]}`,
-			expRequestBody:    `{"contents":null,"tools":null,"generation_config":{},"system_instruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
+			expRequestBody:    `{"contents":null,"tools":null,"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
 			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:generateContent",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
@@ -338,7 +448,7 @@ func TestWithTestUpstream(t *testing.T) {
 			path:              "/v1/chat/completions",
 			method:            http.MethodPost,
 			requestBody:       `{"model":"gemini-1.5-pro","messages":[{"role":"user","content":"tell me the delivery date for order 123"}],"tools":[{"type":"function","function":{"name":"get_delivery_date","description":"Get the delivery date for a customer's order. Call this whenever you need to know the delivery date, for example when a customer asks 'Where is my package'","parameters":{"type":"object","properties":{"order_id":{"type":"string","description":"The customer's order ID."}},"required":["order_id"]}}}]}`,
-			expRequestBody:    `{"contents":[{"parts":[{"text":"tell me the delivery date for order 123"}],"role":"user"}],"tools":[{"functionDeclarations":[{"description":"Get the delivery date for a customer's order. Call this whenever you need to know the delivery date, for example when a customer asks 'Where is my package'","name":"get_delivery_date","parameters":{"properties":{"order_id":{"description":"The customer's order ID.","type":"string"}},"required":["order_id"],"type":"object"}}]}],"generation_config":{}}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"tell me the delivery date for order 123"}],"role":"user"}],"tools":[{"functionDeclarations":[{"description":"Get the delivery date for a customer's order. Call this whenever you need to know the delivery date, for example when a customer asks 'Where is my package'","name":"get_delivery_date","parameters":{"properties":{"order_id":{"description":"The customer's order ID.","type":"string"}},"required":["order_id"],"type":"object"}}]}],"generationConfig":{}}`,
 			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:generateContent",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
@@ -358,7 +468,7 @@ func TestWithTestUpstream(t *testing.T) {
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody:      `{"id":"msg_123","type":"message","role":"assistant","stop_reason": "end_turn", "content":[{"type":"text","text":"Hello from Anthropic!"}],"usage":{"input_tokens":10,"output_tokens":25}}`,
 			expStatus:         http.StatusOK,
-			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123, "id":"msg_123","model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"prompt_tokens":10,"total_tokens":35,"prompt_tokens_details":{}}}`,
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from Anthropic!","role":"assistant"}}],"created":123, "id":"msg_123","model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{},"prompt_tokens":10,"total_tokens":35,"prompt_tokens_details":{}}}`,
 		},
 		{
 			name:              "gcp-anthropicai - /v1/chat/completions - with cache",
@@ -372,7 +482,7 @@ func TestWithTestUpstream(t *testing.T) {
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody:      `{"id":"msg_123","type":"message","role":"assistant","stop_reason": "end_turn", "content":[{"type":"text","text":"Hello from cached Anthropic!"}],"usage":{"input_tokens":10,"output_tokens":25, "cache_read_input_tokens": 8}}`,
 			expStatus:         http.StatusOK,
-			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from cached Anthropic!","role":"assistant"}}], "created":123, "id":"msg_123", "model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"prompt_tokens":18,"total_tokens":43,"prompt_tokens_details":{"cached_tokens":8}}}`,
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hello from cached Anthropic!","role":"assistant"}}], "created":123, "id":"msg_123", "model":"claude-3-sonnet","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{},"prompt_tokens":18,"total_tokens":43,"prompt_tokens_details":{"cached_tokens":8}}}`,
 		},
 		{
 			name:            "modelname-override - /v1/chat/completions",
@@ -469,7 +579,7 @@ data: [DONE]
 			responseHeaders: "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
 			expResponseBody: `data: {"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
-data: {"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":{"text":"First, I'll start by acknowledging the user..."}}}],"created":123,"model":"something","object":"chat.completion.chunk"}
+data: {"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"First, I'll start by acknowledging the user..."}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
 data: {"id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","choices":[{"index":0,"delta":{"content":"Hello!","role":"assistant"}}],"created":123,"model":"something","object":"chat.completion.chunk"}
 
@@ -507,7 +617,7 @@ data: [DONE]
 			responseType:      "sse",
 			method:            http.MethodPost,
 			requestBody:       `{"model":"gemini-1.5-pro","messages":[{"role":"system","content":"You are a helpful assistant."}], "stream": true}`,
-			expRequestBody:    `{"contents":null,"tools":null,"generation_config":{},"system_instruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
+			expRequestBody:    `{"contents":null,"tools":null,"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}]}}`,
 			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-1.5-pro:streamGenerateContent",
 			expRawQuery:       "alt=sse",
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
@@ -551,7 +661,7 @@ data: [DONE]
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody: `event: message_start
-data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 15}}}
+data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 15, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 10, "output_tokens": 1}}}
 
 event: content_block_start
 data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
@@ -566,7 +676,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12, "cache_read_input_tokens":10}}
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 15, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 10, "output_tokens": 12}}
 
 event: message_stop
 data: {"type": "message_stop"}
@@ -578,7 +688,7 @@ data: {"id":"msg_123","choices":[{"index":0,"delta":{"content":" due to Rayleigh
 
 data: {"id":"msg_123","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"id":"msg_123","choices":[],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37,"prompt_tokens_details":{"cached_tokens":10}}}
+data: {"id":"msg_123","choices":[],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37,"completion_tokens_details":{},"prompt_tokens_details":{"cached_tokens":10}}}
 
 data: [DONE]
 
@@ -614,7 +724,7 @@ data: [DONE]
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody: `event: message_start
-data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 50}}}
+data: {"type": "message_start", "message": {"id": "msg_123", "usage": {"input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}}}
 
 event: content_block_start
 data: {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_abc123", "name": "get_weather", "input": {}}}
@@ -629,7 +739,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}
+data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 20}}
 
 event: message_stop
 data: {"type": "message_stop"}`,
@@ -642,7 +752,7 @@ data: {"id":"msg_123","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"i
 
 data: {"id":"msg_123","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk"}
 
-data: {"id":"msg_123","choices":[],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70,"prompt_tokens_details":{}}}
+data: {"id":"msg_123","choices":[],"created":123,"model":"claude-3-sonnet","object":"chat.completion.chunk","usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70,"completion_tokens_details":{},"prompt_tokens_details":{}}}
 
 data: [DONE]
 
@@ -910,7 +1020,7 @@ data: [DONE]
 			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
 			responseStatus:    strconv.Itoa(http.StatusOK),
 			responseBody: `event: message_start
-data: {"type": "message_start", "message": {"id": "msg_789", "usage": {"input_tokens": 8}}}
+data: {"type": "message_start", "message": {"id": "msg_789", "usage": {"input_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}}}
 
 event: content_block_start
 data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
@@ -922,7 +1032,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 15}}
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 15}}
 
 event: message_stop
 data: {"type": "message_stop"}
@@ -930,7 +1040,7 @@ data: {"type": "message_stop"}
 `,
 			expStatus: http.StatusOK,
 			expResponseBody: `event: message_start
-data: {"type": "message_start", "message": {"id": "msg_789", "usage": {"input_tokens": 8}}}
+data: {"type": "message_start", "message": {"id": "msg_789", "usage": {"input_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}}}
 
 event: content_block_start
 data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
@@ -942,7 +1052,7 @@ event: content_block_stop
 data: {"type": "content_block_stop", "index": 0}
 
 event: message_delta
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 15}}
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 15}}
 
 event: message_stop
 data: {"type": "message_stop"}
@@ -1052,7 +1162,7 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":9,"output_tokens":10}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -1090,7 +1200,7 @@ data: {"type":"message_stop"}
 {"bytes":"eyJ0eXBlIjoiY29udGVudF9ibG9ja19kZWx0YSIsImluZGV4IjowLCJkZWx0YSI6eyJ0eXBlIjoidGV4dF9kZWx0YSIsInRleHQiOiLwn5GLIEhvdyJ9fQ==","p":"abcdefghijklmnopqrstuvwxyzABCDEFG"}
 {"bytes":"eyJ0eXBlIjoiY29udGVudF9ibG9ja19kZWx0YSIsImluZGV4IjowLCJkZWx0YSI6eyJ0eXBlIjoidGV4dF9kZWx0YSIsInRleHQiOiIgYXJlIHlvdSBkb2luZyB0b2RheT8ifX0=","p":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234"}
 {"bytes":"eyJ0eXBlIjoiY29udGVudF9ibG9ja19zdG9wIiwiaW5kZXgiOjB9","p":"abcdefghijklmnopqrstuvwxyz"}
-{"bytes":"eyJ0eXBlIjoibWVzc2FnZV9kZWx0YSIsImRlbHRhIjp7InN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJzdG9wX3NlcXVlbmNlIjpudWxsfSwidXNhZ2UiOnsib3V0cHV0X3Rva2VucyI6MTV9fQ==","p":"abcdefghijklmnopqrstu"}
+{"bytes":"eyJ0eXBlIjoibWVzc2FnZV9kZWx0YSIsImRlbHRhIjp7InN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJzdG9wX3NlcXVlbmNlIjpudWxsfSwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjoxMCwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjowLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MCwib3V0cHV0X3Rva2VucyI6MTV9fQ==","p":"abcdefghijklmnopqrstu"}
 {"bytes":"eyJ0eXBlIjoibWVzc2FnZV9zdG9wIiwiYW1hem9uLWJlZHJvY2staW52b2NhdGlvbk1ldHJpY3MiOnsiaW5wdXRUb2tlbkNvdW50IjoxMCwib3V0cHV0VG9rZW5Db3VudCI6MTUsImludm9jYXRpb25MYXRlbmN5IjoxNzk4LCJmaXJzdEJ5dGVMYXRlbmN5IjoxNTA3fX0=","p":"ab"}
 `,
 			expStatus: http.StatusOK,
@@ -1119,7 +1229,7 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":15}}
 
 event: message_stop
 data: {"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":10,"outputTokenCount":15,"invocationLatency":1798,"firstByteLatency":1507}}
@@ -1186,6 +1296,17 @@ data: {"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCoun
 			responseBody:    `{"id":"resp_67cc","object":"response","created_at":1741476542,"status":"completed","model":"something","output":[{"type":"message","id":"msg_67c","status":"completed","role":"assistant","content":[{"type":"output_text","text":"This is a test."}]}],"parallel_tool_calls":true,"store":true,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","top_p":1,"truncation":"disabled","usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":5},"output_tokens":6,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":22}}`,
 			expStatus:       http.StatusOK,
 			expResponseBody: `{"id":"resp_67cc","object":"response","created_at":1741476542,"status":"completed","model":"something","output":[{"type":"message","id":"msg_67c","status":"completed","role":"assistant","content":[{"type":"output_text","text":"This is a test."}]}],"parallel_tool_calls":true,"store":true,"temperature":1,"text":{"format":{"type":"text"}},"tool_choice":"auto","top_p":1,"truncation":"disabled","usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":5},"output_tokens":6,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":22}}`,
+		},
+		{
+			name:            "openai - /v1/decisions",
+			backend:         "openai",
+			path:            "/v1/decisions",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"gpt-6-luna","input":"I was charged twice.","questions":[{"type":"choice","name":"department","instructions":"Route this request.","choices":[{"value":"billing","description":"Billing requests."},{"value":"other","description":"Other requests."}]}]}`,
+			expPath:         "/v1/decisions",
+			responseBody:    `{"answers":[{"type":"choice","name":"department","choice":"billing","probabilities":[{"value":"billing","probability":0.95},{"value":"other","probability":0.05}],"confidence":0.95}],"model":"gpt-6-luna","usage":{"input_tokens":24,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":24}}`,
+			expStatus:       http.StatusOK,
+			expResponseBody: `{"answers":[{"type":"choice","name":"department","choice":"billing","probabilities":[{"value":"billing","probability":0.95},{"value":"other","probability":0.05}],"confidence":0.95}],"model":"gpt-6-luna","usage":{"input_tokens":24,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":24}}`,
 		},
 		{
 			name:            "azure-openai - /v1/responses",
@@ -1342,7 +1463,7 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":3}}
 
 event: message_stop
 data: {"type":"message_stop"}`,
@@ -1379,7 +1500,7 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":15}}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":50,"output_tokens":15}}
 
 event: message_stop
 data: {"type":"message_stop"}`,
@@ -1433,6 +1554,15 @@ data: {"type":"message_stop"}`,
 			}
 			if tc.expRequestBody != "" {
 				req.Header.Set(testupstreamlib.ExpectedRequestBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(tc.expRequestBody)))
+			}
+			for k, v := range tc.requestHeaders {
+				req.Header.Set(k, v)
+			}
+			if len(tc.nonExpectedRequestHeaders) > 0 {
+				req.Header.Set(
+					testupstreamlib.NonExpectedRequestHeadersKey,
+					base64.StdEncoding.EncodeToString([]byte(strings.Join(tc.nonExpectedRequestHeaders, ","))),
+				)
 			}
 
 			var lastErr error
@@ -1625,7 +1755,7 @@ func TestStreamingUsageInclusionWithCosts(t *testing.T) {
 			name:           "streaming - forced to include usage",
 			backend:        "openai",
 			requestBody:    `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true, "stream_options": {"include_usage": false}}`,
-			expRequestBody: `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true, "stream_options": {"include_usage": true}}`,
+			expRequestBody: `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true,"stream_options":{"include_usage": true}}`,
 			responseBody: `
 {"id":"chatcmpl-foo","object":"chat.completion.chunk","created":1731618222,"model":"gpt-4o-mini-2024-07-18","system_fingerprint":"fp_0ba0d124f1","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
 {"id":"chatcmpl-foo","object":"chat.completion.chunk","created":1731618222,"model":"gpt-4o-mini-2024-07-18","system_fingerprint":"fp_0ba0d124f1","choices":[],"usage":{"prompt_tokens":13,"completion_tokens":12,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
@@ -1661,7 +1791,7 @@ data: [DONE]
 			name:           "streaming - model override forced to include usage",
 			backend:        "modelname-override",
 			requestBody:    `{"model":"requested-model","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true, "stream_options": {"include_usage": false}}`,
-			expRequestBody: `{"model":"override-model","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true, "stream_options": {"include_usage": true}}`,
+			expRequestBody: `{"model":"override-model","messages":[{"role":"system","content":"You are a chatbot."}], "stream": true,"stream_options":{"include_usage": true}}`,
 			responseBody: `
 {"id":"chatcmpl-foo","object":"chat.completion.chunk","created":1731618222,"model":"gpt-4o-mini-2024-07-18","system_fingerprint":"fp_0ba0d124f1","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
 {"id":"chatcmpl-foo","object":"chat.completion.chunk","created":1731618222,"model":"gpt-4o-mini-2024-07-18","system_fingerprint":"fp_0ba0d124f1","choices":[],"usage":{"prompt_tokens":13,"completion_tokens":12,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
@@ -1760,4 +1890,218 @@ data: [DONE]
 			}
 		})
 	}
+}
+
+// TestLocalReplyIsNotReprocessedAsUpstreamResponse tests that an error the gateway answers itself
+// reaches the client intact and is counted once, since Envoy sends such a local reply back through
+// the response path.
+func TestLocalReplyIsNotReprocessedAsUpstreamResponse(t *testing.T) {
+	config := &filterapi.Config{
+		Version: version.Parse(),
+		Backends: []filterapi.Backend{
+			testUpstreamAWSAnthropicBackend,
+			testUpstreamOpenAIRequiringPerRequestCredential,
+			alwaysFailingBackend, // a fallback endpoint of the openai cluster.
+		},
+	}
+	configBytes, err := yaml.Marshal(config)
+	require.NoError(t, err)
+	env := startTestEnvironment(t, string(configBytes), true, false)
+
+	for _, tc := range []struct {
+		name       string
+		backend    string
+		body       string
+		expStatus  int
+		expMessage string
+	}{
+		{
+			// Cross-schema: the error body would be re-translated on the way back.
+			name:       "translation rejects the request body",
+			backend:    "aws-anthropic",
+			body:       `{"model":"anthropic.claude-3-sonnet-20240229-v1:0","temperature":2.0,"messages":[{"role":"user","content":"hi"}]}`,
+			expStatus:  http.StatusUnprocessableEntity,
+			expMessage: "temperature 2.00 is not supported by Anthropic",
+		},
+		{
+			// "something" matches no x-ai-eg-model route, so x-test-backend selects the route.
+			name:       "the per-request credential is missing",
+			backend:    "openai",
+			body:       `{"model":"something","messages":[{"role":"user","content":"hi"}]}`,
+			expStatus:  http.StatusUnauthorized,
+			expMessage: "missing upstream credential",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const requests = 2
+			for range requests {
+				req, rerr := http.NewRequest(http.MethodPost,
+					fmt.Sprintf("http://localhost:%d/v1/chat/completions", env.EnvoyListenerPort()),
+					strings.NewReader(tc.body))
+				require.NoError(t, rerr)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("x-test-backend", tc.backend)
+
+				resp, rerr := http.DefaultClient.Do(req)
+				require.NoError(t, rerr)
+				respBody, rerr := io.ReadAll(resp.Body)
+				require.NoError(t, rerr)
+				_ = resp.Body.Close()
+
+				require.Equal(t, tc.expStatus, resp.StatusCode)
+				require.Contains(t, string(respBody), tc.expMessage)
+			}
+
+			// One completion per request, not one per response-path pass.
+			require.Equal(t, requests, requestCompletionCount(t, env.ExtProcAdminPort(), tc.backend))
+		})
+	}
+}
+
+// requestCompletionCount returns how many request completions extproc recorded for the backend,
+// read from its Prometheus endpoint.
+func requestCompletionCount(t *testing.T, adminPort int, backend string) int {
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", adminPort))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	// The provider name is what keeps the two backends' series apart.
+	provider := map[string]string{"aws-anthropic": "aws.anthropic", "openai": "openai"}[backend]
+	require.NotEmpty(t, provider, "unmapped backend %q", backend)
+
+	total := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, "gen_ai_server_request_duration_seconds_count") {
+			continue
+		}
+		if !strings.Contains(line, `gen_ai_provider_name="`+provider+`"`) {
+			continue
+		}
+		fields := strings.Fields(line)
+		count, err := strconv.Atoi(fields[len(fields)-1])
+		require.NoError(t, err, "parsing %q", line)
+		total += count
+	}
+	return total
+}
+
+// TestMalformedUpstreamResponseDoesNotTerminateExtProc sends 2xx upstream responses that are missing fields
+// or contain null values through Envoy and an out-of-process external processor. After each one, a well-formed
+// request through the same Envoy must still succeed, which fails if the response terminated the external processor.
+func TestMalformedUpstreamResponseDoesNotTerminateExtProc(t *testing.T) {
+	config := &filterapi.Config{
+		Version: version.Parse(),
+		GlobalLLMRequestCosts: []filterapi.GlobalLLMRequestCost{
+			{MetadataKey: "used_token", Type: filterapi.LLMRequestCostTypeInputToken},
+		},
+		Backends: []filterapi.Backend{
+			testUpstreamOpenAIBackend,
+			testUpstreamAAWSBackend,
+			testUpstreamGCPVertexAIBackend,
+			testUpstreamGCPAnthropicAIBackend,
+			testUpstreamAWSAnthropicBackend,
+			{
+				Name:   "testupstream-anthropic",
+				Schema: anthropicSchema,
+				Auth:   &filterapi.BackendAuth{AnthropicAPIKey: &filterapi.AnthropicAPIKeyAuth{Key: "anthropic-api-key"}},
+			},
+		},
+	}
+	configBytes, err := yaml.Marshal(config)
+	require.NoError(t, err)
+
+	const messagesRequest = `{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	for _, tc := range []struct {
+		name, backend, path, requestBody, responseBody, expPath string
+	}{
+		{
+			name:         "anthropic - /anthropic/v1/messages - no usage",
+			backend:      "anthropic",
+			path:         "/anthropic/v1/messages",
+			requestBody:  messagesRequest,
+			responseBody: `{}`,
+			expPath:      "/v1/messages",
+		},
+		{
+			name:         "aws-anthropic - /anthropic/v1/messages - null body",
+			backend:      "aws-anthropic",
+			path:         "/anthropic/v1/messages",
+			requestBody:  messagesRequest,
+			responseBody: `null`,
+			expPath:      "/model/claude-x/invoke",
+		},
+		{
+			name:         "gcp-anthropicai - /anthropic/v1/messages - no usage",
+			backend:      "gcp-anthropicai",
+			path:         "/anthropic/v1/messages",
+			requestBody:  messagesRequest,
+			responseBody: `{"model":"claude-x","type":"message","role":"assistant","content":[]}`,
+			expPath:      "/v1/projects/gcp-project-name/locations/gcp-region/publishers/anthropic/models/claude-x:rawPredict",
+		},
+		{
+			name:         "aws-bedrock - /anthropic/v1/messages - null content block",
+			backend:      "aws-bedrock",
+			path:         "/anthropic/v1/messages",
+			requestBody:  messagesRequest,
+			responseBody: `{"output":{"message":{"role":"assistant","content":[null]}},"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}`,
+			expPath:      "/model/claude-x/converse",
+		},
+		{
+			name:         "aws-bedrock - /v1/chat/completions - null content block",
+			backend:      "aws-bedrock",
+			path:         "/v1/chat/completions",
+			requestBody:  `{"model":"bedrock-x","messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"output":{"message":{"role":"assistant","content":[null]}},"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}`,
+			expPath:      "/model/bedrock-x/converse",
+		},
+		{
+			name:         "gcp-vertexai - /v1/chat/completions - null body",
+			backend:      "gcp-vertexai",
+			path:         "/v1/chat/completions",
+			requestBody:  `{"model":"gemini-x","messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `null`,
+			expPath:      "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-x:generateContent",
+		},
+		{
+			name:         "openai - /v1/images/generations - null body",
+			backend:      "openai",
+			path:         "/v1/images/generations",
+			requestBody:  `{"model":"gpt-image-1-mini","prompt":"a cat"}`,
+			responseBody: `null`,
+			expPath:      "/v1/images/generations",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := startTestEnvironment(t, string(configBytes), true, false)
+			listenerAddress := fmt.Sprintf("http://localhost:%d", env.EnvoyListenerPort())
+
+			status, body := postToTestUpstream(t, listenerAddress, tc.backend, tc.path, tc.requestBody, tc.responseBody, tc.expPath)
+			require.Equal(t, http.StatusOK, status, "malformed response: %s", body)
+
+			status, body = postToTestUpstream(t, listenerAddress, "openai", "/v1/chat/completions",
+				`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`,
+				`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				"/v1/chat/completions")
+			require.Equal(t, http.StatusOK, status, "well-formed request after the malformed one: %s", body)
+		})
+	}
+}
+
+// postToTestUpstream sends a request through Envoy to the test upstream, telling it which response body to
+// return and which path to expect, and returns the status code and body the client received.
+func postToTestUpstream(t *testing.T, listenerAddress, backend, path, requestBody, responseBody, expPath string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, listenerAddress+path, strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set("x-test-backend", backend)
+	req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(responseBody)))
+	req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte(expPath)))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(body)
 }

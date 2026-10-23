@@ -31,13 +31,33 @@ var (
 )
 
 type fakeSpan struct {
-	backends []string
-	errType  string
-	err      error
+	backends        []string
+	clientSessionID string
+	events          []string
+	listResults     []any
+	toolCallResult  []byte
+	errType         string
+	err             error
 }
 
 func (f *fakeSpan) RecordRouteToBackend(backend string, _ string, _ bool) {
 	f.backends = append(f.backends, backend)
+}
+
+func (f *fakeSpan) RecordClientSession(sessionID string) {
+	f.clientSessionID = sessionID
+}
+
+func (f *fakeSpan) AddEvent(name string) {
+	f.events = append(f.events, name)
+}
+
+func (f *fakeSpan) RecordListResult(result any) {
+	f.listResults = append(f.listResults, result)
+}
+
+func (f *fakeSpan) RecordToolCallResult(resultJSON []byte) {
+	f.toolCallResult = resultJSON
 }
 
 func (f *fakeSpan) EndSpan() {}
@@ -48,10 +68,12 @@ func (f *fakeSpan) EndSpanOnError(errType string, err error) {
 }
 
 type fakeTracer struct {
-	span *fakeSpan
+	span   *fakeSpan
+	starts int
 }
 
 func (f *fakeTracer) StartSpanAndInjectMeta(context.Context, *jsonrpc.Request, mcp.Params, http.Header) tracingapi.MCPSpan {
+	f.starts++
 	if f.span == nil {
 		f.span = &fakeSpan{}
 	}
@@ -59,6 +81,25 @@ func (f *fakeTracer) StartSpanAndInjectMeta(context.Context, *jsonrpc.Request, m
 }
 
 var noopTracer = tracingapi.NoopMCPTracer{}
+
+func TestGetMaxRequestBodySize(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envValue string
+		want     int64
+	}{
+		{name: "default when env var not set", envValue: "", want: defaultMaxRequestBodySize},
+		{name: "custom value from env var", envValue: "1048576", want: 1048576},
+		{name: "default when env var is not a number", envValue: "not-a-number", want: defaultMaxRequestBodySize},
+		{name: "default when env var is zero", envValue: "0", want: defaultMaxRequestBodySize},
+		{name: "default when env var is negative", envValue: "-1", want: defaultMaxRequestBodySize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCP_PROXY_MAX_REQUEST_BODY_SIZE", tc.envValue)
+			require.Equal(t, tc.want, getMaxRequestBodySize())
+		})
+	}
+}
 
 func TestNewMCPProxy(t *testing.T) {
 	l := slog.Default()
@@ -317,7 +358,7 @@ func TestSessionFromID_ValidID(t *testing.T) {
 	// Create a valid session ID.
 	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
 	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
-	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID))
+	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID), "", "")
 
 	require.NoError(t, err)
 	require.NotNil(t, session)
@@ -329,10 +370,57 @@ func TestSessionFromID_InvalidID(t *testing.T) {
 
 	// Create an invalid session ID.
 	sessionID := secureID(t, proxy, "invalid-session-id")
-	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "")
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", "", "")
 
 	require.Error(t, err)
 	require.Nil(t, s)
+}
+
+func TestSessionFromID_SubjectMismatch(t *testing.T) {
+	proxy := newTestMCPProxy()
+
+	// Session ID was minted for "user-a".
+	sessionID := secureID(t, proxy, "route@user-a@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+
+	// Resuming it as a different (or anonymous) authenticated subject must be rejected: this is
+	// the anti-hijacking check documented at
+	// https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices#session-hijacking
+	for _, currentSubject := range []string{"user-b", "", "user-a "} {
+		t.Run(currentSubject, func(t *testing.T) {
+			s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", "route", currentSubject)
+			require.ErrorIs(t, err, errSessionSubjectMismatch)
+			require.Nil(t, s)
+		})
+	}
+
+	// Resuming with the matching subject succeeds.
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", "route", "user-a")
+	require.NoError(t, err)
+	require.NotNil(t, s)
+}
+
+func TestSessionFromID_RouteMismatch(t *testing.T) {
+	proxy := newTestMCPProxy()
+
+	// Session ID was minted on "test-route" for "user-a".
+	sessionID := secureID(t, proxy, "test-route@user-a@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+
+	// Resuming it through any other route must be rejected, even for the same subject: the
+	// session carries the original route's config, which must only be applied to requests that
+	// went through that route's Envoy-side security policy.
+	for _, currentRoute := range []string{"test-route-another", "", "test-route "} {
+		t.Run(currentRoute, func(t *testing.T) {
+			s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", currentRoute, "user-a")
+			require.ErrorIs(t, err, errSessionRouteMismatch)
+			require.Nil(t, s)
+		})
+	}
+
+	// Resuming through the same route succeeds.
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", "test-route", "user-a")
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	require.Equal(t, "test-route", s.route)
 }
 
 func TestInitializeSession_Success(t *testing.T) {
@@ -378,6 +466,33 @@ func TestInitializeSession_InitializeFailure(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, sessionID)
 	require.Contains(t, err.Error(), "failed with status code")
+}
+
+func TestInitializeSession_SSEEndsBeforeResponse(t *testing.T) {
+	// Backend returns a 200 text/event-stream whose initialize response contains
+	// only non-response events (a keep-alive) and then closes before ever sending
+	// the JSON-RPC response. This must produce a clear error rather than the
+	// misleading "MCP message is not a response: <nil>".
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(sessionIDHeader, "test-session-123")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`id: keepalive_0000
+data:
+
+`))
+	}))
+	defer backendServer.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = backendServer.URL
+
+	sessionID, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend"}, &mcp.InitializeParams{}, time.Now())
+
+	require.Error(t, err)
+	require.Empty(t, sessionID)
+	require.Contains(t, err.Error(), "ended before a JSON-RPC response was received")
+	require.NotContains(t, err.Error(), "is not a response")
 }
 
 func TestInitializeSession_NotificationsInitializedFailure(t *testing.T) {
@@ -451,4 +566,42 @@ func TestInvokeJSONRPCRequest_NoSessionID(t *testing.T) {
 	require.NotNil(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, resp.Body.Close())
+}
+
+// Issue #2219: when a backend's initialize SSE response starts with a non-response
+// event (an empty/keep-alive data line) before the real JSON-RPC response, session
+// creation must still succeed rather than failing with "MCP message is not a response".
+func TestNewSession_SSEWithLeadingKeepAlive(t *testing.T) {
+	var callCount perBackendCallCount
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backend := r.Header.Get(internalapi.MCPBackendHeader)
+		if callCount.inc(backend)%2 == 1 {
+			// Odd calls: initialize requests. Emit a leading empty keep-alive
+			// event, then the real response event.
+			w.Header().Set(sessionIDHeader, "test-session-123")
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`id: keepalive_0000
+data:
+
+event: message
+id: msg_0001
+data: {"jsonrpc":"2.0","id":"ff3964c5-4c79-4567-96e2-29e905754e58","result":{"capabilities":{"logging":{},"tools":{"listChanged":true}},"protocolVersion":"2025-06-18","serverInfo":{"name":"dumb-echo-server","version":"0.1.0"}}}
+
+`))
+		} else {
+			// Even calls: notifications/initialized requests.
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer backendServer.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = backendServer.URL
+
+	s, err := proxy.newSession(t.Context(), &mcp.InitializeParams{}, "test-route", "", nil, time.Now())
+
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	require.NotEmpty(t, s.clientGatewaySessionID())
 }

@@ -210,6 +210,62 @@ func TestConvertSSEToResponse(t *testing.T) {
 				StopSequence: func() *string { s := ""; return &s }(),
 			},
 		},
+		{
+			name: "negative content block index is ignored",
+			chunks: []*anthropic.MessagesStreamChunk{
+				{
+					MessageStart: &anthropic.MessagesStreamChunkMessageStart{
+						ID:    "msg_neg",
+						Model: "claude-3",
+						Role:  "assistant",
+						Usage: &anthropic.Usage{InputTokens: 5},
+					},
+				},
+				{
+					ContentBlockStart: &anthropic.MessagesStreamChunkContentBlockStart{
+						Index: -1,
+						ContentBlock: anthropic.MessagesContentBlock{
+							Text: &anthropic.TextBlock{Type: "text", Text: "bad"},
+						},
+					},
+				},
+			},
+			want: &anthropic.MessagesResponse{
+				ID:      "msg_neg",
+				Model:   "claude-3",
+				Role:    "assistant",
+				Usage:   &anthropic.Usage{InputTokens: 5},
+				Content: []anthropic.MessagesContentBlock{},
+			},
+		},
+		{
+			name: "content block index at cap is ignored",
+			chunks: []*anthropic.MessagesStreamChunk{
+				{
+					MessageStart: &anthropic.MessagesStreamChunkMessageStart{
+						ID:    "msg_cap",
+						Model: "claude-3",
+						Role:  "assistant",
+						Usage: &anthropic.Usage{InputTokens: 5},
+					},
+				},
+				{
+					ContentBlockStart: &anthropic.MessagesStreamChunkContentBlockStart{
+						Index: 1000, // == maxContentBlocks, should be rejected
+						ContentBlock: anthropic.MessagesContentBlock{
+							Text: &anthropic.TextBlock{Type: "text", Text: "bad"},
+						},
+					},
+				},
+			},
+			want: &anthropic.MessagesResponse{
+				ID:      "msg_cap",
+				Model:   "claude-3",
+				Role:    "assistant",
+				Usage:   &anthropic.Usage{InputTokens: 5},
+				Content: []anthropic.MessagesContentBlock{},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -364,5 +420,28 @@ func TestMessageRecorder_RecordResponse(t *testing.T) {
 			openinference.RequireAttributesEqual(t, tt.expectedAttrs, otherAttrs)
 			require.Equal(t, trace.Status{Code: codes.Ok, Description: ""}, actualSpan.Status)
 		})
+	}
+}
+
+func TestMessageRecorder_RecordResponse_NoUsage(t *testing.T) {
+	// A response without usage, for example one folded from a stream that never carried usage
+	// or translated from a Bedrock response without usage, must not panic.
+	resp := &anthropic.MessagesResponse{
+		ID:      "msg_no_usage",
+		Model:   "claude-3-opus-20240229",
+		Role:    "assistant",
+		Content: []anthropic.MessagesContentBlock{{Text: &anthropic.TextBlock{Type: "text", Text: "Hi there!"}}},
+	}
+	recorder := NewMessageRecorderFromEnv()
+
+	var attrs []attribute.KeyValue
+	require.NotPanics(t, func() {
+		attrs = testotel.RecordWithSpan(t, func(span oteltrace.Span) bool {
+			recorder.RecordResponse(span, resp)
+			return false
+		}).Attributes
+	})
+	for _, attr := range attrs {
+		require.NotEqual(t, attribute.Key(openinference.LLMTokenCountPrompt), attr.Key)
 	}
 }

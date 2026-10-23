@@ -82,6 +82,12 @@ type openAIToGCPVertexAITranslatorV1ChatCompletion struct {
 	bufferedBody      []byte // Buffer for incomplete JSON chunks.
 	requestModel      internalapi.RequestModel
 	toolCallIndex     int64
+	// streamedToolCall records whether any tool call has been emitted so far in
+	// the streaming response. Newer Gemini models (e.g. gemini-3.5-flash,
+	// gemini-3.1-flash-lite) stream the terminal STOP on a separate chunk that no
+	// longer carries the functionCall part, so the finish_reason must be derived
+	// from the whole stream, not just the current chunk.
+	streamedToolCall bool
 	// Redaction configuration for debug logging
 	debugLogEnabled bool
 	enableRedaction bool
@@ -149,9 +155,14 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) ResponseBody(_ map[strin
 	}
 
 	// Non-streaming logic.
-	gcpResp := &genai.GenerateContentResponse{}
-	if err = json.NewDecoder(body).Decode(gcpResp); err != nil {
+	// Decode into a pointer: a JSON null body then yields nil instead of reaching genai's
+	// UnmarshalJSON, which dereferences a nil pointer on null. Treat it as an empty response.
+	var gcpResp *genai.GenerateContentResponse
+	if err = json.NewDecoder(body).Decode(&gcpResp); err != nil {
 		return nil, nil, metrics.TokenUsage{}, "", fmt.Errorf("error decoding GCP response: %w", err)
+	}
+	if gcpResp == nil {
+		gcpResp = &genai.GenerateContentResponse{}
 	}
 
 	responseModel = o.requestModel
@@ -249,21 +260,11 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) handleStreamingResponse(
 				span.RecordResponseChunk(usageChunk)
 			}
 
-			if chunk.UsageMetadata.PromptTokenCount >= 0 {
-				tokenUsage.SetInputTokens(uint32(chunk.UsageMetadata.PromptTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CandidatesTokenCount >= 0 {
-				tokenUsage.SetOutputTokens(uint32(chunk.UsageMetadata.CandidatesTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.TotalTokenCount >= 0 {
-				tokenUsage.SetTotalTokens(uint32(chunk.UsageMetadata.TotalTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.CachedContentTokenCount >= 0 {
-				tokenUsage.SetCachedInputTokens(uint32(chunk.UsageMetadata.CachedContentTokenCount)) //nolint:gosec
-			}
-			if chunk.UsageMetadata.ThoughtsTokenCount >= 0 {
-				tokenUsage.SetReasoningTokens(uint32(chunk.UsageMetadata.ThoughtsTokenCount)) //nolint:gosec
-			}
+			tokenUsage.SetInputTokens(uint32(usage.PromptTokens))                                //nolint:gosec
+			tokenUsage.SetOutputTokens(uint32(usage.CompletionTokens))                           //nolint:gosec
+			tokenUsage.SetTotalTokens(uint32(usage.TotalTokens))                                 //nolint:gosec
+			tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))      //nolint:gosec
+			tokenUsage.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
 		}
 	}
 
@@ -318,13 +319,19 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) parseGCPStreamingChunks(
 			continue
 		}
 
-		// Remove "data: " prefix from SSE format if present.
-		line := bytes.TrimPrefix(part, sseDataPrefix)
+		// Remove the "data:" field prefix from SSE format if present.
+		line, ok := cutSSEDataPrefix(part)
+		if !ok {
+			line = part
+		}
 
-		// Try to parse as JSON.
-		var chunk genai.GenerateContentResponse
+		// Try to parse as JSON. Decode into a pointer so that a null event yields nil instead of
+		// reaching genai's UnmarshalJSON, which dereferences a nil pointer on null.
+		var chunk *genai.GenerateContentResponse
 		if err := json.Unmarshal(line, &chunk); err == nil {
-			chunks = append(chunks, chunk)
+			if chunk != nil {
+				chunks = append(chunks, *chunk)
+			}
 			o.bufferedBody = nil
 		} else {
 			// Failed to parse, buffer it for the next call.
@@ -415,16 +422,6 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 					Text: thoughtSummary,
 				}
 			}
-			// the model can not respond with both tool calls and text, so it's safe to assign it directly.
-			if signature != "" {
-				if delta.ReasoningContent != nil {
-					delta.ReasoningContent.Signature = signature
-				} else {
-					delta.ReasoningContent = &openai.StreamReasoningContent{
-						Signature: signature,
-					}
-				}
-			}
 
 			if content != "" {
 				delta.Content = &content
@@ -438,23 +435,41 @@ func (o *openAIToGCPVertexAITranslatorV1ChatCompletion) geminiCandidatesToOpenAI
 			}
 			delta.ToolCalls = toolCalls
 
-			// Handle signature from tool calls (if not already set from thought text)
+			// Thought signatures (from thought parts or tool-call parts; the model cannot
+			// respond with both) are not representable in the plain-string
+			// reasoning_content, so they are surfaced via thinking_blocks instead.
 			if toolCallSignature != "" {
 				signature = toolCallSignature
-				if delta.ReasoningContent != nil {
-					delta.ReasoningContent.Signature = signature
-				} else {
-					delta.ReasoningContent = &openai.StreamReasoningContent{
-						Signature: signature,
-					}
-				}
+			}
+			if signature != "" {
+				delta.ThinkingBlocks = []openai.ThinkingBlock{{
+					Type: "thinking", Thinking: thoughtSummary, Signature: signature,
+				}}
 			}
 
 			choice.Delta = delta
 		} else {
 			choice.Delta = &openai.ChatCompletionResponseChunkChoiceDelta{}
 		}
+
+		// Track whether a tool call has been streamed at any point in the response.
+		if len(toolCalls) > 0 {
+			o.streamedToolCall = true
+		}
+
 		choice.FinishReason = geminiFinishReasonToOpenAI(candidate.FinishReason, toolCalls)
+		// Newer Gemini models (e.g. gemini-3.5-flash, gemini-3.1-flash-lite) stream
+		// the terminal STOP on a separate chunk whose parts no longer contain the
+		// functionCall (e.g. an empty text part), so the per-chunk toolCalls slice
+		// is empty and geminiFinishReasonToOpenAI maps it to "stop". If a tool call
+		// was streamed in an earlier chunk, the correct OpenAI finish_reason for the
+		// completion is still "tool_calls". Older Gemini models carried the
+		// functionCall and STOP in the same chunk, so this only affects the newer
+		// split-chunk shape.
+		if choice.FinishReason == openai.ChatCompletionChoicesFinishReasonStop && o.streamedToolCall {
+			choice.FinishReason = openai.ChatCompletionChoicesFinishReasonToolCalls
+		}
+
 		choices = append(choices, choice)
 	}
 

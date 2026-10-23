@@ -278,7 +278,7 @@ func recreateDir(path string) error {
 // writeEnvoyResourcesAndRunExtProc reads all resources from the given string, writes them to the output file, and runs
 // external processes for EnvoyExtensionPolicy resources.
 func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Context, original string) (client.Client, <-chan error, int, error) {
-	aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSPolicies, gateways, secrets, _, err := collectObjects(original, runCtx.envoyGatewayResourcesOut, runCtx.stderrLogger)
+	aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSPolicies, referenceGrants, gateways, secrets, _, err := collectObjects(original, runCtx.envoyGatewayResourcesOut, runCtx.stderrLogger)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("error collecting: %w", err)
 	}
@@ -301,7 +301,7 @@ func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Contex
 	}
 
 	var secretList *corev1.SecretList
-	fakeClient, _fakeClientSet, httpRoutes, eps, httpRouteFilters, backends, secretList, backendTrafficPolicies, securityPolicies, err := translateCustomResourceObjects(ctx, aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSPolicies, gateways, secrets, runCtx.stderrLogger)
+	fakeClient, _fakeClientSet, httpRoutes, eps, httpRouteFilters, backends, secretList, backendTrafficPolicies, securityPolicies, err := translateCustomResourceObjects(ctx, aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSPolicies, referenceGrants, gateways, secrets, runCtx.stderrLogger)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("error translating: %w", err)
 	}
@@ -341,23 +341,40 @@ func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Contex
 		runCtx.mustClearSetOwnerReferencesAndStatusAndWriteObj(&ep.TypeMeta, ep)
 	}
 
-	filterConfigSecret, err := runCtx.fakeClientSet.CoreV1().
+	// Get the filter config from the sharded config secrets.
+	filterConfigIndexSecret, err := runCtx.fakeClientSet.CoreV1().
 		Secrets("").Get(ctx,
-		controller.FilterConfigSecretPerGatewayName(gw.Name, gw.Namespace), metav1.GetOptions{})
+		controller.FilterConfigBundleIndexSecretName(gw.Name, gw.Namespace), metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to get filter config secret: %w", err)
 	}
 
-	rawConfig, ok := filterConfigSecret.StringData[controller.FilterConfigKeyInSecret]
+	filterConfigIndexRaw, ok := filterConfigIndexSecret.StringData[controller.FilterConfigBundleIndexKey]
 	if !ok {
-		return nil, nil, 0, fmt.Errorf("failed to get filter config from secret: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to get filter config index from secret %s", filterConfigIndexSecret.Name)
 	}
-	var fc filterapi.Config
-	if err = yaml.Unmarshal([]byte(rawConfig), &fc); err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to unmarshal filter config: %w", err)
+
+	filterConfigIndex, err := filterapi.UnmarshalConfigBundleIndex([]byte(filterConfigIndexRaw))
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to parse filter config index: %w", err)
 	}
-	runCtx.stderrLogger.Info("Running external process", "config", fc)
-	done := runCtx.mustStartExtProc(ctx, &fc)
+
+	fc, err := filterapi.ReassembleBundleConfig(filterConfigIndex, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+		partSecret, getErr := runCtx.fakeClientSet.CoreV1().Secrets("").Get(ctx, part.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		if b, exists := partSecret.Data[controller.FilterConfigBundlePartKey]; exists {
+			return b, nil
+		}
+		return nil, fmt.Errorf("missing key %q in part secret %s", controller.FilterConfigBundlePartKey, part.Name)
+	})
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to reassemble filter config bundle: %w", err)
+	}
+
+	runCtx.stderrLogger.Info("Running external process", "config", *fc)
+	done := runCtx.mustStartExtProc(ctx, fc)
 	return fakeClient, done, runCtx.tryFindEnvoyListenerPort(gw), nil
 }
 
@@ -370,17 +387,15 @@ func (runCtx *runCmdContext) mustStartExtProc(
 	if err != nil {
 		panic(fmt.Sprintf("BUG: failed to marshal filter config: %v", err))
 	}
-	configPath := filepath.Join(runCtx.tmpdir, "extproc-config.yaml")
-	_ = os.Remove(configPath)
-	err = os.WriteFile(configPath, marshaled, 0o600)
-	if err != nil {
-		panic(fmt.Sprintf("BUG: failed to write extension proc config: %v", err))
+	configBundlePath := filepath.Join(runCtx.tmpdir, "extproc-config-bundle")
+	if err = writeExtProcConfigBundle(configBundlePath, marshaled); err != nil {
+		panic(fmt.Sprintf("BUG: failed to write extension proc config bundle: %v", err))
 	}
 	args := []string{
-		"--configPath", configPath,
+		"--configBundlePath", configBundlePath,
 		"--extProcAddr", fmt.Sprintf("unix://%s", runCtx.udsPath),
 		"--adminPort", fmt.Sprintf("%d", runCtx.adminPort),
-		"--mcpAddr", ":" + strconv.Itoa(internalapi.MCPProxyPort),
+		"--mcpAddr", internalapi.MCPProxyAddr,
 		"--mcpSessionEncryptionIterations", strconv.Itoa(runCtx.mcpSessionEncryptionIterations),
 	}
 	if runCtx.isDebug {
@@ -411,6 +426,29 @@ func (runCtx *runCmdContext) mustStartExtProc(
 		close(done)
 	}()
 	return done
+}
+
+func writeExtProcConfigBundle(bundlePath string, raw []byte) error {
+	part := filterapi.ConfigBundlePart{
+		Name:      "extproc-config",
+		Path:      filterapi.ConfigBundlePartPath(0),
+		SizeBytes: len(raw),
+	}
+	partPath := filepath.Join(bundlePath, filepath.FromSlash(part.Path))
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(partPath, raw, 0o600); err != nil {
+		return err
+	}
+	indexRaw, err := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+		Checksum: filterapi.ConfigBundleChecksum(raw),
+		Parts:    []filterapi.ConfigBundlePart{part},
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(bundlePath, filterapi.ConfigBundleIndexFileName), indexRaw, 0o600)
 }
 
 func envOptional(name string) *string {

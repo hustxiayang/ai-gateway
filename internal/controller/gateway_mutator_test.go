@@ -7,7 +7,7 @@ package controller
 
 import (
 	"fmt"
-	"strconv"
+	"strings"
 	"testing"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -25,6 +25,7 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
@@ -93,37 +94,51 @@ func TestGatewayMutator_mutatePod(t *testing.T) {
 			},
 			podTest: func(t *testing.T, pod corev1.Pod) {
 				require.Empty(t, pod.Spec.ImagePullSecrets)
+				var foundBundle bool
+				for i := range pod.Spec.Volumes {
+					v := pod.Spec.Volumes[i]
+					if !strings.HasSuffix(v.Name, "-bundle") {
+						continue
+					}
+					foundBundle = true
+					require.NotNil(t, v.Projected)
+					require.Len(t, v.Projected.Sources, maxFilterConfigBundleSlots+1) // index + fixed slots
+					for j, src := range v.Projected.Sources {
+						if j == 0 {
+							require.Nil(t, src.Secret.Optional) // index secret is not optional
+							continue
+						}
+						require.NotNil(t, src.Secret.Optional) // parital secrets are optional
+						require.True(t, *src.Secret.Optional)
+					}
+				}
+				require.True(t, foundBundle)
 			},
 		},
 		{
 			name:    "basic extproc container with MCPRoute",
 			needMCP: true,
 			extprocTest: func(t *testing.T, container corev1.Container) {
-				var foundMCPAddr, foundMCPSeed, foundMCPSIterations, foundFallbackSeed, foundFallbackIterations bool
+				var foundMCPAddr bool
 				for i, arg := range container.Args {
 					switch arg {
 					case "-mcpAddr":
 						foundMCPAddr = true
-						require.Equal(t, ":"+strconv.Itoa(internalapi.MCPProxyPort), container.Args[i+1])
-					case "-mcpSessionEncryptionSeed":
-						foundMCPSeed = true
-						require.Equal(t, "seed", container.Args[i+1])
-					case "-mcpSessionEncryptionIterations":
-						foundMCPSIterations = true
-						require.Equal(t, "100", container.Args[i+1])
-					case "-mcpFallbackSessionEncryptionSeed":
-						foundFallbackSeed = true
-						require.Equal(t, "fallback", container.Args[i+1])
-					case "-mcpFallbackSessionEncryptionIterations":
-						foundFallbackIterations = true
-						require.Equal(t, "200", container.Args[i+1])
+						require.Equal(t, internalapi.MCPProxyAddr, container.Args[i+1])
+					case "-mcpSessionEncryptionSeed", "-mcpSessionEncryptionIterations",
+						"-mcpFallbackSessionEncryptionSeed", "-mcpFallbackSessionEncryptionIterations":
+						t.Fatalf("MCP session encryption config must not be passed as an argument: %s", arg)
 					}
 				}
 				require.True(t, foundMCPAddr)
-				require.True(t, foundMCPSeed)
-				require.True(t, foundMCPSIterations)
-				require.True(t, foundFallbackSeed)
-				require.True(t, foundFallbackIterations)
+				// The seeds are delivered through the filter config Secrets and must not appear anywhere
+				// in the Pod spec, which is readable by anyone with pod read access.
+				require.NotContains(t, container.Args, "seed")
+				require.NotContains(t, container.Args, "fallback")
+				for _, env := range container.Env {
+					require.NotEqual(t, "seed", env.Value)
+					require.NotEqual(t, "fallback", env.Value)
+				}
 			},
 		},
 		{
@@ -391,11 +406,33 @@ func TestGatewayMutator_mutatePod(t *testing.T) {
 					require.Len(t, pod.Spec.Containers, 1)
 
 					// Create the config secret and mutate the pod again.
+					indexRaw, idxErr := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+						Checksum: "abc",
+						Parts: []filterapi.ConfigBundlePart{
+							{
+								Name: FilterConfigBundleIndexSecretName(gwName, gwNamespace) + "-part-000",
+								Path: "parts/000",
+							},
+						},
+					})
+					require.NoError(t, idxErr)
 					_, err = g.kube.CoreV1().Secrets("test-namespace").Create(t.Context(),
 						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{Name: FilterConfigSecretPerGatewayName(
+							ObjectMeta: metav1.ObjectMeta{Name: FilterConfigBundleIndexSecretName(
 								gwName, gwNamespace,
 							), Namespace: "test-namespace"},
+							Data: map[string][]byte{
+								FilterConfigBundleIndexKey: indexRaw,
+							},
+						}, metav1.CreateOptions{})
+					require.NoError(t, err)
+					_, err = g.kube.CoreV1().Secrets("test-namespace").Create(t.Context(),
+						&corev1.Secret{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      FilterConfigBundleIndexSecretName(gwName, gwNamespace) + "-part-000",
+								Namespace: "test-namespace",
+							},
+							Data: map[string][]byte{FilterConfigBundlePartKey: []byte("version: dev\n")},
 						}, metav1.CreateOptions{})
 					require.NoError(t, err)
 					err = g.mutatePod(t.Context(), pod, gwName, gwNamespace)
@@ -414,6 +451,7 @@ func TestGatewayMutator_mutatePod(t *testing.T) {
 					}
 
 					require.Equal(t, "ai-gateway-extproc", extProcContainer.Name)
+					require.Contains(t, extProcContainer.Args, "-configBundlePath")
 					tt.extprocTest(t, extProcContainer)
 					if tt.podTest != nil {
 						tt.podTest(t, *pod)
@@ -424,17 +462,107 @@ func TestGatewayMutator_mutatePod(t *testing.T) {
 	}
 }
 
+func TestGatewayMutator_mutatePod_BundleOnly(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	fakeKube := fake2.NewClientset()
+	g := newTestGatewayMutator(fakeClient, fakeKube, nil, nil, nil, nil, "", "", "", false)
+
+	const gwName, gwNamespace = "test-gateway", "test-namespace"
+	err := fakeClient.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: gwName, Namespace: gwNamespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			ParentRefs: []gwapiv1a2.ParentReference{
+				{
+					Name:  gwName,
+					Kind:  ptr.To(gwapiv1a2.Kind("Gateway")),
+					Group: ptr.To(gwapiv1a2.Group("gateway.networking.k8s.io")),
+				},
+			},
+			Rules: []aigv1b1.AIGatewayRouteRule{{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}}},
+		},
+	})
+	require.NoError(t, err)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: gwNamespace},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}}},
+	}
+
+	indexRaw, idxErr := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+		Checksum: "abc",
+		Parts: []filterapi.ConfigBundlePart{
+			{Name: FilterConfigBundleIndexSecretName(gwName, gwNamespace) + "-part-000", Path: "parts/000"},
+		},
+	})
+	require.NoError(t, idxErr)
+	_, err = g.kube.CoreV1().Secrets(gwNamespace).Create(t.Context(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: FilterConfigBundleIndexSecretName(gwName, gwNamespace), Namespace: gwNamespace},
+			Data:       map[string][]byte{FilterConfigBundleIndexKey: indexRaw},
+		}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = g.kube.CoreV1().Secrets(gwNamespace).Create(t.Context(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: FilterConfigBundleIndexSecretName(gwName, gwNamespace) + "-part-000", Namespace: gwNamespace},
+			Data:       map[string][]byte{FilterConfigBundlePartKey: []byte("version: dev\n")},
+		}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = g.mutatePod(t.Context(), pod, gwName, gwNamespace)
+	require.NoError(t, err)
+	require.Len(t, pod.Spec.Containers, 2)
+
+	extProcContainer := pod.Spec.Containers[1]
+	require.Contains(t, extProcContainer.Args, "-configBundlePath")
+}
+
 func strPtr(value string) *string {
 	return &value
 }
 
 func newTestGatewayMutator(fakeClient client.Client, fakeKube *fake2.Clientset, requestHeaderAttributes, spanRequestHeaderAttributes, metricsRequestHeaderAttributes, logRequestHeaderAttributes *string, endpointPrefixes, extProcExtraEnvVars, extProcImagePullSecrets string, sidecar bool) *gatewayMutator {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
-	return newGatewayMutator(
-		fakeClient, fakeClient, fakeKube, ctrl.Log, "docker.io/envoyproxy/ai-gateway-extproc:latest", corev1.PullIfNotPresent,
-		"info", false, "/tmp/extproc.sock", requestHeaderAttributes, spanRequestHeaderAttributes, metricsRequestHeaderAttributes, logRequestHeaderAttributes, "/v1", endpointPrefixes, extProcExtraEnvVars, extProcImagePullSecrets, 512*1024*1024,
-		sidecar, "seed", 100, "fallback", 200,
-	)
+	opts := &Options{
+		ExtProcImage:                           "docker.io/envoyproxy/ai-gateway-extproc:latest",
+		ExtProcImagePullPolicy:                 corev1.PullIfNotPresent,
+		ExtProcLogLevel:                        "info",
+		ExtProcEnableRedaction:                 false,
+		UDSPath:                                "/tmp/extproc.sock",
+		RequestHeaderAttributes:                requestHeaderAttributes,
+		TracingRequestHeaderAttributes:         spanRequestHeaderAttributes,
+		MetricsRequestHeaderAttributes:         metricsRequestHeaderAttributes,
+		LogRequestHeaderAttributes:             logRequestHeaderAttributes,
+		RootPrefix:                             "/v1",
+		EndpointPrefixes:                       endpointPrefixes,
+		ExtProcExtraEnvVars:                    extProcExtraEnvVars,
+		ExtProcImagePullSecrets:                extProcImagePullSecrets,
+		ExtProcMaxRecvMsgSize:                  512 * 1024 * 1024,
+		MCPSessionEncryptionSeed:               "seed",
+		MCPSessionEncryptionIterations:         100,
+		MCPFallbackSessionEncryptionSeed:       "fallback",
+		MCPFallbackSessionEncryptionIterations: 200,
+	}
+	return newGatewayMutator(fakeClient, fakeClient, fakeKube, ctrl.Log, newExtProcBuilder(opts, sidecar, ctrl.Log))
+}
+
+// defaultTestExtProcBuilder returns an extProcBuilder with the standard test
+// defaults used by the no-cache-reader mutator tests (which need a distinct
+// noCacheReader and therefore call newGatewayMutator directly).
+func defaultTestExtProcBuilder() *extProcBuilder {
+	opts := &Options{
+		ExtProcImage:                           "docker.io/envoyproxy/ai-gateway-extproc:latest",
+		ExtProcImagePullPolicy:                 corev1.PullIfNotPresent,
+		ExtProcLogLevel:                        "info",
+		ExtProcEnableRedaction:                 false,
+		UDSPath:                                "/tmp/extproc.sock",
+		RootPrefix:                             "/v1",
+		ExtProcMaxRecvMsgSize:                  512 * 1024 * 1024,
+		MCPSessionEncryptionSeed:               "seed",
+		MCPSessionEncryptionIterations:         100,
+		MCPFallbackSessionEncryptionSeed:       "fallback",
+		MCPFallbackSessionEncryptionIterations: 200,
+	}
+	return newExtProcBuilder(opts, false, ctrl.Log)
 }
 
 func TestParseExtraEnvVars(t *testing.T) {
@@ -751,7 +879,7 @@ func TestGatewayMutator_resolveExtProcImage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := &gatewayMutator{extProcImage: tt.base}
+			g := &gatewayMutator{extProcBuilder: &extProcBuilder{image: tt.base}}
 			require.Equal(t, tt.expected, g.resolveExtProcImage(tt.extProc))
 		})
 	}
@@ -761,12 +889,7 @@ func TestGatewayMutator_mutatePod_UsesNoCacheReader(t *testing.T) {
 	cacheClient := requireNewFakeClientWithIndexes(t)
 	noCacheReader := requireNewFakeClientWithIndexes(t)
 	fakeKube := fake2.NewClientset()
-	g := newGatewayMutator(
-		cacheClient, noCacheReader, fakeKube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", corev1.PullIfNotPresent,
-		"info", false, "/tmp/extproc.sock", nil, nil, nil, nil, "/v1", "", "", "", 512*1024*1024,
-		false, "seed", 100, "fallback", 200,
-	)
+	g := newGatewayMutator(cacheClient, noCacheReader, fakeKube, ctrl.Log, defaultTestExtProcBuilder())
 
 	const gwName, gwNamespace = "test-gateway", "test-namespace"
 	// Route only in noCacheReader, not in cacheClient — simulates cache not yet synced.
@@ -795,7 +918,7 @@ func TestGatewayMutator_mutatePod_UsesNoCacheReader(t *testing.T) {
 	_, err = g.kube.CoreV1().Secrets(gwNamespace).Create(t.Context(),
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      FilterConfigSecretPerGatewayName(gwName, gwNamespace),
+				Name:      FilterConfigBundleIndexSecretName(gwName, gwNamespace),
 				Namespace: gwNamespace,
 			},
 		}, metav1.CreateOptions{})
@@ -811,12 +934,7 @@ func TestGatewayMutator_listAIGatewayRoutesForGateway_NoCacheReaderFallback(t *t
 	cacheClient := requireNewFakeClientWithIndexes(t)
 	noCacheReader := requireNewFakeClientWithIndexes(t)
 	fakeKube := fake2.NewClientset()
-	g := newGatewayMutator(
-		cacheClient, noCacheReader, fakeKube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", corev1.PullIfNotPresent,
-		"info", false, "/tmp/extproc.sock", nil, nil, nil, nil, "/v1", "", "", "", 512*1024*1024,
-		false, "seed", 100, "fallback", 200,
-	)
+	g := newGatewayMutator(cacheClient, noCacheReader, fakeKube, ctrl.Log, defaultTestExtProcBuilder())
 
 	const gwName, gwNamespace = "test-gateway", "test-namespace"
 
@@ -855,12 +973,7 @@ func TestGatewayMutator_listMCPRoutesForGateway_NoCacheReaderFallback(t *testing
 	cacheClient := requireNewFakeClientWithIndexes(t)
 	noCacheReader := requireNewFakeClientWithIndexes(t)
 	fakeKube := fake2.NewClientset()
-	g := newGatewayMutator(
-		cacheClient, noCacheReader, fakeKube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", corev1.PullIfNotPresent,
-		"info", false, "/tmp/extproc.sock", nil, nil, nil, nil, "/v1", "", "", "", 512*1024*1024,
-		false, "seed", 100, "fallback", 200,
-	)
+	g := newGatewayMutator(cacheClient, noCacheReader, fakeKube, ctrl.Log, defaultTestExtProcBuilder())
 
 	const gwName, gwNamespace = "test-gateway", "test-namespace"
 

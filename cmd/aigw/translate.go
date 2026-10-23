@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	kyaml "sigs.k8s.io/yaml"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -44,12 +45,12 @@ func translate(ctx context.Context, paths []string, output, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
-	aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, originalGateways, originalSecrets, _, err := collectObjects(yaml, output, stderrLogger)
+	aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, referenceGrants, originalGateways, originalSecrets, _, err := collectObjects(yaml, output, stderrLogger)
 	if err != nil {
 		return fmt.Errorf("error translating: %w", err)
 	}
 
-	_, _, httpRoutes, extensionPolicies, httpRouteFilter, backends, secrets, backendTrafficPolicies, securityPolicies, err := translateCustomResourceObjects(ctx, aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, originalGateways, originalSecrets, stderrLogger)
+	_, _, httpRoutes, extensionPolicies, httpRouteFilter, backends, secrets, backendTrafficPolicies, securityPolicies, err := translateCustomResourceObjects(ctx, aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, referenceGrants, originalGateways, originalSecrets, stderrLogger)
 	if err != nil {
 		return fmt.Errorf("error emitting: %w", err)
 	}
@@ -106,17 +107,16 @@ func readYamlsAsString(paths []string) (string, error) {
 	return buf.String(), nil
 }
 
-// collectObjects reads the YAML input and collects target resources. Currently, this will collect
-// AIGatewayRoute, AIServiceBackend, BackendSecurityPolicy, and Secret resources. Other resources
-// will be written back to the output writer.
-//
-// If the resource is not an AI Gateway custom resource, it will be written back to the output writer.
+// collectObjects reads the YAML input and collects the resources the controllers need. Resources that
+// Envoy Gateway needs as well, such as EnvoyProxy, BackendTLSPolicy and ReferenceGrant, are collected and
+// also written back to the output writer. Any other resource is only written back to the output writer.
 func collectObjects(yamlInput string, out io.Writer, logger *slog.Logger) (
 	aigwRoutes []*aigv1b1.AIGatewayRoute,
 	mcpRoutes []*aigv1b1.MCPRoute,
 	aigwBackends []*aigv1b1.AIServiceBackend,
 	backendSecurityPolicies []*aigv1b1.BackendSecurityPolicy,
 	backendTLSConfigs []*gwapiv1.BackendTLSPolicy,
+	referenceGrants []*gwapiv1b1.ReferenceGrant,
 	gws []*gwapiv1.Gateway,
 	secrets []*corev1.Secret,
 	envoyProxies []*egv1a1.EnvoyProxy,
@@ -175,6 +175,11 @@ func collectObjects(yamlInput string, out io.Writer, logger *slog.Logger) (
 			// need to reconcile them; just create them as-is.
 			mustExtractAndAppend(obj, &backendTLSConfigs)
 			mustWriteObj(nil, obj, out)
+		case "ReferenceGrant":
+			// The controllers check cross-namespace references against these, and Envoy Gateway needs
+			// them as well, e.g. for HTTPRoute backendRefs to another namespace.
+			mustExtractAndAppend(obj, &referenceGrants)
+			mustWriteObj(nil, obj, out)
 		case "GatewayConfig":
 			// GatewayConfig is gateway-scoped configuration for extproc containers.
 			// Write it back as-is to the output.
@@ -196,6 +201,7 @@ func translateCustomResourceObjects(
 	aigwBackends []*aigv1b1.AIServiceBackend,
 	backendSecurityPolicies []*aigv1b1.BackendSecurityPolicy,
 	backendTLSPolicies []*gwapiv1.BackendTLSPolicy,
+	referenceGrants []*gwapiv1b1.ReferenceGrant,
 	gws []*gwapiv1.Gateway,
 	usedDefinedSecrets []*corev1.Secret,
 	logger *slog.Logger,
@@ -234,25 +240,42 @@ func translateCustomResourceObjects(
 		userDefinedSecretKeys[fmt.Sprintf("%s/%s", s.Namespace, s.Name)] = struct{}{}
 	}
 
+	// Use buffered event channels so that controllers can push gateway sync events without blocking,
+	// This mirrors the production code at controller/controller.go:128
+	const eventChanBuffer = 100
 	bspC := controller.NewBackendSecurityPolicyController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()),
-		make(chan event.GenericEvent), make(chan event.GenericEvent))
+		make(chan event.GenericEvent, eventChanBuffer), make(chan event.GenericEvent, eventChanBuffer), controller.DefaultPreRotationWindow)
 	aisbC := controller.NewAIServiceBackendController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()),
-		make(chan event.GenericEvent))
+		make(chan event.GenericEvent, eventChanBuffer))
 	airC := controller.NewAIGatewayRouteController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()),
-		make(chan event.GenericEvent), "/",
+		make(chan event.GenericEvent, eventChanBuffer), "/",
 	)
 	mcpC := controller.NewMCPRouteController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()),
-		make(chan event.GenericEvent),
+		make(chan event.GenericEvent, eventChanBuffer),
 	)
-	gwC := controller.NewGatewayController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()),
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", "debug", true, func() string {
+	gwC := controller.NewGatewayController(fakeClient, fakeClientSet, logr.FromSlogHandler(logger.Handler()), "envoy-gateway-system",
+		true, func() string {
 			return "aigw-translate"
+		}, &controller.Options{
+			ExtProcImage:    "docker.io/envoyproxy/ai-gateway-extproc:latest",
+			ExtProcLogLevel: "debug",
 		}, false,
 	)
+	// Pre-create Gateways (without reconciling) before reconciling resources so that
+	// syncGateways can resolve the parent Gateway via the fake client.
+	// Otherwise the reconcile would fail with "gateway not found" because the
+	// Gateway is not yet present in the cache at this point.
+	for _, gw := range gws {
+		mustCreate(ctx, fakeClient, gw, logger)
+	}
 	// Create and reconcile the custom resources to store the translated objects.
 	// Note that the order of creation is important as some objects depend on others.
 	for _, btp := range backendTLSPolicies {
 		mustCreate(ctx, fakeClient, btp, logger)
+	}
+	// ReferenceGrants go in the controller-runtime client, which is where the controllers look them up.
+	for _, rg := range referenceGrants {
+		mustCreate(ctx, fakeClient, rg, logger)
 	}
 	for _, bsp := range backendSecurityPolicies {
 		mustCreateAndReconcile(ctx, fakeClient, bsp, bspC, logger)
@@ -267,7 +290,7 @@ func translateCustomResourceObjects(
 		mustCreateAndReconcile(ctx, fakeClient, mcpRoute, mcpC, logger)
 	}
 	for _, gw := range gws {
-		mustCreateAndReconcile(ctx, fakeClient, gw, gwC, logger)
+		mustReconcile(ctx, gw, gwC, logger)
 	}
 
 	// Now you can retrieve the translated objects from the fake client.
@@ -347,6 +370,16 @@ func mustCreateAndReconcile(
 	logger *slog.Logger,
 ) {
 	mustCreate(ctx, fakeClient, obj, logger)
+	mustReconcile(ctx, obj, c, logger)
+}
+
+// mustReconcile reconciles the object using the provided reconciler.
+func mustReconcile(
+	ctx context.Context,
+	obj client.Object,
+	c reconcile.TypedReconciler[reconcile.Request],
+	logger *slog.Logger,
+) {
 	logger.Info("Fake reconciling", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
 	_, err := c.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}})
 	if err != nil {

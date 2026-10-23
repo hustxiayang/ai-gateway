@@ -24,17 +24,17 @@ type GenerateContentRequest struct {
 	// This config is shared for all tools provided in the request.
 	//
 	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L1466
-	ToolConfig *genai.ToolConfig `json:"tool_config,omitempty"`
+	ToolConfig *genai.ToolConfig `json:"toolConfig,omitempty"`
 	// Optional. Generation config.
 	// You can find API default values and more details at https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#generationconfig
 	// and https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/content-generation-parameters.
-	GenerationConfig *genai.GenerationConfig `json:"generation_config,omitempty"`
+	GenerationConfig *genai.GenerationConfig `json:"generationConfig,omitempty"`
 	// Optional. Instructions for the model to steer it toward better performance.
 	// For example, "Answer as concisely as possible" or "Don't use technical
 	// terms in your response".
 	//
 	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L858
-	SystemInstruction *genai.Content `json:"system_instruction,omitempty"`
+	SystemInstruction *genai.Content `json:"systemInstruction,omitempty"`
 	// Optional: Safety settings in the request to block unsafe content in the response.
 	//
 	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L1057
@@ -150,4 +150,24 @@ type EmbedContentEmbedding struct {
 type EmbedContentUsageMetadata struct {
 	PromptTokenCount int `json:"promptTokenCount,omitempty"`
 	TotalTokenCount  int `json:"totalTokenCount,omitempty"`
+}
+
+// CountTokenRequest represents the Vertex AI CountTokens API request.
+// The Vertex AI API expects a flat structure (not nested config).
+// The request-body fields (contents, tools, systemInstruction, generationConfig) are
+// documented as optional in the REST API reference:
+// https://cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/projects.locations.publishers.models/countTokens
+type CountTokenRequest struct {
+	// The content to count tokens for.
+	// https://github.com/googleapis/go-genai/blob/6a8184fcaf8bf15f0c566616a7b356560309be9b/types.go#L858
+	Contents []genai.Content `json:"contents"`
+
+	// Optional. Instructions for the model to steer it toward better performance.
+	SystemInstruction *genai.Content `json:"systemInstruction,omitempty"`
+
+	// Optional. Code that enables the system to interact with external systems.
+	Tools []genai.Tool `json:"tools,omitempty"`
+
+	// Optional. Configuration that the model uses to generate the response.
+	GenerationConfig *genai.GenerationConfig `json:"generationConfig,omitempty"`
 }
