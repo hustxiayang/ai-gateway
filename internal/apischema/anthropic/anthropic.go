@@ -1657,6 +1657,7 @@ const (
 	MessagesStreamChunkTypeContentBlockStart MessagesStreamChunkType = "content_block_start"
 	MessagesStreamChunkTypeContentBlockDelta MessagesStreamChunkType = "content_block_delta"
 	MessagesStreamChunkTypeContentBlockStop  MessagesStreamChunkType = "content_block_stop"
+	MessagesStreamChunkTypePing              MessagesStreamChunkType = "ping"
 )
 
 type (
@@ -1756,6 +1757,8 @@ func (m *MessagesStreamChunk) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("failed to unmarshal content block stop in stream event: %w", err)
 		}
 		m.ContentBlockStop = &contentBlockStop
+	case MessagesStreamChunkTypePing:
+		// Keepalive event with no payload, accepted so it is forwarded rather than treated as unknown.
 	default:
 		return fmt.Errorf("unknown stream event type: %s", typ)
 	}
