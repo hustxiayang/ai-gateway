@@ -1259,6 +1259,25 @@ func TestUserMsgToGeminiParts(t *testing.T) {
 			expectedErrMsg: "invalid file data URI",
 		},
 		{
+			name: "file content - data URI without MIME type",
+			msg: openai.ChatCompletionUserMessageParam{
+				Role: openai.ChatMessageRoleUser,
+				Content: openai.StringOrUserRoleContentUnion{
+					Value: []openai.ChatCompletionContentPartUserUnionParam{
+						{
+							OfFile: &openai.ChatCompletionContentPartFileParam{
+								Type: "file",
+								File: openai.ChatCompletionContentPartFileFileParam{
+									FileData: "data:," + base64.StdEncoding.EncodeToString([]byte("fake-pdf")),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrMsg: "file data URI must specify a MIME type",
+		},
+		{
 			name: "mixed content - text, audio, and file",
 			msg: openai.ChatCompletionUserMessageParam{
 				Role: openai.ChatMessageRoleUser,

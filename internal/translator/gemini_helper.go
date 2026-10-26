@@ -251,7 +251,10 @@ func userMsgToGeminiParts(msg openai.ChatCompletionUserMessageParam, requestMode
 				}
 				mimeType, fileBytes, err := parseDataURI(file.FileData)
 				if err != nil {
-					return nil, fmt.Errorf("%w: invalid file data URI", internalapi.ErrInvalidRequestBody)
+					return nil, fmt.Errorf("%w: invalid file data URI: %w", internalapi.ErrInvalidRequestBody, err)
+				}
+				if mimeType == "" {
+					return nil, fmt.Errorf("%w: file data URI must specify a MIME type", internalapi.ErrInvalidRequestBody)
 				}
 				parts = append(parts, genai.NewPartFromBytes(fileBytes, mimeType))
 			}
