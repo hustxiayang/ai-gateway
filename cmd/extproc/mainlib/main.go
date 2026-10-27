@@ -309,6 +309,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	embeddingsMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationEmbedding)
 	imageGenerationMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationImageGeneration)
 	responsesMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationResponses)
+	decisionsMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationDecisions)
 	speechMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationSpeech)
 	transcriptionMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationTranscription)
 	translationMetricsFactory := metrics.NewMetricsFactory(meter, metricsRequestHeaderAttributes, metrics.GenAIOperationTranslation)
@@ -333,6 +334,8 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		embeddingsMetricsFactory, tracing.EmbeddingsTracer(), endpointspec.EmbeddingsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses"), extproc.NewFactory(
 		responsesMetricsFactory, tracing.ResponsesTracer(), endpointspec.ResponsesEndpointSpec{}))
+	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/decisions"), extproc.NewFactory(
+		decisionsMetricsFactory, tracing.DecisionsTracer(), endpointspec.DecisionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/responses/input_tokens"), extproc.NewFactory(
 		responsesInputTokensMetricsFactory, tracing.ResponsesInputTokensTracer(), endpointspec.ResponsesInputTokensEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/audio/speech"), extproc.NewFactory(
@@ -364,13 +367,9 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 
 	var mcpServer *http.Server
 	if mcpLis != nil {
-		if flags.mcpSessionEncryptionSeed == defaultInsecureMCPSessionEncryptionSeed {
-			l.Warn("MCP session encryption seed is set to the well-known default value; " +
-				"this allows anyone who knows this public default to decrypt and forge MCP session IDs " +
-				"(including the anti-hijacking subject embedded in them). Set --mcpSessionEncryptionSeed " +
-				"(or the Helm value controller.mcp.sessionEncryption.seed) to a secret, randomly-generated " +
-				"value before exposing this gateway to untrusted or multi-tenant clients.")
-		}
+		// The session crypto built from the flags is only used when the filter config does not carry
+		// its own session encryption config. The controller delivers the seeds through the filter
+		// config so that they are not exposed in the Pod spec or the process command line.
 		mcpSessionCrypto := mcpproxy.NewPBKDF2AesGcmSessionCrypto(flags.mcpSessionEncryptionSeed, flags.mcpSessionEncryptionIterations)
 		if flags.mcpFallbackSessionEncryptionSeed != "" {
 			mcpSessionCrypto = &mcpproxy.FallbackEnabledSessionCrypto{
@@ -389,7 +388,8 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		if err != nil {
 			return fmt.Errorf("failed to create MCP proxy: %w", err)
 		}
-		if err = filterapi.StartConfigBundleWatcher(ctx, flags.configBundlePath, mcpProxyConfig, l, time.Second*5); err != nil {
+		mcpConfigReceiver := &insecureSeedWarner{ConfigReceiver: mcpProxyConfig, l: l, flagSeed: flags.mcpSessionEncryptionSeed}
+		if err = filterapi.StartConfigBundleWatcher(ctx, flags.configBundlePath, mcpConfigReceiver, l, time.Second*5); err != nil {
 			return fmt.Errorf("failed to start config watcher: %w", err)
 		}
 
@@ -472,4 +472,33 @@ func listenAddress(addrFlag string) (string, string) {
 		return "unix", p
 	}
 	return "tcp", addrFlag
+}
+
+// insecureSeedWarner wraps a [filterapi.ConfigReceiver] and warns once when the effective MCP session
+// encryption seed is the well-known default. The effective seed is the one delivered in the filter config,
+// or the one from the command line flags when the filter config does not carry one.
+type insecureSeedWarner struct {
+	filterapi.ConfigReceiver
+	l        *slog.Logger
+	flagSeed string
+	warned   bool
+}
+
+// LoadConfig implements [filterapi.ConfigReceiver.LoadConfig].
+func (w *insecureSeedWarner) LoadConfig(ctx context.Context, config *filterapi.Config) error {
+	if !w.warned && config.MCPConfig != nil {
+		seed := w.flagSeed
+		if e := config.MCPConfig.SessionEncryption; e != nil {
+			seed = e.Seed
+		}
+		if seed == defaultInsecureMCPSessionEncryptionSeed {
+			w.warned = true
+			w.l.Warn("MCP session encryption seed is set to the well-known default value; " +
+				"this allows anyone who knows this public default to decrypt and forge MCP session IDs " +
+				"(including the anti-hijacking subject embedded in them). Set --mcpSessionEncryptionSeed " +
+				"(or the Helm value controller.mcp.sessionEncryption.seed) to a secret, randomly-generated " +
+				"value before exposing this gateway to untrusted or multi-tenant clients.")
+		}
+	}
+	return w.ConfigReceiver.LoadConfig(ctx, config)
 }
