@@ -738,10 +738,9 @@ func (TokenizeEndpointSpec) RedactSensitiveInfoFromRequest(req *tokenize.Request
 		for i, msg := range req.Messages {
 			redactedOfChat.Messages[i] = redactMessage(msg)
 		}
-		// Template and multimodal processor kwargs are free-form and may carry user data.
+		// Template kwargs are rendered into the prompt and may carry user data.
 		redactedOfChat.ChatTemplateKwargs = redactUnionField(req.ChatTemplateKwargs)
-		redactedOfChat.MmProcessorKwargs = redactUnionField(req.MmProcessorKwargs)
-		// ChatTemplate and Tools are developer-authored format/schema definitions, not user data — kept as-is.
+		// ChatTemplate, Tools, and MmProcessorKwargs are developer-authored format/schema/processor config, not user data — kept as-is.
 		redacted.ChatRequest = &redactedOfChat
 		redacted.CompletionRequest = nil
 	}

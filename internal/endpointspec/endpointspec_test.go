@@ -1898,17 +1898,15 @@ func TestTokenizeEndpointSpec_RedactSensitiveInfoFromRequest(t *testing.T) {
 		require.Contains(t, out, "[REDACTED")
 	})
 
-	t.Run("chat template and mm processor kwargs", func(t *testing.T) {
+	t.Run("chat template kwargs", func(t *testing.T) {
 		const markerTmpl = "tokenize-template-kwarg-marker"
-		const markerMm = "tokenize-mm-kwarg-marker"
-		body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"documents":["` + markerTmpl + `"]},"mm_processor_kwargs":{"k":"` + markerMm + `"}}`
+		body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"documents":["` + markerTmpl + `"]}}`
 		_, req, _, _, err := TokenizeEndpointSpec{}.ParseBody([]byte(body), false)
 		require.NoError(t, err)
 		redacted, err := TokenizeEndpointSpec{}.RedactSensitiveInfoFromRequest(req)
 		require.NoError(t, err)
 		out := mustMarshal(t, redacted)
 		require.NotContains(t, out, markerTmpl)
-		require.NotContains(t, out, markerMm)
 		require.Contains(t, out, "[REDACTED")
 		require.Contains(t, mustMarshal(t, req), markerTmpl, "original must not be mutated")
 	})
