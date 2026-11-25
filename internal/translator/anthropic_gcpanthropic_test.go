@@ -577,7 +577,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 			name:          "message_delta chunk with token usage",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":84}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(0, 0, 0, 84, 84, -1),
+			expectedUsage: tokenUsageFrom(0, -1, -1, 84, 84, -1),
 		},
 		{
 			name:          "message_stop chunk without usage",
@@ -595,7 +595,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 			name:          "message_delta with decimal output_tokens",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42.0}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(0, 0, 0, 42, 42, -1),
+			expectedUsage: tokenUsageFrom(0, -1, -1, 42, 42, -1),
 		},
 	}
 
@@ -634,7 +634,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 		{
 			name:          "message_delta without usage field",
 			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
-			expectedUsage: tokenUsageFrom(0, 0, 0, 0, 0, -1),
+			expectedUsage: metrics.TokenUsage{},
 		},
 		{
 			name:          "invalid json in data",

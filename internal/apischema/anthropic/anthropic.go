@@ -1627,7 +1627,50 @@ type Usage struct {
 	// The number of input tokens which were used.
 	InputTokens float64 `json:"input_tokens"`
 	// The number of output tokens which were used.
-	OutputTokens float64 `json:"output_tokens"`
+	OutputTokens         float64 `json:"output_tokens"`
+	inputTokensPresent   bool
+	outputTokensPresent  bool
+	cacheReadPresent     bool
+	cacheCreationPresent bool
+}
+
+// UnmarshalJSON retains provider presence independently from the decoded numeric value.
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	type wireUsage Usage
+	var decoded wireUsage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*u = Usage(decoded)
+	u.inputTokensPresent = gjson.GetBytes(data, "input_tokens").Type == gjson.Number
+	u.outputTokensPresent = gjson.GetBytes(data, "output_tokens").Type == gjson.Number
+	u.cacheReadPresent = gjson.GetBytes(data, "cache_read_input_tokens").Type == gjson.Number
+	u.cacheCreationPresent = gjson.GetBytes(data, "cache_creation_input_tokens").Type == gjson.Number
+	return nil
+}
+
+// HasInputTokens also accepts nonzero counts in programmatically constructed usage.
+func (u Usage) HasInputTokens() bool { return u.inputTokensPresent || u.InputTokens != 0 }
+
+// HasOutputTokens distinguishes explicit zero from absent usage.
+func (u Usage) HasOutputTokens() bool { return u.outputTokensPresent || u.OutputTokens != 0 }
+
+// CacheReadTokens returns nil when the provider omitted the count.
+func (u Usage) CacheReadTokens() *int64 {
+	if !u.cacheReadPresent && u.CacheReadInputTokens == 0 {
+		return nil
+	}
+	value := int64(u.CacheReadInputTokens)
+	return &value
+}
+
+// CacheCreationTokens returns nil when the provider omitted the count.
+func (u Usage) CacheCreationTokens() *int64 {
+	if !u.cacheCreationPresent && u.CacheCreationInputTokens == 0 {
+		return nil
+	}
+	value := int64(u.CacheCreationInputTokens)
+	return &value
 }
 
 // CacheCreation contains cache creation input token counts split by cache TTL.
