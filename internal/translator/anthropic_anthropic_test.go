@@ -285,6 +285,7 @@ func TestAnthropicStreamingUsagePreservesCumulativeCounts(t *testing.T) {
 		{"zero placeholders", `"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":20`, `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, 129, 100, 20},
 		{"reported zeros", `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, 0, 0, 0},
 		{"cumulative increases", `"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":20`, `"input_tokens":12,"cache_read_input_tokens":120,"cache_creation_input_tokens":30`, 162, 120, 30},
+		{"negative placeholders", `"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":20`, `"input_tokens":-1,"cache_read_input_tokens":-1,"cache_creation_input_tokens":-1`, 129, 100, 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := NewAnthropicToAnthropicTranslator("", "")
@@ -298,6 +299,17 @@ func TestAnthropicStreamingUsagePreservesCumulativeCounts(t *testing.T) {
 			requireTokenUsageValue(t, 3, usage.OutputTokens)
 		})
 	}
+}
+
+func TestAnthropicStreamingNegativeDeltaDoesNotCreateCachePresence(t *testing.T) {
+	tr := NewAnthropicToAnthropicTranslator("", "")
+	tr.(*anthropicToAnthropicTranslator).stream = true
+	const body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"fixture\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":-1,\"cache_read_input_tokens\":-1,\"cache_creation_input_tokens\":-1,\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	_, _, usage, _, err := tr.ResponseBody(nil, strings.NewReader(body), false, nil)
+	require.NoError(t, err)
+	requireTokenUsageValue(t, 9, usage.InputTokens)
+	requireTokenUsageUnset(t, usage.CachedInputTokens)
+	requireTokenUsageUnset(t, usage.CacheCreationInputTokens)
 }
 
 func TestAnthropicToAnthropic_ResponseBody_streaming_usageOnMessageDelta(t *testing.T) {

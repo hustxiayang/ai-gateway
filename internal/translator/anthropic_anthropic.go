@@ -219,7 +219,11 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 		// Merge the input/cache counts per field rather than replacing the whole usage snapshot:
 		// a delta may report only the fields that apply, or zeros for inapplicable fields.
 		// Presence retains reported zeros; cumulative counts must not decrease from earlier values.
-		if u.HasInputTokens() || u.CacheReadTokens() != nil || u.CacheCreationTokens() != nil {
+		// Treat negative delta counts as omitted, preserving earlier usage and unknown-field presence.
+		inputPresent := u.HasInputTokens() && u.InputTokens >= 0
+		cacheReadPresent := u.CacheReadInputTokens >= 0 && u.CacheReadTokens() != nil
+		cacheCreationPresent := u.CacheCreationInputTokens >= 0 && u.CacheCreationTokens() != nil
+		if inputPresent || cacheReadPresent || cacheCreationPresent {
 			// The unified input_tokens is the sum of raw input + cache-read + cache-creation, so
 			// recover each known component and merge present cumulative values before recomputing the sum.
 			cacheRead, _ := a.streamingTokenUsage.CachedInputTokens()
@@ -230,14 +234,14 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 				rawInput = unifiedInput - cacheRead - cacheCreation
 			}
 
-			if u.HasInputTokens() {
+			if inputPresent {
 				rawInput = max(rawInput, uint32(u.InputTokens)) //nolint:gosec
 			}
-			if u.CacheReadTokens() != nil {
+			if cacheReadPresent {
 				cacheRead = max(cacheRead, uint32(u.CacheReadInputTokens)) //nolint:gosec
 				a.streamingTokenUsage.SetCachedInputTokens(cacheRead)
 			}
-			if u.CacheCreationTokens() != nil {
+			if cacheCreationPresent {
 				cacheCreation = max(cacheCreation, uint32(u.CacheCreationInputTokens)) //nolint:gosec
 				a.streamingTokenUsage.SetCacheCreationInputTokens(cacheCreation)
 			}
