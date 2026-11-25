@@ -2182,6 +2182,50 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		inner := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
 		require.NotContains(t, inner.Fields, "cache_details")
 	})
+
+	t.Run("cache_details preserves configured cost values", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			global       bool
+			route        bool
+			outputTokens uint32
+			cacheTokens  uint32
+		}{
+			{name: "global", global: true, outputTokens: 17, cacheTokens: 5},
+			{name: "route", route: true, outputTokens: 17, cacheTokens: 5},
+			{name: "route overrides global", global: true, route: true, outputTokens: 17, cacheTokens: 5},
+			{name: "zero cost", global: true, cacheTokens: 5},
+			{name: "zero cache count", global: true, outputTokens: 17},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				costs := &metrics.TokenUsage{}
+				costs.SetOutputTokens(tc.outputTokens)
+				costs.SetInputTokens(99)
+				costs.SetCacheCreation1hInputTokens(tc.cacheTokens)
+				var global []filterapi.RuntimeGlobalRequestCost
+				var route []filterapi.RuntimeRequestCost
+				if tc.global {
+					costType := filterapi.LLMRequestCostTypeOutputToken
+					if tc.route {
+						costType = filterapi.LLMRequestCostTypeInputToken
+					}
+					global = []filterapi.RuntimeGlobalRequestCost{{
+						GlobalLLMRequestCost: &filterapi.GlobalLLMRequestCost{Type: costType, MetadataKey: "cache_details"},
+					}}
+				}
+				if tc.route {
+					route = []filterapi.RuntimeRequestCost{{
+						LLMRequestCost: &filterapi.LLMRequestCost{Type: filterapi.LLMRequestCostTypeOutputToken, MetadataKey: "cache_details", RouteName: "route-a"},
+					}}
+				}
+				md, err := buildDynamicMetadata(global, route, costs, nil, "", "route-a", "")
+				require.NoError(t, err)
+				value := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields["cache_details"]
+				require.IsType(t, &structpb.Value_NumberValue{}, value.Kind)
+				require.Equal(t, float64(tc.outputTokens), value.GetNumberValue())
+			})
+		}
+	})
 }
 
 func Test_buildBackendDynamicMetadata(t *testing.T) {

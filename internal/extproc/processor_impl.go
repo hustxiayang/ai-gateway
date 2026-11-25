@@ -1078,8 +1078,11 @@ func buildDynamicMetadataWithBackendIdentity(globalRequestCosts []filterapi.Runt
 
 	// cache_details carries the raw cache token counts, since a single cost value collapses the
 	// cache read and the per-TTL cache write tokens. Only values reported by the provider are emitted.
-	if cacheDetails := buildCacheDetails(costs); cacheDetails != nil {
-		metadata["cache_details"] = structpb.NewStructValue(cacheDetails)
+	// A configured cost may already own this key; preserve its numeric value for downstream consumers.
+	if _, exists := metadata["cache_details"]; !exists {
+		if cacheDetails := buildCacheDetails(costs); cacheDetails != nil {
+			metadata["cache_details"] = structpb.NewStructValue(cacheDetails)
+		}
 	}
 
 	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
