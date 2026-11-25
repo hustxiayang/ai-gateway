@@ -277,6 +277,29 @@ func requireTokenUsageUnset(t *testing.T, getter func() (uint32, bool)) {
 	require.Zero(t, value)
 }
 
+func TestAnthropicStreamingUsagePreservesCumulativeCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, delta    string
+		input, read, creation uint32
+	}{
+		{"zero placeholders", `"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":20`, `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, 129, 100, 20},
+		{"reported zeros", `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, `"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`, 0, 0, 0},
+		{"cumulative increases", `"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":20`, `"input_tokens":12,"cache_read_input_tokens":120,"cache_creation_input_tokens":30`, 162, 120, 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewAnthropicToAnthropicTranslator("", "")
+			tr.(*anthropicToAnthropicTranslator).stream = true
+			body := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"fixture\",\"usage\":{" + tc.start + ",\"output_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{" + tc.delta + ",\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+			_, _, usage, _, err := tr.ResponseBody(nil, strings.NewReader(body), false, nil)
+			require.NoError(t, err)
+			requireTokenUsageValue(t, tc.input, usage.InputTokens)
+			requireTokenUsageValue(t, tc.read, usage.CachedInputTokens)
+			requireTokenUsageValue(t, tc.creation, usage.CacheCreationInputTokens)
+			requireTokenUsageValue(t, 3, usage.OutputTokens)
+		})
+	}
+}
+
 func TestAnthropicToAnthropic_ResponseBody_streaming_usageOnMessageDelta(t *testing.T) {
 	// Some Anthropic-compatible streaming backends report the final input/cache usage only on the
 	// message_delta event rather than message_start. The translator must merge those fields instead
