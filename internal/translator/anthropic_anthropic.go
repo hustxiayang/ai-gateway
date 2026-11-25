@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/tidwall/sjson"
-	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -141,8 +140,8 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 			int64(usage.InputTokens),
 			int64(usage.OutputTokens),
-			ptr.To(int64(usage.CacheReadInputTokens)),
-			ptr.To(int64(usage.CacheCreationInputTokens)),
+			usage.CacheReadTokens(),
+			usage.CacheCreationTokens(),
 		)
 		if usage.CacheCreation != nil {
 			applyCacheCreationTTLUsageFromPassthroughUsage(&tokenUsage,
@@ -198,8 +197,8 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 			messageStartUsage := metrics.ExtractTokenUsageFromExplicitCaching(
 				int64(u.InputTokens),
 				int64(u.OutputTokens),
-				ptr.To(int64(u.CacheReadInputTokens)),
-				ptr.To(int64(u.CacheCreationInputTokens)),
+				u.CacheReadTokens(),
+				u.CacheCreationTokens(),
 			)
 			// Override with message_start usage (contains input tokens and initial state)
 			a.streamingTokenUsage.Override(messageStartUsage)
@@ -214,17 +213,19 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 		u := eventUnion.MessageDelta.Usage
 		// message_delta usage counters are cumulative. Update output and merge any input/cache
 		// aggregates that are present without changing TTL-specific values captured earlier.
-		if u.OutputTokens >= 0 {
+		if u.HasOutputTokens() && u.OutputTokens >= 0 {
 			a.streamingTokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
 		}
 		// Merge the input/cache counts per field rather than replacing the whole usage snapshot:
-		// a delta may report only the fields that apply (the rest arrive as zero), so overwriting
-		// every field would clobber values already set on message_start. We can only treat a field
-		// as "present" when it is non-zero, since the upstream usage fields are not pointers.
-		if u.InputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
+		// a delta may report only the fields that apply, or zeros for inapplicable fields.
+		// Presence retains reported zeros; cumulative counts must not decrease from earlier values.
+		// Treat negative delta counts as omitted, preserving earlier usage and unknown-field presence.
+		inputPresent := u.HasInputTokens() && u.InputTokens >= 0
+		cacheReadPresent := u.CacheReadInputTokens >= 0 && u.CacheReadTokens() != nil
+		cacheCreationPresent := u.CacheCreationInputTokens >= 0 && u.CacheCreationTokens() != nil
+		if inputPresent || cacheReadPresent || cacheCreationPresent {
 			// The unified input_tokens is the sum of raw input + cache-read + cache-creation, so
-			// recover the latest known value of each component and overwrite only the ones present
-			// on this delta before recomputing the sum.
+			// recover each known component and merge present cumulative values before recomputing the sum.
 			cacheRead, _ := a.streamingTokenUsage.CachedInputTokens()
 			cacheCreation, _ := a.streamingTokenUsage.CacheCreationInputTokens()
 			unifiedInput, _ := a.streamingTokenUsage.InputTokens()
@@ -233,18 +234,18 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 				rawInput = unifiedInput - cacheRead - cacheCreation
 			}
 
-			if u.InputTokens > 0 {
-				rawInput = uint32(u.InputTokens) //nolint:gosec
+			if inputPresent {
+				rawInput = max(rawInput, uint32(u.InputTokens)) //nolint:gosec
 			}
-			if u.CacheReadInputTokens > 0 {
-				cacheRead = uint32(u.CacheReadInputTokens) //nolint:gosec
+			if cacheReadPresent {
+				cacheRead = max(cacheRead, uint32(u.CacheReadInputTokens)) //nolint:gosec
+				a.streamingTokenUsage.SetCachedInputTokens(cacheRead)
 			}
-			if u.CacheCreationInputTokens > 0 {
-				cacheCreation = uint32(u.CacheCreationInputTokens) //nolint:gosec
+			if cacheCreationPresent {
+				cacheCreation = max(cacheCreation, uint32(u.CacheCreationInputTokens)) //nolint:gosec
+				a.streamingTokenUsage.SetCacheCreationInputTokens(cacheCreation)
 			}
 
-			a.streamingTokenUsage.SetCachedInputTokens(cacheRead)
-			a.streamingTokenUsage.SetCacheCreationInputTokens(cacheCreation)
 			a.streamingTokenUsage.SetInputTokens(rawInput + cacheRead + cacheCreation)
 		}
 	}
@@ -260,16 +261,6 @@ func (a *anthropicToAnthropicTranslator) updateTotalTokens() {
 		a.streamingTokenUsage.SetInputTokens(0)
 		inputTokens = 0
 		inputSet = true
-	}
-
-	// Set cached tokens to 0 if not set but we have other token data
-	if outputSet {
-		if _, cachedSet := a.streamingTokenUsage.CachedInputTokens(); !cachedSet {
-			a.streamingTokenUsage.SetCachedInputTokens(0)
-		}
-		if _, cachedSet := a.streamingTokenUsage.CacheCreationInputTokens(); !cachedSet {
-			a.streamingTokenUsage.SetCacheCreationInputTokens(0)
-		}
 	}
 
 	if inputSet && outputSet {

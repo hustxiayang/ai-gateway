@@ -60,6 +60,18 @@ func applyCacheCreationTTLUsageFromAnthropicSDKUsage(tokenUsage *metrics.TokenUs
 	tokenUsage.SetCacheCreation1hInputTokens(uint32(usage.CacheCreation.Ephemeral1hInputTokens)) //nolint:gosec
 }
 
+// extractAnthropicSDKTokenUsage preserves absent cache aggregates and explicitly reported zeros.
+func extractAnthropicSDKTokenUsage(usage *anthropic.Usage) metrics.TokenUsage {
+	var read, creation *int64
+	if usage.JSON.CacheReadInputTokens.Valid() || usage.CacheReadInputTokens != 0 {
+		read = &usage.CacheReadInputTokens
+	}
+	if usage.JSON.CacheCreationInputTokens.Valid() || usage.CacheCreationInputTokens != 0 {
+		creation = &usage.CacheCreationInputTokens
+	}
+	return metrics.ExtractTokenUsageFromExplicitCaching(usage.InputTokens, usage.OutputTokens, read, creation)
+}
+
 func openAIUsageFromTokenUsage(tokenUsage *metrics.TokenUsage) openai.Usage {
 	inputTokens, _ := tokenUsage.InputTokens()
 	outputTokens, _ := tokenUsage.OutputTokens()
@@ -1157,12 +1169,7 @@ func (p *anthropicStreamParser) handleAnthropicStreamEvent(eventType []byte, dat
 		p.activeMessageID = event.Message.ID
 		p.created = openai.JSONUNIXTime(time.Now())
 		u := event.Message.Usage
-		usage := metrics.ExtractTokenUsageFromExplicitCaching(
-			u.InputTokens,
-			u.OutputTokens,
-			&u.CacheReadInputTokens,
-			&u.CacheCreationInputTokens,
-		)
+		usage := extractAnthropicSDKTokenUsage(&u)
 		applyCacheCreationTTLUsageFromAnthropicSDKUsage(&usage, &u)
 		p.tokenUsage = usage
 
@@ -1383,12 +1390,7 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 		Created: openai.JSONUNIXTime(time.Now()),
 	}
 	usage := anthropicResp.Usage
-	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
-		usage.InputTokens,
-		usage.OutputTokens,
-		&usage.CacheReadInputTokens,
-		&usage.CacheCreationInputTokens,
-	)
+	tokenUsage = extractAnthropicSDKTokenUsage(&usage)
 	applyCacheCreationTTLUsageFromAnthropicSDKUsage(&tokenUsage, &usage)
 	tokenUsage.SetReasoningTokens(uint32(usage.OutputTokensDetails.ThinkingTokens)) //nolint:gosec
 	openAIResp.Usage = openAIUsageFromTokenUsage(&tokenUsage)

@@ -76,8 +76,10 @@ func TestMessageContent_MessagesStreamChunk(t *testing.T) {
 					Model:        "claude-sonnet-4-5-20250929",
 					StopSequence: nil,
 					Usage: &Usage{
-						InputTokens:  472,
-						OutputTokens: 2,
+						InputTokens:         472,
+						OutputTokens:        2,
+						inputTokensPresent:  true,
+						outputTokensPresent: true,
 					},
 					Content:    []MessagesContentBlock{},
 					StopReason: nil,
@@ -184,7 +186,8 @@ func TestMessageContent_MessagesStreamChunk(t *testing.T) {
 						StopSequence: "",
 					},
 					Usage: Usage{
-						OutputTokens: 89,
+						OutputTokens:        89,
+						outputTokensPresent: true,
 					},
 				},
 			},
